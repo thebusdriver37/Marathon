@@ -1,0 +1,228 @@
+diff --git a/codex-rs/models-manager/src/manager.rs b/codex-rs/models-manager/src/manager.rs
+index 5859830310..459e650dc4 100644
+--- a/codex-rs/models-manager/src/manager.rs
++++ b/codex-rs/models-manager/src/manager.rs
+@@ -9,7 +9,10 @@ use codex_protocol::error::Result as CoreResult;
+ use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::openai_models::ModelPreset;
+ use codex_protocol::openai_models::ModelsResponse;
++use std::env;
+ use std::fmt;
++use std::fs;
++use std::path::Path;
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ use std::time::Duration;
+@@ -21,6 +24,8 @@ use tracing::info;
+ 
+ const MODEL_CACHE_FILE: &str = "models_cache.json";
+ const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
++const EXTRA_MODELS_PATH_ENV: &str = "CODEX_EXTRA_MODELS_PATH";
++const MARATHON_MODELS_PATH_ENV: &str = "MARATHON_MODELS_PATH";
+ 
+ /// Remote endpoint used by the OpenAI-compatible model manager.
+ ///
+@@ -320,16 +325,7 @@ impl OpenAiModelsManager {
+     /// Replace the cached remote models and rebuild the derived presets list.
+     async fn apply_remote_models(&self, models: Vec<ModelInfo>) {
+         let mut existing_models = load_remote_models_from_file().unwrap_or_default();
+-        for model in models {
+-            if let Some(existing_index) = existing_models
+-                .iter()
+-                .position(|existing| existing.slug == model.slug)
+-            {
+-                existing_models[existing_index] = model;
+-            } else {
+-                existing_models.push(model);
+-            }
+-        }
++        merge_model_catalog(&mut existing_models, models);
+         *self.remote_models.write().await = existing_models;
+     }
+ 
+@@ -388,7 +384,51 @@ impl ModelsManager for StaticModelsManager {
+ }
+ 
+ fn load_remote_models_from_file() -> Result<Vec<ModelInfo>, std::io::Error> {
+-    Ok(crate::bundled_models_response()?.models)
++    let mut models = crate::bundled_models_response()?.models;
++
++    for path in extra_model_catalog_paths() {
++        match load_extra_models_from_path(&path) {
++            Ok(extra_models) => merge_model_catalog(&mut models, extra_models),
++            Err(err) => error!(
++                path = %path.display(),
++                "failed to load extra model metadata: {err}"
++            ),
++        }
++    }
++
++    Ok(models)
++}
++
++fn extra_model_catalog_paths() -> Vec<PathBuf> {
++    [EXTRA_MODELS_PATH_ENV, MARATHON_MODELS_PATH_ENV]
++        .into_iter()
++        .filter_map(|key| env::var_os(key).filter(|value| !value.is_empty()))
++        .map(PathBuf::from)
++        .collect()
++}
++
++fn load_extra_models_from_path(path: &Path) -> Result<Vec<ModelInfo>, String> {
++    let raw = fs::read_to_string(path).map_err(|err| err.to_string())?;
++    let local_models: model_info::LocalModelsFile =
++        serde_json::from_str(&raw).map_err(|err| err.to_string())?;
++    Ok(local_models
++        .models
++        .into_iter()
++        .map(model_info::model_info_from_local_profile)
++        .collect())
++}
++
++fn merge_model_catalog(existing_models: &mut Vec<ModelInfo>, models: Vec<ModelInfo>) {
++    for model in models {
++        if let Some(existing_index) = existing_models
++            .iter()
++            .position(|existing| existing.slug == model.slug)
++        {
++            existing_models[existing_index] = model;
++        } else {
++            existing_models.push(model);
++        }
++    }
+ }
+ 
+ fn default_model_from_available(available: Vec<ModelPreset>) -> String {
+diff --git a/codex-rs/models-manager/src/model_info.rs b/codex-rs/models-manager/src/model_info.rs
+index 8e8abae549..cc160e7ddb 100644
+--- a/codex-rs/models-manager/src/model_info.rs
++++ b/codex-rs/models-manager/src/model_info.rs
+@@ -11,6 +11,7 @@ use codex_protocol::openai_models::default_input_modalities;
+ 
+ use crate::config::ModelsManagerConfig;
+ use codex_utils_output_truncation::approx_bytes_for_tokens;
++use serde::Deserialize;
+ use tracing::warn;
+ 
+ pub const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
+@@ -20,6 +21,82 @@ const LOCAL_FRIENDLY_TEMPLATE: &str =
+ const LOCAL_PRAGMATIC_TEMPLATE: &str = "You are a deeply pragmatic, effective software engineer.";
+ const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
+ 
++#[derive(Clone, Deserialize)]
++pub(crate) struct LocalModelsFile {
++    pub models: Vec<LocalModelProfile>,
++}
++
++#[derive(Clone, Deserialize)]
++pub(crate) struct LocalModelProfile {
++    pub slug: String,
++    pub display_name: String,
++    pub description: Option<String>,
++    pub context_window: i64,
++    pub max_context_window: Option<i64>,
++    pub auto_compact_token_limit: Option<i64>,
++    pub truncation_limit: Option<i64>,
++    #[serde(default = "default_local_priority")]
++    pub priority: i32,
++    #[serde(default = "default_local_visibility")]
++    pub visibility: ModelVisibility,
++    #[serde(default)]
++    pub supports_parallel_tool_calls: bool,
++    #[serde(default)]
++    pub supports_reasoning_summaries: bool,
++    #[serde(default)]
++    pub supports_search_tool: bool,
++}
++
++const fn default_local_priority() -> i32 {
++    50
++}
++
++const fn default_local_visibility() -> ModelVisibility {
++    ModelVisibility::List
++}
++
++pub(crate) fn model_info_from_local_profile(profile: LocalModelProfile) -> ModelInfo {
++    let max_context_window = profile.max_context_window.unwrap_or(profile.context_window);
++    let auto_compact_token_limit = profile
++        .auto_compact_token_limit
++        .unwrap_or(profile.context_window * 9 / 10);
++    let truncation_limit = profile.truncation_limit.unwrap_or(auto_compact_token_limit);
++
++    ModelInfo {
++        slug: profile.slug,
++        display_name: profile.display_name,
++        description: profile.description,
++        default_reasoning_level: None,
++        supported_reasoning_levels: Vec::new(),
++        shell_type: ConfigShellToolType::Default,
++        visibility: profile.visibility,
++        supported_in_api: true,
++        priority: profile.priority,
++        additional_speed_tiers: Vec::new(),
++        availability_nux: None,
++        upgrade: None,
++        base_instructions: BASE_INSTRUCTIONS.to_string(),
++        model_messages: None,
++        supports_reasoning_summaries: profile.supports_reasoning_summaries,
++        default_reasoning_summary: ReasoningSummary::None,
++        support_verbosity: false,
++        default_verbosity: None,
++        apply_patch_tool_type: None,
++        web_search_tool_type: WebSearchToolType::Text,
++        truncation_policy: TruncationPolicyConfig::tokens(truncation_limit),
++        supports_parallel_tool_calls: profile.supports_parallel_tool_calls,
++        supports_image_detail_original: false,
++        context_window: Some(profile.context_window),
++        max_context_window: Some(max_context_window),
++        auto_compact_token_limit: Some(auto_compact_token_limit),
++        effective_context_window_percent: 95,
++        experimental_supported_tools: Vec::new(),
++        input_modalities: vec![codex_protocol::openai_models::InputModality::Text],
++        used_fallback_model_metadata: false,
++        supports_search_tool: profile.supports_search_tool,
++    }
++}
++
+ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig) -> ModelInfo {
+     if let Some(supports_reasoning_summaries) = config.model_supports_reasoning_summaries
+         && supports_reasoning_summaries
+diff --git a/codex-rs/models-manager/src/model_info_tests.rs b/codex-rs/models-manager/src/model_info_tests.rs
+index 70ad3da8df..a1f35a3adb 100644
+--- a/codex-rs/models-manager/src/model_info_tests.rs
++++ b/codex-rs/models-manager/src/model_info_tests.rs
+@@ -72,3 +72,33 @@ fn model_context_window_uses_model_value_without_override() {
+ 
+     assert_eq!(updated, model);
+ }
++
++#[test]
++fn local_model_profile_builds_non_fallback_model_info() {
++    let local_models: LocalModelsFile = serde_json::from_str(
++        r#"{
++            "models": [{
++                "slug": "local-coder-128k",
++                "display_name": "Local Coder 128K",
++                "description": "Local model served by llama.cpp.",
++                "context_window": 131072,
++                "auto_compact_token_limit": 115000,
++                "truncation_limit": 110000,
++                "priority": 10
++            }]
++        }"#,
++    )
++    .expect("local models metadata should parse");
++
++    let model = model_info_from_local_profile(local_models.models[0].clone());
++
++    assert_eq!(model.slug, "local-coder-128k");
++    assert_eq!(model.context_window, Some(131_072));
++    assert_eq!(model.max_context_window, Some(131_072));
++    assert_eq!(model.auto_compact_token_limit, Some(115_000));
++    assert_eq!(
++        model.truncation_policy,
++        TruncationPolicyConfig::tokens(110_000)
++    );
++    assert!(!model.used_fallback_model_metadata);
++}

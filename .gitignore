@@ -1,0 +1,7 @@
+/.marathon/
+/logs/
+/third_party/
+/target/
+*.log
+__pycache__/
+*.pyc

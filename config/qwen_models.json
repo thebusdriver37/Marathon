@@ -1,0 +1,31 @@
+{
+  "models": [
+    {
+      "slug": "qwen3.6-27b-q4-128k",
+      "display_name": "Qwen3.6 27B Q4 128K",
+      "description": "Local Qwen3.6 27B Q4 profile served by llama.cpp with a 128K context window.",
+      "context_window": 131072,
+      "auto_compact_token_limit": 115000,
+      "truncation_limit": 110000,
+      "priority": 10
+    },
+    {
+      "slug": "qwen3.6-27b-q4",
+      "display_name": "Qwen3.6 27B Q4",
+      "description": "Local Qwen3.6 27B Q4 fast profile served by llama.cpp.",
+      "context_window": 32768,
+      "auto_compact_token_limit": 28000,
+      "truncation_limit": 26000,
+      "priority": 11
+    },
+    {
+      "slug": "qwen3.6-35b-a3b",
+      "display_name": "Qwen3.6 35B A3B",
+      "description": "Local Qwen3.6 35B A3B specialist profile served by llama.cpp.",
+      "context_window": 32768,
+      "auto_compact_token_limit": 28000,
+      "truncation_limit": 26000,
+      "priority": 12
+    }
+  ]
+}

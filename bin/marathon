@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  cat <<EOF
+Usage: marathon [command] [codex args...]
+
+Commands:
+  chat         Launch the default local Codex TUI (default)
+  128k         Launch Qwen3.6 27B Q4 128K
+  fast         Launch Qwen3.6 27B Q4 32K
+  a3b          Launch Qwen3.6 35B A3B
+  exec         Run headless Codex exec against the default local model
+  build        Apply Codex patches and build the local Codex binary
+  setup-llama  Clone/build llama.cpp with CUDA
+  sweep-128k   Run the focused 128K server config sweep
+
+Environment:
+  MARATHON_MODELS_DIR       Base directory for GGUF files (default: ~/models)
+  QWEN36_27B_GGUF           Exact Qwen3.6 27B GGUF path
+  QWEN36_35B_A3B_GGUF       Exact Qwen3.6 35B A3B GGUF path
+  LLAMACPP_BIN              Exact llama-server binary path
+EOF
+}
+
+cmd="${1:-chat}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+case "$cmd" in
+  chat)
+    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" "$@"
+    ;;
+  128k)
+    exec "$ROOT_DIR/scripts/launchers/start_128k.sh" "$@"
+    ;;
+  fast)
+    exec "$ROOT_DIR/scripts/launchers/start_fast.sh" "$@"
+    ;;
+  a3b)
+    exec "$ROOT_DIR/scripts/launchers/start_a3b.sh" "$@"
+    ;;
+  exec)
+    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" exec "$@"
+    ;;
+  build)
+    exec "$ROOT_DIR/scripts/build_codex.sh" "$@"
+    ;;
+  setup-llama)
+    exec "$ROOT_DIR/scripts/ops/setup_llamacpp.sh" "$@"
+    ;;
+  sweep-128k)
+    exec "$ROOT_DIR/scripts/benchmarks/qwen36_128k_server_sweep.py" "$@"
+    ;;
+  help|--help|-h)
+    usage
+    ;;
+  *)
+    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" "$cmd" "$@"
+    ;;
+esac
