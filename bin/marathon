@@ -12,8 +12,10 @@ Commands:
   128k         Launch Qwen3.6 27B Q4 128K
   fast         Launch Qwen3.6 27B Q4 32K
   a3b          Launch Qwen3.6 35B A3B
+  resume       Resume a previous Marathon interactive session
+  fork         Fork a previous Marathon interactive session
   exec         Run headless Codex exec against the default local model
-  build        Apply Codex patches and build the local Codex binary
+  build        Build the patched local Codex binary
   setup-llama  Clone/build llama.cpp with CUDA
   sweep-128k   Run the focused 128K server config sweep
 
@@ -42,6 +44,12 @@ case "$cmd" in
     ;;
   a3b)
     exec "$ROOT_DIR/scripts/launchers/start_a3b.sh" "$@"
+    ;;
+  resume)
+    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" resume "$@"
+    ;;
+  fork)
+    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" fork "$@"
     ;;
   exec)
     exec "$ROOT_DIR/scripts/launchers/start_codex.sh" exec "$@"

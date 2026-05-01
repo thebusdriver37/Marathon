@@ -5,7 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROUTER_HOST="${MARATHON_PROXY_HOST:-${CODEX_QWEN_PROXY_HOST:-127.0.0.1}}"
 ROUTER_PORT="${MARATHON_PROXY_PORT:-${CODEX_QWEN_PROXY_PORT:-18111}}"
 DEFAULT_MODEL="${MARATHON_DEFAULT_MODEL:-${CODEX_QWEN_DEFAULT_MODEL:-qwen3.6-27b-q4-128k}}"
-LOCAL_CODEX_BIN="$ROOT_DIR/codex/codex-rs/target/debug/codex"
+PATCHED_CODEX_BIN="${MARATHON_CODEX_BIN_PATH:-${MARATHON_CODEX_TARGET_DIR:-$ROOT_DIR/.marathon/codex-target}/debug/codex}"
+LEGACY_CODEX_BIN="$ROOT_DIR/codex/codex-rs/target/debug/codex"
 CODEX_BIN="${MARATHON_CODEX_BIN:-${CODEX_QWEN_CODEX_BIN:-}}"
 LOG_DIR="${MARATHON_LOG_DIR:-$ROOT_DIR/logs}"
 ROUTER_LOG_FILE="$LOG_DIR/codex_local_router.log"
@@ -19,8 +20,11 @@ mkdir -p "$STATE_DIR"
 router_host="${ROUTER_HOST}:${ROUTER_PORT}"
 
 if [[ -z "$CODEX_BIN" ]]; then
-  if [[ -x "$LOCAL_CODEX_BIN" ]]; then
-    CODEX_BIN="$LOCAL_CODEX_BIN"
+  if [[ -x "$PATCHED_CODEX_BIN" ]]; then
+    CODEX_BIN="$PATCHED_CODEX_BIN"
+  elif [[ -x "$LEGACY_CODEX_BIN" ]]; then
+    echo "warning: using legacy in-submodule Codex binary; run ./bin/marathon build to use the patched Marathon build tree." >&2
+    CODEX_BIN="$LEGACY_CODEX_BIN"
   else
     CODEX_BIN="codex"
   fi
@@ -181,6 +185,16 @@ ensure_router() {
 
 export CODEX_OSS_BASE_URL="http://$ROUTER_HOST:$ROUTER_PORT/v1"
 export CODEX_EXTRA_MODELS_PATH="${CODEX_EXTRA_MODELS_PATH:-$LOCAL_MODELS_FILE}"
+
+if [[ -z "${CODEX_CLI_NAME:-}" ]]; then
+  if [[ -n "${MARATHON_CLI_NAME:-}" ]]; then
+    export CODEX_CLI_NAME="$MARATHON_CLI_NAME"
+  elif command -v marathon >/dev/null 2>&1; then
+    export CODEX_CLI_NAME="marathon"
+  else
+    export CODEX_CLI_NAME="$ROOT_DIR/bin/marathon"
+  fi
+fi
 
 if [[ "${MARATHON_USE_USER_CONFIG:-${CODEX_QWEN_USE_USER_CONFIG:-0}}" != "1" ]]; then
   export CODEX_HOME="${MARATHON_CODEX_HOME:-${CODEX_QWEN_CODEX_HOME:-$ROOT_DIR/.marathon/codex-home}}"
