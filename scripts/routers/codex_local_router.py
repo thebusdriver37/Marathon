@@ -34,6 +34,24 @@ from aiohttp import ClientTimeout
 from aiohttp import WSMsgType
 from aiohttp import web
 
+from marathon_web_search import WebFetchExecutor
+from marathon_web_search import WebFetchSettings
+from marathon_web_search import WEB_FETCH_TOOL_NAME
+from marathon_web_search import WEB_SEARCH_TOOL_NAME
+from marathon_web_search import WebSearchExecutor
+from marathon_web_search import WebSearchSettings
+from marathon_web_search import collect_managed_calls
+from marathon_web_search import externalize_for_codex
+from marathon_web_search import format_results_for_model
+from marathon_web_search import is_web_fetch_function_call
+from marathon_web_search import is_web_search_function_call
+from marathon_web_search import make_function_call_output
+from marathon_web_search import parse_function_call_arguments
+from marathon_web_search import request_has_web_search_tool
+from marathon_web_search import synthesize_call_id
+from marathon_web_search import web_fetch_function_tool
+from marathon_web_search import web_search_function_tool
+
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -54,6 +72,8 @@ DEFAULT_USAGE = {
     "output_tokens_details": None,
     "total_tokens": 0,
 }
+
+MANAGED_WEB_TOOL_NAMES = {WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME}
 
 
 @dataclass(frozen=True)
@@ -266,10 +286,39 @@ def _input_relation(previous: list[Any] | None, current: list[Any]) -> dict[str,
     }
 
 
+def _strip_managed_web_tools(tools: Any) -> list[Any]:
+    if not isinstance(tools, list):
+        return []
+    return [
+        tool
+        for tool in tools
+        if not (
+            isinstance(tool, dict)
+            and tool.get("type") == "function"
+            and tool.get("name") in MANAGED_WEB_TOOL_NAMES
+        )
+    ]
+
+
 def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
     tools = data.get("tools")
+    web_search_requested = request_has_web_search_tool(tools) if isinstance(tools, list) else False
     if isinstance(tools, list):
         data["tools"] = [tool for tool in tools if tool.get("type") == "function"]
+    if web_search_requested:
+        existing = data.get("tools")
+        normalized_tools = existing if isinstance(existing, list) else []
+        names = {
+            tool.get("name")
+            for tool in normalized_tools
+            if isinstance(tool, dict)
+        }
+        if WEB_SEARCH_TOOL_NAME not in names:
+            normalized_tools.append(web_search_function_tool())
+        if WEB_FETCH_TOOL_NAME not in names:
+            normalized_tools.append(web_fetch_function_tool())
+        data["tools"] = normalized_tools
+    data["_marathon_web_search_enabled"] = web_search_requested
 
     input_items = data.get("input")
     if not isinstance(input_items, list):
@@ -345,6 +394,10 @@ class RouterState:
         self.lineage: dict[str, ResponseSnapshot] = {}
         self.last_response_by_model: dict[str, str] = {}
         self.http_client: ClientSession | None = None
+        self.web_search_settings = WebSearchSettings.from_env()
+        self.web_search: WebSearchExecutor | None = None
+        self.web_fetch_settings = WebFetchSettings.from_env()
+        self.web_fetch: WebFetchExecutor | None = None
 
     def _refresh_profiles(self) -> dict[str, ModelProfile]:
         profiles = _available_profiles()
@@ -354,8 +407,16 @@ class RouterState:
 
     async def open(self) -> None:
         self.http_client = ClientSession(timeout=ClientTimeout(total=3600))
+        self.web_search = WebSearchExecutor(self.web_search_settings)
+        self.web_fetch = WebFetchExecutor(self.web_fetch_settings)
 
     async def close(self) -> None:
+        if self.web_search is not None:
+            await self.web_search.close()
+            self.web_search = None
+        if self.web_fetch is not None:
+            await self.web_fetch.close()
+            self.web_fetch = None
         if self.http_client is not None:
             await self.http_client.close()
             self.http_client = None
@@ -397,7 +458,7 @@ class RouterState:
                     "effective_context_window_percent": 90,
                     "experimental_supported_tools": [],
                     "input_modalities": ["text"],
-                    "supports_search_tool": False,
+                    "supports_search_tool": True,
                 }
             )
             data.append(
@@ -663,6 +724,188 @@ class RouterState:
         merged.update(usage)
         return merged
 
+    def _log_tool_error(self, tool: str, key: str, exc: Exception) -> None:
+        try:
+            with self.log_dir.joinpath("codex_local_router.log").open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write(f"{tool} error for {key!r}: {exc}\n")
+        except Exception:
+            pass
+
+    async def _execute_web_search_call(
+        self, item: dict[str, Any], fallback_index: int
+    ) -> dict[str, Any]:
+        call_id = synthesize_call_id(item, fallback_index)
+        args = parse_function_call_arguments(item.get("arguments"))
+        query = str(args.get("query") or "").strip()
+        max_results_raw = args.get("max_results")
+        max_results: int | None
+        if isinstance(max_results_raw, int):
+            max_results = max_results_raw
+        elif isinstance(max_results_raw, str) and max_results_raw.isdigit():
+            max_results = int(max_results_raw)
+        else:
+            max_results = None
+
+        if self.web_search is None:
+            return make_function_call_output(
+                call_id, "Web search is unavailable: router has no executor configured."
+            )
+        if not query:
+            return make_function_call_output(
+                call_id, "Web search error: missing 'query' argument."
+            )
+
+        try:
+            results = await self.web_search.search(query, max_results=max_results)
+        except Exception as exc:
+            self._log_tool_error("web_search", query, exc)
+            return make_function_call_output(
+                call_id,
+                f"Web search failed: {exc}\nThe SearXNG instance at "
+                f"{self.web_search_settings.base_url} did not respond. Tell the user "
+                "the search backend is unreachable and answer from your own knowledge "
+                "if possible.",
+            )
+
+        return make_function_call_output(call_id, format_results_for_model(query, results))
+
+    async def _execute_web_fetch_call(
+        self, item: dict[str, Any], fallback_index: int
+    ) -> dict[str, Any]:
+        call_id = synthesize_call_id(item, fallback_index)
+        args = parse_function_call_arguments(item.get("arguments"))
+        url = str(args.get("url") or "").strip()
+        max_chars_raw = args.get("max_chars")
+        max_chars: int | None
+        if isinstance(max_chars_raw, int):
+            max_chars = max_chars_raw
+        elif isinstance(max_chars_raw, str) and max_chars_raw.isdigit():
+            max_chars = int(max_chars_raw)
+        else:
+            max_chars = None
+
+        if self.web_fetch is None:
+            return make_function_call_output(
+                call_id, "Web fetch is unavailable: router has no executor configured."
+            )
+        if not url:
+            return make_function_call_output(
+                call_id, "Web fetch error: missing 'url' argument."
+            )
+
+        try:
+            content = await self.web_fetch.fetch(url, max_chars=max_chars)
+        except Exception as exc:
+            self._log_tool_error("web_fetch", url, exc)
+            return make_function_call_output(
+                call_id,
+                f"web_fetch failed for {url}: {exc}\nIf this URL depends on "
+                "browser-rendered JavaScript, tell the user static fetch could "
+                "not extract it. "
+                "Otherwise prefer a different result from the previous search.",
+            )
+
+        return make_function_call_output(call_id, content)
+
+    async def _execute_managed_call(
+        self, item: dict[str, Any], fallback_index: int
+    ) -> dict[str, Any]:
+        if is_web_fetch_function_call(item):
+            return await self._execute_web_fetch_call(item, fallback_index)
+        return await self._execute_web_search_call(item, fallback_index)
+
+    async def _run_responses_loop(
+        self,
+        *,
+        profile: ModelProfile,
+        forward_request: dict[str, Any],
+        web_search_enabled: bool,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
+        """Run the llama.cpp /v1/responses tool-call loop until the model stops calling web_search.
+
+        Returns the final backend response, the cumulative output items (with the
+        real ``function_call`` and ``function_call_output`` items kept intact for
+        lineage), and the number of web_search iterations executed.
+        """
+
+        request = forward_request
+        max_iters = max(1, self.web_search_settings.max_iterations)
+        cumulative_items: list[dict[str, Any]] = []
+        last_response: dict[str, Any] = {}
+        usage_acc = copy.deepcopy(DEFAULT_USAGE)
+        iterations = 0
+
+        for iteration in range(max_iters + 1):
+            response = await self._request_json(profile, "POST", "/v1/responses", request)
+            last_response = response
+            iter_items: list[dict[str, Any]] = []
+            for item in response.get("output", []):
+                if isinstance(item, dict):
+                    iter_items.append(self.sanitize_output_item(item))
+
+            iter_usage = response.get("usage")
+            if isinstance(iter_usage, dict):
+                for key, value in iter_usage.items():
+                    if isinstance(value, (int, float)) and isinstance(usage_acc.get(key), (int, float)):
+                        usage_acc[key] = (usage_acc.get(key) or 0) + value
+                    elif key not in usage_acc or usage_acc.get(key) is None:
+                        usage_acc[key] = value
+
+            cumulative_items.extend(iter_items)
+
+            if not web_search_enabled:
+                break
+
+            pending_calls = collect_managed_calls(iter_items)
+            if not pending_calls:
+                break
+
+            if iteration >= max_iters:
+                # Safety cap: drop the managed tools so the model must finalize.
+                tool_outputs = [
+                    make_function_call_output(
+                        synthesize_call_id(call, idx),
+                        "Tool-call iteration cap reached; please answer from "
+                        "the results you already have.",
+                    )
+                    for idx, call in enumerate(pending_calls)
+                ]
+                cumulative_items.extend(tool_outputs)
+                request = copy.deepcopy(request)
+                request["input"] = list(request.get("input") or []) + copy.deepcopy(iter_items) + tool_outputs
+                request["tools"] = _strip_managed_web_tools(request.get("tools"))
+                final = await self._request_json(profile, "POST", "/v1/responses", request)
+                last_response = final
+                final_items: list[dict[str, Any]] = []
+                for item in final.get("output", []):
+                    if isinstance(item, dict):
+                        final_items.append(self.sanitize_output_item(item))
+                final_usage = final.get("usage")
+                if isinstance(final_usage, dict):
+                    for key, value in final_usage.items():
+                        if isinstance(value, (int, float)) and isinstance(usage_acc.get(key), (int, float)):
+                            usage_acc[key] = (usage_acc.get(key) or 0) + value
+                        elif key not in usage_acc or usage_acc.get(key) is None:
+                            usage_acc[key] = value
+                cumulative_items.extend(final_items)
+                iterations = max_iters
+                break
+
+            tool_outputs = []
+            for idx, call in enumerate(pending_calls):
+                tool_outputs.append(await self._execute_managed_call(call, idx))
+            cumulative_items.extend(tool_outputs)
+
+            request = copy.deepcopy(request)
+            request["input"] = list(request.get("input") or []) + copy.deepcopy(iter_items) + tool_outputs
+            iterations += 1
+
+        last_response = copy.deepcopy(last_response)
+        last_response["usage"] = usage_acc
+        return last_response, cumulative_items, iterations
+
     async def process_websocket_create(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_snapshot = copy.deepcopy(payload)
         request = copy.deepcopy(payload)
@@ -817,6 +1060,10 @@ class RouterState:
                 "backend_response": {},
             }
 
+        web_search_enabled = bool(
+            forward_request.pop("_marathon_web_search_enabled", False)
+        ) and self.web_search is not None
+
         async with self.backend_lock:
             restore_result: dict[str, Any] | None = None
             erase_result: dict[str, Any] | None = None
@@ -842,7 +1089,11 @@ class RouterState:
             slot_prepare_ms = (time.perf_counter() - slot_prepare_start) * 1000.0
 
             backend_start = time.perf_counter()
-            backend_response = await self._request_json(profile, "POST", "/v1/responses", forward_request)
+            backend_response, all_output_items, web_search_iterations = await self._run_responses_loop(
+                profile=profile,
+                forward_request=forward_request,
+                web_search_enabled=web_search_enabled,
+            )
             backend_ms = (time.perf_counter() - backend_start) * 1000.0
 
             response_id = str(backend_response.get("id") or f"resp_{int(time.time() * 1000)}_{self._trace_seq + 1}")
@@ -857,10 +1108,7 @@ class RouterState:
                 save_error = str(exc)
             slot_save_ms = (time.perf_counter() - save_start) * 1000.0
 
-        output_items = []
-        for item in backend_response.get("output", []):
-            if isinstance(item, dict):
-                output_items.append(self.sanitize_output_item(item))
+        output_items = all_output_items
 
         usage_payload = self.usage_payload(backend_response.get("usage"))
 
@@ -925,10 +1173,14 @@ class RouterState:
                 except Exception:
                     pass
 
+        codex_output_items = (
+            externalize_for_codex(output_items) if web_search_enabled else output_items
+        )
+
         return {
             "response_id": response_id,
             "usage": usage_payload,
-            "output_items": output_items,
+            "output_items": codex_output_items,
             "backend_response": backend_response,
         }
 
@@ -996,6 +1248,12 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
         data["model"] = profile.alias
         if path == "/v1/responses":
             data = normalize_responses_request(data)
+            if data.pop("_marathon_web_search_enabled", False):
+                # The managed web-tool loop is only implemented on the
+                # WebSocket Responses path. Keep HTTP/SSE fallback from
+                # leaking router-private fields or unmanaged web functions to
+                # llama.cpp.
+                data["tools"] = _strip_managed_web_tools(data.get("tools"))
             state.trace_request(
                 requested_model=requested_model,
                 profile=profile,

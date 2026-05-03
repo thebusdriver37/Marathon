@@ -15,6 +15,8 @@ Commands:
   resume          Resume a previous Marathon interactive session
   fork            Fork a previous Marathon interactive session
   exec            Run headless Codex exec against the default local model
+  search <sub>    Manage the SearXNG container (up | down | status | logs | url | restart | pull)
+  setup-deps      Create .marathon/venv and install router Python dependencies
   build           Build patched Marathon binaries
   build-codex     Build the patched local Codex binary
   build-llama     Build the patched local llama.cpp binaries
@@ -56,6 +58,12 @@ case "$cmd" in
     ;;
   exec)
     exec "$ROOT_DIR/scripts/launchers/start_codex.sh" exec "$@"
+    ;;
+  search)
+    exec "$ROOT_DIR/scripts/ops/searxng.sh" "$@"
+    ;;
+  setup-deps)
+    exec "$ROOT_DIR/scripts/ops/setup_python_env.sh" "$@"
     ;;
   build)
     exec "$ROOT_DIR/scripts/build_marathon.sh" "$@"

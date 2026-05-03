@@ -1,0 +1,13 @@
+# Marathon SearXNG limiter config.
+#
+# The limiter is disabled in settings.yml (single-user local instance), so this
+# file exists primarily to keep the bind mount well-defined. If you re-enable
+# the limiter in settings.yml, the values below are sane defaults.
+
+[botdetection.ip_limit]
+link_token = false
+
+[real_ip]
+x_for = 1
+ipv4_prefix = 32
+ipv6_prefix = 56

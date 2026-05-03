@@ -21,6 +21,17 @@ mkdir -p "$STATE_DIR"
 
 router_host="${ROUTER_HOST}:${ROUTER_PORT}"
 
+ROUTER_PYTHON="${MARATHON_ROUTER_PYTHON:-$ROOT_DIR/.marathon/venv/bin/python3}"
+if [[ ! -x "$ROUTER_PYTHON" ]]; then
+  if [[ -n "${MARATHON_ROUTER_PYTHON:-}" ]]; then
+    echo "error: MARATHON_ROUTER_PYTHON=$ROUTER_PYTHON is not executable" >&2
+    exit 1
+  fi
+  echo "warning: Marathon venv not found at $ROUTER_PYTHON; falling back to system python3" >&2
+  echo "         run './bin/marathon setup-deps' to provision web_fetch / trafilatura support" >&2
+  ROUTER_PYTHON="python3"
+fi
+
 if [[ -z "$CODEX_BIN" ]]; then
   if [[ -x "$PATCHED_CODEX_BIN" ]]; then
     CODEX_BIN="$PATCHED_CODEX_BIN"
@@ -111,7 +122,7 @@ JSON
 }
 
 start_router() {
-  nohup python3 "$ROOT_DIR/scripts/routers/codex_local_router.py" \
+  nohup "$ROUTER_PYTHON" "$ROOT_DIR/scripts/routers/codex_local_router.py" \
     --host "$ROUTER_HOST" \
     --port "$ROUTER_PORT" \
     --default-model "$DEFAULT_MODEL" \
@@ -235,15 +246,27 @@ fi
 ROUTER_BASE_URL="http://$ROUTER_HOST:$ROUTER_PORT/v1"
 MODEL_PROVIDER_CONFIG="model_providers.$MODEL_PROVIDER_ID={ name = \"$MODEL_PROVIDER_NAME\", base_url = \"$ROUTER_BASE_URL\", wire_api = \"responses\", requires_openai_auth = false, supports_websockets = true }"
 
+# Web search wiring. Codex's `web_search` mode controls whether the tool is
+# included in requests; the router translates it to a SearXNG-backed function
+# tool. `cached` (Codex default) and `live` both work; `disabled` turns it off.
+WEB_SEARCH_MODE="${MARATHON_WEB_SEARCH_MODE:-cached}"
+SEARXNG_URL="${MARATHON_SEARXNG_URL:-http://127.0.0.1:18093}"
+
+if [[ "$WEB_SEARCH_MODE" != "disabled" ]]; then
+  if ! curl -fsS --max-time 2 "$SEARXNG_URL/healthz" >/dev/null 2>&1; then
+    echo "warning: SearXNG at $SEARXNG_URL is not reachable; web search will fail until you run './bin/marathon search up'" >&2
+    echo "         set MARATHON_WEB_SEARCH_MODE=disabled to silence this warning" >&2
+  fi
+fi
+
 COMMON_ARGS=(
   -c "$MODEL_PROVIDER_CONFIG"
   -c "model_provider=\"$MODEL_PROVIDER_ID\""
   -m "$DEFAULT_MODEL"
-  -c 'web_search="disabled"'
+  -c "web_search=\"$WEB_SEARCH_MODE\""
   --disable image_generation
   --disable apps
   --disable plugins
-  --disable tool_search
 )
 
 if [[ "${1:-}" == "exec" ]]; then

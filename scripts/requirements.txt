@@ -1,0 +1,11 @@
+# Python deps for the Marathon Codex local router.
+#
+# Installed into .marathon/venv/ by ./bin/marathon setup-deps.
+#
+# Pin loosely: tighten before cutting an OSS release.
+
+# HTML / page-content extraction backing the web_fetch tool.
+trafilatura>=2.0,<3.0
+
+# HTTP server/client used by the local router and web tools.
+aiohttp>=3.9,<4.0

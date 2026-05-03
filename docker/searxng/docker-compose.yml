@@ -1,0 +1,38 @@
+name: marathon-searxng
+
+services:
+  searxng:
+    image: ${MARATHON_SEARXNG_IMAGE:-searxng/searxng:2026.5.2-aefc3c316}
+    container_name: marathon-searxng
+    restart: unless-stopped
+    ports:
+      - "${MARATHON_SEARXNG_BIND:-127.0.0.1}:${MARATHON_SEARXNG_PORT:-18093}:8080"
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+      - ./limiter.toml:/etc/searxng/limiter.toml:ro
+      - searxng-state:/var/cache/searxng
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:${MARATHON_SEARXNG_PORT:-18093}/
+      - SEARXNG_SECRET=${MARATHON_SEARXNG_SECRET}
+      - UWSGI_WORKERS=${MARATHON_SEARXNG_WORKERS:-2}
+      - UWSGI_THREADS=${MARATHON_SEARXNG_THREADS:-4}
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  searxng-state:
