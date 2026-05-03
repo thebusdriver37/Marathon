@@ -162,16 +162,16 @@ index 48dd6fc9a0..39915543d7 100644
 +    );
 +}
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index 39b4294b4a..1b6461b009 100644
+index 334e412c0a..70b4b539e7 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -1199,13 +1199,14 @@ async fn run_ratatui_app(
+@@ -1203,13 +1203,14 @@ async fn run_ratatui_app(
          terminal_restore_guard.restore_silently();
          session_log::log_session_end();
          let _ = tui.terminal.clear();
 +        let action_command = crate::legacy_core::util::cli_command_for_action(action);
          Ok(AppExitInfo {
-             token_usage: codex_protocol::protocol::TokenUsage::default(),
+             token_usage: crate::token_usage::TokenUsage::default(),
              thread_id: None,
              thread_name: None,
              update_action: None,

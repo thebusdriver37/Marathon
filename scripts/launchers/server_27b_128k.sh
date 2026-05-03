@@ -8,12 +8,16 @@ MODEL_PATH="${MODEL_PATH:-${QWEN36_27B_GGUF:-$MODELS_DIR/Qwen3.6-27B-GGUF/qwen3.
 MODEL_ALIAS="${MODEL_ALIAS:-qwen3.6-27b-q4-128k}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-18091}"
+SLOT_SAVE_ROOT="${MARATHON_SLOT_SAVE_ROOT:-$ROOT_DIR/.marathon/llama-slots}"
+SLOT_SAVE_PATH="${SLOT_SAVE_PATH:-$SLOT_SAVE_ROOT/$MODEL_ALIAS}"
 
 if [[ ! -f "$MODEL_PATH" ]]; then
   echo "error: model not found: $MODEL_PATH" >&2
   echo "set QWEN36_27B_GGUF or MARATHON_MODELS_DIR to your downloaded GGUF location." >&2
   exit 1
 fi
+
+mkdir -p "$SLOT_SAVE_PATH"
 
 exec "$ROOT_DIR/scripts/ops/run_llama_server.sh" \
   --model "$MODEL_PATH" \
@@ -33,5 +37,6 @@ exec "$ROOT_DIR/scripts/ops/run_llama_server.sh" \
   --parallel 1 \
   --cache-type-k "${CACHE_TYPE_K:-q8_0}" \
   --cache-type-v "${CACHE_TYPE_V:-q8_0}" \
+  --slot-save-path "$SLOT_SAVE_PATH" \
   --swa-full \
   "$@"

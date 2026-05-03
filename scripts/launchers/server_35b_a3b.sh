@@ -7,6 +7,8 @@ MODEL_PATH="${MODEL_PATH:-${QWEN36_35B_A3B_GGUF:-$MODELS_DIR/Qwen3.6-35B-A3B-GGU
 MODEL_ALIAS="${MODEL_ALIAS:-qwen3.6-35b-a3b}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-18092}"
+SLOT_SAVE_ROOT="${MARATHON_SLOT_SAVE_ROOT:-$ROOT_DIR/.marathon/llama-slots}"
+SLOT_SAVE_PATH="${SLOT_SAVE_PATH:-$SLOT_SAVE_ROOT/$MODEL_ALIAS}"
 GPU_DEVICES="${GPU_DEVICES:-1}"
 
 if [[ ! -f "$MODEL_PATH" ]]; then
@@ -14,6 +16,8 @@ if [[ ! -f "$MODEL_PATH" ]]; then
   echo "set QWEN36_35B_A3B_GGUF or MARATHON_MODELS_DIR to your downloaded GGUF location." >&2
   exit 1
 fi
+
+mkdir -p "$SLOT_SAVE_PATH"
 
 export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
 
@@ -34,5 +38,6 @@ exec "$ROOT_DIR/scripts/ops/run_llama_server.sh" \
   --parallel 1 \
   --cache-type-k "${CACHE_TYPE_K:-q8_0}" \
   --cache-type-v "${CACHE_TYPE_V:-q8_0}" \
+  --slot-save-path "$SLOT_SAVE_PATH" \
   --swa-full \
   "$@"

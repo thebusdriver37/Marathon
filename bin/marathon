@@ -4,27 +4,30 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-  cat <<EOF
+  cat <<USAGE
 Usage: marathon [command] [codex args...]
 
 Commands:
-  chat         Launch the default local Codex TUI (default)
-  128k         Launch Qwen3.6 27B Q4 128K
-  fast         Launch Qwen3.6 27B Q4 32K
-  a3b          Launch Qwen3.6 35B A3B
-  resume       Resume a previous Marathon interactive session
-  fork         Fork a previous Marathon interactive session
-  exec         Run headless Codex exec against the default local model
-  build        Build the patched local Codex binary
-  setup-llama  Clone/build llama.cpp with CUDA
-  sweep-128k   Run the focused 128K server config sweep
+  chat            Launch the default local Codex TUI (default)
+  128k            Launch Qwen3.6 27B Q4 128K
+  fast            Launch Qwen3.6 27B Q4 32K
+  a3b             Launch Qwen3.6 35B A3B
+  resume          Resume a previous Marathon interactive session
+  fork            Fork a previous Marathon interactive session
+  exec            Run headless Codex exec against the default local model
+  build           Build patched Marathon binaries
+  build-codex     Build the patched local Codex binary
+  build-llama     Build the patched local llama.cpp binaries
+  setup-llama     Clone/build llama.cpp with CUDA
+  sweep-128k      Run the focused 128K server config sweep
+  update-codex    Fetch latest Codex, rebase patches, rebuild
 
 Environment:
   MARATHON_MODELS_DIR       Base directory for GGUF files (default: ~/models)
   QWEN36_27B_GGUF           Exact Qwen3.6 27B GGUF path
   QWEN36_35B_A3B_GGUF       Exact Qwen3.6 35B A3B GGUF path
   LLAMACPP_BIN              Exact llama-server binary path
-EOF
+USAGE
 }
 
 cmd="${1:-chat}"
@@ -55,7 +58,13 @@ case "$cmd" in
     exec "$ROOT_DIR/scripts/launchers/start_codex.sh" exec "$@"
     ;;
   build)
+    exec "$ROOT_DIR/scripts/build_marathon.sh" "$@"
+    ;;
+  build-codex)
     exec "$ROOT_DIR/scripts/build_codex.sh" "$@"
+    ;;
+  build-llama)
+    exec "$ROOT_DIR/scripts/build_llamacpp.sh" "$@"
     ;;
   setup-llama)
     exec "$ROOT_DIR/scripts/ops/setup_llamacpp.sh" "$@"
@@ -63,10 +72,15 @@ case "$cmd" in
   sweep-128k)
     exec "$ROOT_DIR/scripts/benchmarks/qwen36_128k_server_sweep.py" "$@"
     ;;
+  update-codex)
+    exec "$ROOT_DIR/scripts/ops/update_codex.sh" "$@"
+    ;;
   help|--help|-h)
     usage
     ;;
   *)
-    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" "$cmd" "$@"
+    echo "Unknown command: $cmd"
+    usage
+    exit 1
     ;;
 esac

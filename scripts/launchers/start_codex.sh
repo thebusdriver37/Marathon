@@ -13,6 +13,8 @@ ROUTER_LOG_FILE="$LOG_DIR/codex_local_router.log"
 STATE_DIR="${MARATHON_STATE_DIR:-${CODEX_QWEN_STATE_DIR:-$ROOT_DIR/.marathon/state}}"
 ROUTER_PID_FILE="$STATE_DIR/codex-local-router.pid"
 LOCAL_MODELS_FILE="${MARATHON_MODELS_FILE:-${CODEX_QWEN_MODELS_FILE:-$ROOT_DIR/config/qwen_models.json}}"
+MODEL_PROVIDER_ID="${MARATHON_MODEL_PROVIDER_ID:-marathon-local}"
+MODEL_PROVIDER_NAME="${MARATHON_MODEL_PROVIDER_NAME:-Marathon Local}"
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$STATE_DIR"
@@ -230,9 +232,12 @@ if ! warm_default_model; then
   exit 1
 fi
 
+ROUTER_BASE_URL="http://$ROUTER_HOST:$ROUTER_PORT/v1"
+MODEL_PROVIDER_CONFIG="model_providers.$MODEL_PROVIDER_ID={ name = \"$MODEL_PROVIDER_NAME\", base_url = \"$ROUTER_BASE_URL\", wire_api = \"responses\", requires_openai_auth = false, supports_websockets = true }"
+
 COMMON_ARGS=(
-  --oss
-  --local-provider lmstudio
+  -c "$MODEL_PROVIDER_CONFIG"
+  -c "model_provider=\"$MODEL_PROVIDER_ID\""
   -m "$DEFAULT_MODEL"
   -c 'web_search="disabled"'
   --disable image_generation

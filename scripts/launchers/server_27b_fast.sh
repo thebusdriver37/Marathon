@@ -7,6 +7,8 @@ MODEL_PATH="${MODEL_PATH:-${QWEN36_27B_GGUF:-$MODELS_DIR/Qwen3.6-27B-GGUF/qwen3.
 MODEL_ALIAS="${MODEL_ALIAS:-qwen3.6-27b-q4}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-18090}"
+SLOT_SAVE_ROOT="${MARATHON_SLOT_SAVE_ROOT:-$ROOT_DIR/.marathon/llama-slots}"
+SLOT_SAVE_PATH="${SLOT_SAVE_PATH:-$SLOT_SAVE_ROOT/$MODEL_ALIAS}"
 CTX_SIZE="${CTX_SIZE:-32768}"
 GPU_DEVICES="${GPU_DEVICES:-0}"
 THREADS="${THREADS:-24}"
@@ -25,6 +27,8 @@ if [[ ! -f "$MODEL_PATH" ]]; then
   exit 1
 fi
 
+mkdir -p "$SLOT_SAVE_PATH"
+
 export CUDA_VISIBLE_DEVICES="$GPU_DEVICES"
 
 args=(
@@ -40,6 +44,7 @@ args=(
   --ubatch "$UBATCH"
   --cache-type-k "$CACHE_TYPE_K"
   --cache-type-v "$CACHE_TYPE_V"
+  --slot-save-path "$SLOT_SAVE_PATH"
   --flash-attn on
   --swa-full
   --parallel 1

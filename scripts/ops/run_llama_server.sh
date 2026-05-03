@@ -2,8 +2,28 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LLAMACPP_DIR="${LLAMACPP_DIR:-$ROOT_DIR/third_party/llama.cpp}"
-BIN="${LLAMACPP_BIN:-$LLAMACPP_DIR/build/bin/llama-server}"
+
+default_llamacpp_dir() {
+  if [[ -d "$ROOT_DIR/third_party/llama.cpp/.git" ]]; then
+    printf '%s\n' "$ROOT_DIR/third_party/llama.cpp"
+  elif [[ -d "$ROOT_DIR/../vLLM_inference/third_party/llama.cpp/.git" ]]; then
+    printf '%s\n' "$ROOT_DIR/../vLLM_inference/third_party/llama.cpp"
+  else
+    printf '%s\n' "$ROOT_DIR/third_party/llama.cpp"
+  fi
+}
+
+LLAMACPP_DIR="${MARATHON_LLAMACPP_DIR:-${LLAMACPP_DIR:-$(default_llamacpp_dir)}}"
+PATCHED_BUILD_DIR="${MARATHON_LLAMACPP_BUILD_DIR:-$ROOT_DIR/.marathon/llama.cpp-build}"
+PATCHED_BIN="${MARATHON_LLAMACPP_BIN_PATH:-$PATCHED_BUILD_DIR/bin/llama-server}"
+BIN="${LLAMACPP_BIN:-${MARATHON_LLAMACPP_BIN:-$PATCHED_BIN}}"
+if [[ ! -x "$BIN" && -x "$LLAMACPP_DIR/build/bin/llama-server" ]]; then
+  BIN="$LLAMACPP_DIR/build/bin/llama-server"
+fi
+if [[ ! -x "$BIN" && -x "$ROOT_DIR/../vLLM_inference/third_party/llama.cpp/build/bin/llama-server" ]]; then
+  LLAMACPP_DIR="$ROOT_DIR/../vLLM_inference/third_party/llama.cpp"
+  BIN="$LLAMACPP_DIR/build/bin/llama-server"
+fi
 
 MODEL_PATH="${MODEL_PATH:-}"
 MODEL_ALIAS="${MODEL_ALIAS:-local-qwen}"
@@ -177,7 +197,7 @@ fi
 
 if [[ ! -x "$BIN" ]]; then
   echo "error: llama-server binary not found at: $BIN" >&2
-  echo "run scripts/ops/setup_llamacpp.sh first, or set LLAMACPP_BIN." >&2
+  echo "run ./bin/marathon setup-llama (or ./bin/marathon build-llama), or set LLAMACPP_BIN." >&2
   exit 1
 fi
 
