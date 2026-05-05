@@ -1,0 +1,49 @@
+diff --git a/codex-rs/models-manager/models.json b/codex-rs/models-manager/models.json
+index c025fe36ad..9025e1ca59 100644
+--- a/codex-rs/models-manager/models.json
++++ b/codex-rs/models-manager/models.json
+@@ -44,7 +44,7 @@
+         }
+       ],
+       "shell_type": "shell_command",
+-      "visibility": "list",
++      "visibility": "hide",
+       "minimal_client_version": "0.124.0",
+       "supported_in_api": true,
+       "availability_nux": {
+@@ -131,7 +131,7 @@
+         }
+       ],
+       "shell_type": "shell_command",
+-      "visibility": "list",
++      "visibility": "hide",
+       "minimal_client_version": "0.98.0",
+       "supported_in_api": true,
+       "availability_nux": null,
+@@ -213,7 +213,7 @@
+         }
+       ],
+       "shell_type": "shell_command",
+-      "visibility": "list",
++      "visibility": "hide",
+       "minimal_client_version": "0.98.0",
+       "supported_in_api": true,
+       "availability_nux": null,
+@@ -296,7 +296,7 @@
+         }
+       ],
+       "shell_type": "shell_command",
+-      "visibility": "list",
++      "visibility": "hide",
+       "minimal_client_version": "0.98.0",
+       "supported_in_api": true,
+       "availability_nux": null,
+@@ -379,7 +379,7 @@
+         }
+       ],
+       "shell_type": "shell_command",
+-      "visibility": "list",
++      "visibility": "hide",
+       "minimal_client_version": "0.0.1",
+       "supported_in_api": true,
+       "availability_nux": null,

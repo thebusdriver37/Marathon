@@ -390,6 +390,7 @@ class RouterState:
         self.trace_log_path = self.log_dir / "codex_local_router_trace.jsonl"
         self.request_log_path = self.log_dir / "codex_local_router_request.json"
         self._trace_seq = 0
+        self._response_id_seq = 0
         self._last_trace_by_model: dict[str, dict[str, Any]] = {}
         self.lineage: dict[str, ResponseSnapshot] = {}
         self.last_response_by_model: dict[str, str] = {}
@@ -712,6 +713,19 @@ class RouterState:
         target_profile = profile or self.resolve_model(self.current_model or self.default_model)
         return await self._request_json(target_profile, "GET", "/health")
 
+    def mint_response_id(self, kind: str = "resp") -> str:
+        """Generate a fresh, monotonic response id without touching the trace counter.
+
+        Used so the WS handler can send ``response.created`` immediately on
+        receiving ``response.create``, before the (potentially long) backend
+        call begins.
+        """
+
+        with self.lock:
+            self._response_id_seq += 1
+            seq = self._response_id_seq
+        return f"{kind}_{int(time.time() * 1000)}_{seq}"
+
     def sanitize_output_item(self, item: dict[str, Any]) -> dict[str, Any]:
         sanitized = copy.deepcopy(item)
         sanitized.pop("status", None)
@@ -906,7 +920,12 @@ class RouterState:
         last_response["usage"] = usage_acc
         return last_response, cumulative_items, iterations
 
-    async def process_websocket_create(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def process_websocket_create(
+        self,
+        payload: dict[str, Any],
+        *,
+        preset_response_id: str | None = None,
+    ) -> dict[str, Any]:
         raw_snapshot = copy.deepcopy(payload)
         request = copy.deepcopy(payload)
         request.pop("type", None)
@@ -998,7 +1017,7 @@ class RouterState:
         )
 
         if generate is False:
-            response_id = f"warm_{int(time.time() * 1000)}_{self._trace_seq + 1}"
+            response_id = preset_response_id or self.mint_response_id("warm")
             async with self.lineage_lock:
                 self.lineage[response_id] = ResponseSnapshot(
                     response_id=response_id,
@@ -1096,7 +1115,9 @@ class RouterState:
             )
             backend_ms = (time.perf_counter() - backend_start) * 1000.0
 
-            response_id = str(backend_response.get("id") or f"resp_{int(time.time() * 1000)}_{self._trace_seq + 1}")
+            response_id = preset_response_id or str(
+                backend_response.get("id") or self.mint_response_id("resp")
+            )
             snapshot_filename = f"{profile.slug}__{response_id}.bin"
 
             save_start = time.perf_counter()
@@ -1302,16 +1323,25 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
     ws = web.WebSocketResponse(heartbeat=30.0, max_msg_size=32 * 1024 * 1024)
     await ws.prepare(request)
 
+    async def safe_send(message: dict[str, Any]) -> bool:
+        if ws.closed:
+            return False
+        try:
+            await ws.send_json(message)
+            return True
+        except (ConnectionResetError, ConnectionError):
+            return False
+
     async for msg in ws:
         if msg.type == WSMsgType.TEXT:
             try:
                 payload = json.loads(msg.data)
             except json.JSONDecodeError:
-                await ws.send_json({"type": "error", "error": {"message": "invalid JSON"}})
+                await safe_send({"type": "error", "error": {"message": "invalid JSON"}})
                 continue
 
             if payload.get("type") != "response.create":
-                await ws.send_json(
+                await safe_send(
                     {
                         "type": "error",
                         "error": {"message": f"unsupported websocket message type: {payload.get('type')}"},
@@ -1319,16 +1349,42 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                 )
                 continue
 
-            try:
-                result = await state.process_websocket_create(payload)
-            except Exception as exc:
-                await ws.send_json({"type": "error", "error": {"message": str(exc)}})
+            # Pre-mint the response id and acknowledge IMMEDIATELY so Codex's
+            # WS client doesn't time out waiting through a long generation.
+            # The same id flows into process_websocket_create so backend
+            # lineage and the events we send Codex stay consistent.
+            preset_id = state.mint_response_id(
+                "warm" if payload.get("generate") is False else "resp"
+            )
+            if not await safe_send(
+                {"type": "response.created", "response": {"id": preset_id}}
+            ):
+                # Client dropped before we could ack; skip the heavy work.
                 continue
 
-            await ws.send_json({"type": "response.created", "response": {"id": result["response_id"]}})
+            try:
+                result = await state.process_websocket_create(
+                    payload, preset_response_id=preset_id
+                )
+            except Exception as exc:
+                await safe_send(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": preset_id,
+                            "status": "failed",
+                            "error": {"message": str(exc)},
+                        },
+                    }
+                )
+                continue
+
             for item in result["output_items"]:
-                await ws.send_json({"type": "response.output_item.done", "item": item})
-            await ws.send_json(
+                if not await safe_send(
+                    {"type": "response.output_item.done", "item": item}
+                ):
+                    break
+            await safe_send(
                 {
                     "type": "response.completed",
                     "response": {
