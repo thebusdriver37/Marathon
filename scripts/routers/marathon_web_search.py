@@ -44,10 +44,19 @@ from urllib.parse import urlsplit
 from aiohttp import ClientSession
 from aiohttp import ClientTimeout
 
+
+# Optional Crawl4AI backend for JS-heavy pages
+try:
+    from crawl4ai import AsyncWebCrawler
+    HAS_CRAWL4AI = True
+except ImportError:
+    HAS_CRAWL4AI = False
+
 LOG = logging.getLogger("marathon.web_search")
 
 WEB_SEARCH_TOOL_NAME = "web_search"
 WEB_FETCH_TOOL_NAME = "web_fetch"
+WEB_BROWSE_TOOL_NAME = "web_browse"
 
 WEB_SEARCH_TOOL_DESCRIPTION = (
     "Search the public web via SearXNG and return ranked results with title, "
@@ -64,7 +73,15 @@ WEB_FETCH_TOOL_DESCRIPTION = (
     "this after web_search when you need full page content (verbatim quotes, "
     "long articles, complete docs sections). Do NOT use shell curl/wget — "
     "this tool handles encoding, redirects, content extraction, and length "
-    "limits in one call."
+    "limits in one call. For pages that depend on browser-rendered JavaScript, "
+    "use web_browse instead."
+)
+
+WEB_BROWSE_TOOL_DESCRIPTION = (
+    "Render a single URL in a browser-backed extractor and return its main "
+    "content as Markdown. Use this only when web_fetch fails, returns mostly "
+    "navigation/empty content, or the page is known to depend on JavaScript. "
+    "This tool is slower and heavier than web_fetch."
 )
 
 WEB_SEARCH_TOOL_PARAMETERS: dict[str, Any] = {
@@ -105,6 +122,8 @@ WEB_FETCH_TOOL_PARAMETERS: dict[str, Any] = {
     },
     "required": ["url"],
 }
+
+WEB_BROWSE_TOOL_PARAMETERS: dict[str, Any] = copy.deepcopy(WEB_FETCH_TOOL_PARAMETERS)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -195,6 +214,21 @@ def web_fetch_function_tool() -> dict[str, Any]:
     }
 
 
+def web_browse_function_tool() -> dict[str, Any]:
+    """Return the browser-rendered web_browse function-tool spec."""
+
+    return {
+        "type": "function",
+        "name": WEB_BROWSE_TOOL_NAME,
+        "description": WEB_BROWSE_TOOL_DESCRIPTION,
+        "parameters": copy.deepcopy(WEB_BROWSE_TOOL_PARAMETERS),
+    }
+
+
+def web_browse_available() -> bool:
+    return HAS_CRAWL4AI and os.getenv("MARATHON_WEB_BROWSE_ENABLE", "1") != "0"
+
+
 def request_has_web_search_tool(tools: list[Any] | None) -> bool:
     """True iff the original Codex request included a web_search tool.
 
@@ -223,8 +257,20 @@ def is_web_fetch_function_call(item: Any) -> bool:
     return item.get("name") == WEB_FETCH_TOOL_NAME
 
 
+def is_web_browse_function_call(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("type") != "function_call":
+        return False
+    return item.get("name") == WEB_BROWSE_TOOL_NAME
+
+
 def is_managed_function_call(item: Any) -> bool:
-    return is_web_search_function_call(item) or is_web_fetch_function_call(item)
+    return (
+        is_web_search_function_call(item)
+        or is_web_fetch_function_call(item)
+        or is_web_browse_function_call(item)
+    )
 
 
 def parse_function_call_arguments(raw: Any) -> dict[str, Any]:
@@ -366,6 +412,17 @@ def make_web_fetch_call_item(call_id: str, url: str) -> dict[str, Any]:
     }
 
 
+def make_web_browse_call_item(call_id: str, url: str) -> dict[str, Any]:
+    """Build a Codex ``web_search_call`` item with action.type=open_page for browser fetches."""
+
+    return {
+        "type": "web_search_call",
+        "id": call_id if call_id else f"wb_{uuid.uuid4().hex}",
+        "status": "completed",
+        "action": {"type": "open_page", "url": url},
+    }
+
+
 class WebFetchExecutor:
     """Fetch a URL and return its main content as Markdown."""
 
@@ -378,22 +435,50 @@ class WebFetchExecutor:
         self._owned_client: ClientSession | None = None
         self._client: ClientSession | None = http_client
 
+        # Crawl4AI (Playwright) is expensive; keep it opt-in and reuse the
+        # crawler across requests when enabled.
+        self._crawl4ai: AsyncWebCrawler | None = None
+
     async def _ensure_client(self) -> ClientSession:
         if self._client is not None:
             return self._client
         if self._owned_client is None:
             self._owned_client = ClientSession(
                 timeout=ClientTimeout(total=self.settings.timeout_s),
-                headers={"User-Agent": self.settings.user_agent},
+                headers={
+                    "User-Agent": self.settings.user_agent,
+                    "Accept-Encoding": "gzip, deflate",
+                },
             )
             self._client = self._owned_client
         return self._client  # type: ignore[return-value]
 
     async def close(self) -> None:
+        if self._crawl4ai is not None:
+            try:
+                await self._crawl4ai.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._crawl4ai = None
         if self._owned_client is not None:
             await self._owned_client.close()
             self._owned_client = None
             self._client = None
+
+    async def _ensure_crawl4ai(self) -> AsyncWebCrawler | None:
+        if not HAS_CRAWL4AI:
+            return None
+        # Keep browser rendering explicit. web_fetch never calls this; only
+        # web_browse does. This env var lets users hide the browser path even
+        # when Crawl4AI is installed.
+        if os.getenv("MARATHON_WEB_BROWSE_ENABLE", "1") == "0":
+            return None
+        if self._crawl4ai is not None:
+            return self._crawl4ai
+        crawler = AsyncWebCrawler(verbose=False)
+        await crawler.__aenter__()
+        self._crawl4ai = crawler
+        return crawler
 
     async def fetch(self, url: str, max_chars: int | None = None) -> str:
         if not url or not isinstance(url, str):
@@ -449,7 +534,39 @@ class WebFetchExecutor:
         except Exception as exc:
             raise RuntimeError(f"web_fetch failed: {exc}") from exc
 
-        return _extract_to_markdown(raw, content_type, final_url, cap)
+        body = await _extract_to_markdown(raw, content_type, final_url, cap)
+        return body
+
+    async def browse(self, url: str, max_chars: int | None = None) -> str:
+        if not url or not isinstance(url, str):
+            raise ValueError("web_browse requires a non-empty url string")
+        url = url.strip()
+
+        await _validate_fetch_url(
+            url,
+            allow_private_networks=self.settings.allow_private_networks,
+        )
+
+        crawler = await self._ensure_crawl4ai()
+        if crawler is None:
+            if not HAS_CRAWL4AI:
+                raise RuntimeError(
+                    "web_browse requires Crawl4AI, but the crawl4ai package is not installed"
+                )
+            raise RuntimeError("web_browse is disabled by MARATHON_WEB_BROWSE_ENABLE=0")
+
+        cap = max_chars if max_chars is not None else self.settings.max_chars_default
+        cap = max(500, min(cap, self.settings.max_chars_cap))
+        crawl_md = await _crawl4ai_fetch(
+            crawler,
+            url,
+            cap=cap,
+            timeout_s=self.settings.timeout_s,
+            allow_private_networks=self.settings.allow_private_networks,
+        )
+        if not crawl_md:
+            raise RuntimeError("Crawl4AI did not return extractable Markdown")
+        return _format_fetched_markdown(url, crawl_md, cap)
 
 
 _BLOCKED_FETCH_HOSTNAMES = {
@@ -526,7 +643,19 @@ def _raise_if_disallowed_fetch_ip(
     )
 
 
-def _extract_to_markdown(raw: bytes, content_type: str, url: str, cap: int) -> str:
+def _format_fetched_markdown(url: str, body: str, cap: int) -> str:
+    body = body.strip()
+    truncated = False
+    if len(body) > cap:
+        body = body[:cap]
+        truncated = True
+    header = f"Fetched: {url}\n"
+    if truncated:
+        header += f"(truncated to {cap} chars)\n"
+    return header + "\n" + body
+
+
+async def _extract_to_markdown(raw: bytes, content_type: str, url: str, cap: int) -> str:
     """Convert fetched bytes into a clean Markdown excerpt."""
 
     text = _decode_bytes(raw, content_type)
@@ -538,16 +667,7 @@ def _extract_to_markdown(raw: bytes, content_type: str, url: str, cap: int) -> s
     else:
         body = text
 
-    body = body.strip()
-    truncated = False
-    if len(body) > cap:
-        body = body[:cap]
-        truncated = True
-
-    header = f"Fetched: {url}\n"
-    if truncated:
-        header += f"(truncated to {cap} chars)\n"
-    return header + "\n" + body
+    return _format_fetched_markdown(url, body, cap)
 
 
 def _decode_bytes(raw: bytes, content_type: str) -> str:
@@ -563,6 +683,46 @@ def _decode_bytes(raw: bytes, content_type: str) -> str:
             continue
     return raw.decode("utf-8", errors="replace")
 
+
+
+async def _crawl4ai_fetch(
+    crawler: AsyncWebCrawler,
+    url: str,
+    *,
+    cap: int,
+    timeout_s: float | None,
+    allow_private_networks: bool,
+) -> str | None:
+    """Use Crawl4AI to fetch and extract Markdown from a URL.
+
+    Returns clean Markdown if successful, None on Crawl4AI extraction failure.
+    """
+    try:
+        coro = crawler.arun(url, bypass_cache=True)
+        result = await asyncio.wait_for(coro, timeout=timeout_s) if timeout_s else await coro
+        # Best-effort redirect safety check: validate any final URL Crawl4AI reports
+        # before returning content. This does not prevent the browser from making
+        # the request, but it prevents leaking private-network content back to the
+        # model unless the user explicitly opts in.
+        if not allow_private_networks:
+            final_url: str | None = None
+            for attr in ("final_url", "url", "finalUrl"):
+                value = getattr(result, attr, None)
+                if isinstance(value, str) and value.strip():
+                    final_url = value.strip()
+                    break
+            if final_url:
+                await _validate_fetch_url(final_url, allow_private_networks=False)
+        markdown = getattr(result, "markdown", None)
+        if isinstance(markdown, str) and markdown.strip():
+            md = markdown.strip()
+            if len(md) > cap:
+                md = md[:cap]
+            return md
+    except Exception as exc:
+        LOG.warning("crawl4ai fetch failed for %s: %s", url, exc)
+        raise RuntimeError(f"Crawl4AI fetch failed: {exc}") from exc
+    return None
 
 def _html_to_markdown(html: str, url: str) -> str:
     try:
@@ -640,6 +800,14 @@ def externalize_for_codex(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 consumed_outputs.add(call_id)
             result.append(make_web_fetch_call_item(call_id, url))
             continue
+        if is_web_browse_function_call(item):
+            call_id = str(item.get("call_id") or item.get("id") or "")
+            args = parse_function_call_arguments(item.get("arguments"))
+            url = str(args.get("url") or "").strip()
+            if call_id:
+                consumed_outputs.add(call_id)
+            result.append(make_web_browse_call_item(call_id, url))
+            continue
         if item.get("type") == "function_call_output":
             cid = str(item.get("call_id") or "")
             if cid and cid in consumed_outputs:
@@ -650,7 +818,7 @@ def externalize_for_codex(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def collect_managed_calls(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return all web_search and web_fetch function_call items in order."""
+    """Return all managed web function_call items in order."""
 
     return [item for item in items if is_managed_function_call(item)]
 
@@ -672,6 +840,7 @@ __all__ = [
     "WebFetchSettings",
     "WebSearchExecutor",
     "WebSearchSettings",
+    "WEB_BROWSE_TOOL_NAME",
     "WEB_FETCH_TOOL_NAME",
     "WEB_SEARCH_TOOL_NAME",
     "collect_managed_calls",
@@ -679,14 +848,18 @@ __all__ = [
     "externalize_for_codex",
     "format_results_for_model",
     "is_managed_function_call",
+    "is_web_browse_function_call",
     "is_web_fetch_function_call",
     "is_web_search_function_call",
     "make_function_call_output",
+    "make_web_browse_call_item",
     "make_web_fetch_call_item",
     "make_web_search_call_item",
     "parse_function_call_arguments",
     "request_has_web_search_tool",
     "synthesize_call_id",
+    "web_browse_available",
+    "web_browse_function_tool",
     "web_fetch_function_tool",
     "web_search_function_tool",
 ]

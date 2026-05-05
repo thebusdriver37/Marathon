@@ -62,8 +62,13 @@ Marathon ships a layered web-tool pipeline for the local model:
   returns clean Markdown with link preservation. Use this after `web_search`
   whenever the model needs full page content (verbatim quotes, long docs,
   complete article bodies). Replaces ad-hoc `curl` from the model.
+- **`web_browse`** — optional Crawl4AI-backed browser rendering for pages where
+  `web_fetch` fails or returns mostly empty/navigation content. This path is
+  heavier, is exposed only when Crawl4AI is installed, and only runs when the
+  model explicitly calls it.
 
-Both tools are exposed as one unit: enabling web search also enables fetch.
+These tools are exposed as one unit: enabling web search also enables fetch and
+browse.
 The router translates Codex's `web_search` config into the function tools the
 local model can actually call, runs the multi-turn tool loop transparently
 inside one Codex request, and rewrites the result back into `web_search_call`
@@ -76,7 +81,7 @@ Python 3.10+ on the host.
 ```bash
 ./bin/marathon setup-deps       # one-time: create .marathon/venv for the router
 ./bin/marathon search up        # one-time: pull image, generate secret, start SearXNG
-./bin/marathon                  # launch — router auto-wires web_search and web_fetch
+./bin/marathon                  # launch — router auto-wires the web tools
 ```
 
 The first `search up` writes `docker/searxng/.env` from `.env.example`,
@@ -104,6 +109,7 @@ generates a fresh `MARATHON_SEARXNG_SECRET`, and binds the container to
 | `MARATHON_WEB_FETCH_MAX_BYTES` | `5 MiB` | Hard cap on raw response size |
 | `MARATHON_WEB_FETCH_USER_AGENT` | Marathon-identifying Mozilla UA | UA the fetch executor sends |
 | `MARATHON_WEB_FETCH_ALLOW_PRIVATE` | unset | Set to `1` only if fetches to loopback/private network URLs are intentional |
+| `MARATHON_WEB_BROWSE_ENABLE` | `1` | Set to `0` to hide the optional Crawl4AI-backed `web_browse` tool path |
 | `MARATHON_ROUTER_PYTHON` | `.marathon/venv/bin/python3` | Python interpreter the launcher uses for the router |
 
 ## Updating Codex

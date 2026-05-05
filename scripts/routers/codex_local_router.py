@@ -36,6 +36,7 @@ from aiohttp import web
 
 from marathon_web_search import WebFetchExecutor
 from marathon_web_search import WebFetchSettings
+from marathon_web_search import WEB_BROWSE_TOOL_NAME
 from marathon_web_search import WEB_FETCH_TOOL_NAME
 from marathon_web_search import WEB_SEARCH_TOOL_NAME
 from marathon_web_search import WebSearchExecutor
@@ -43,12 +44,15 @@ from marathon_web_search import WebSearchSettings
 from marathon_web_search import collect_managed_calls
 from marathon_web_search import externalize_for_codex
 from marathon_web_search import format_results_for_model
+from marathon_web_search import is_web_browse_function_call
 from marathon_web_search import is_web_fetch_function_call
 from marathon_web_search import is_web_search_function_call
 from marathon_web_search import make_function_call_output
 from marathon_web_search import parse_function_call_arguments
 from marathon_web_search import request_has_web_search_tool
 from marathon_web_search import synthesize_call_id
+from marathon_web_search import web_browse_available
+from marathon_web_search import web_browse_function_tool
 from marathon_web_search import web_fetch_function_tool
 from marathon_web_search import web_search_function_tool
 
@@ -73,7 +77,7 @@ DEFAULT_USAGE = {
     "total_tokens": 0,
 }
 
-MANAGED_WEB_TOOL_NAMES = {WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME}
+MANAGED_WEB_TOOL_NAMES = {WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME, WEB_BROWSE_TOOL_NAME}
 
 
 @dataclass(frozen=True)
@@ -317,6 +321,8 @@ def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
             normalized_tools.append(web_search_function_tool())
         if WEB_FETCH_TOOL_NAME not in names:
             normalized_tools.append(web_fetch_function_tool())
+        if web_browse_available() and WEB_BROWSE_TOOL_NAME not in names:
+            normalized_tools.append(web_browse_function_tool())
         data["tools"] = normalized_tools
     data["_marathon_web_search_enabled"] = web_search_requested
 
@@ -823,9 +829,47 @@ class RouterState:
 
         return make_function_call_output(call_id, content)
 
+    async def _execute_web_browse_call(
+        self, item: dict[str, Any], fallback_index: int
+    ) -> dict[str, Any]:
+        call_id = synthesize_call_id(item, fallback_index)
+        args = parse_function_call_arguments(item.get("arguments"))
+        url = str(args.get("url") or "").strip()
+        max_chars_raw = args.get("max_chars")
+        max_chars: int | None
+        if isinstance(max_chars_raw, int):
+            max_chars = max_chars_raw
+        elif isinstance(max_chars_raw, str) and max_chars_raw.isdigit():
+            max_chars = int(max_chars_raw)
+        else:
+            max_chars = None
+
+        if self.web_fetch is None:
+            return make_function_call_output(
+                call_id, "Web browse is unavailable: router has no executor configured."
+            )
+        if not url:
+            return make_function_call_output(
+                call_id, "Web browse error: missing 'url' argument."
+            )
+
+        try:
+            content = await self.web_fetch.browse(url, max_chars=max_chars)
+        except Exception as exc:
+            self._log_tool_error("web_browse", url, exc)
+            return make_function_call_output(
+                call_id,
+                f"web_browse failed for {url}: {exc}\nUse web_fetch for static "
+                "pages, or tell the user the browser-rendered extractor is unavailable.",
+            )
+
+        return make_function_call_output(call_id, content)
+
     async def _execute_managed_call(
         self, item: dict[str, Any], fallback_index: int
     ) -> dict[str, Any]:
+        if is_web_browse_function_call(item):
+            return await self._execute_web_browse_call(item, fallback_index)
         if is_web_fetch_function_call(item):
             return await self._execute_web_fetch_call(item, fallback_index)
         return await self._execute_web_search_call(item, fallback_index)
