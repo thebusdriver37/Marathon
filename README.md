@@ -52,6 +52,26 @@ QWEN36_35B_A3B_GGUF=/path/to/model.gguf ./bin/marathon a3b
 ./bin/marathon search up     # bring up the SearXNG container (web search backend)
 ```
 
+## Prompt Cache Snapshots
+
+Marathon uses llama.cpp slot save/restore to emulate Codex's
+`previous_response_id` behavior locally. These snapshots live under
+`.marathon/llama-slots/` and are an ephemeral speed cache, not durable chat
+history. Linear follow-up turns reuse the live llama.cpp slot directly; disk
+snapshots are kept only as bounded fallback cache for recent branches.
+
+At router startup Marathon deletes stale slot snapshots, because the in-memory
+response lineage needed to use them does not survive a router restart. During
+runtime it keeps each profile's snapshot directory capped by both count and
+bytes so 128K sessions cannot silently fill the disk.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `MARATHON_SLOT_SAVE_ROOT` | `.marathon/llama-slots` | Root directory passed to llama.cpp `--slot-save-path` launchers |
+| `MARATHON_SLOT_SNAPSHOT_MAX_COUNT` | `16` | Max snapshots retained per model profile during one router process |
+| `MARATHON_SLOT_SNAPSHOT_MAX_BYTES` | `32 GiB` | Max snapshot bytes retained per model profile |
+| `MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP` | `1` | Delete stale snapshots on router startup; set `0` only for debugging |
+
 ## Web tools (Search + Fetch)
 
 Marathon ships a layered web-tool pipeline for the local model:

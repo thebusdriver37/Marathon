@@ -94,6 +94,9 @@ BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES = {
 }
 
 WS_KEEPALIVE_INTERVAL_SECONDS = float(os.getenv("MARATHON_WS_KEEPALIVE_INTERVAL_SECONDS", "15"))
+DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 16
+DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
+DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = True
 
 StreamEventSink = Callable[[dict[str, Any]], Awaitable[bool]]
 
@@ -181,6 +184,23 @@ def _model_candidates(env_var: str, relative_paths: tuple[str, ...]) -> tuple[st
 
 def _target_override(env_var: str, default: str) -> str:
     return os.getenv(env_var) or default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _profiles() -> dict[str, ModelProfile]:
@@ -482,6 +502,24 @@ class RouterState:
         self.current_model: str | None = None
         self.slot_id = int(os.getenv("MARATHON_ROUTER_SLOT_ID") or "0")
         self.experimental_delta_only = bool(os.getenv("MARATHON_WS_EXPERIMENTAL_DELTA_ONLY"))
+        configured_slot_save_root = os.getenv("MARATHON_SLOT_SAVE_ROOT")
+        self.slot_save_root = (
+            Path(configured_slot_save_root).expanduser()
+            if configured_slot_save_root
+            else _repo_root() / ".marathon" / "llama-slots"
+        )
+        self.slot_snapshot_max_count = max(
+            0,
+            _env_int("MARATHON_SLOT_SNAPSHOT_MAX_COUNT", DEFAULT_SLOT_SNAPSHOT_MAX_COUNT),
+        )
+        self.slot_snapshot_max_bytes = max(
+            0,
+            _env_int("MARATHON_SLOT_SNAPSHOT_MAX_BYTES", DEFAULT_SLOT_SNAPSHOT_MAX_BYTES),
+        )
+        self.slot_snapshot_clean_startup = _env_bool(
+            "MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP",
+            DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP,
+        )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.trace_log_path = self.log_dir / "codex_local_router_trace.jsonl"
@@ -491,6 +529,7 @@ class RouterState:
         self._last_trace_by_model: dict[str, dict[str, Any]] = {}
         self.lineage: dict[str, ResponseSnapshot] = {}
         self.last_response_by_model: dict[str, str] = {}
+        self.live_slot_by_model: dict[str, str] = {}
         self.http_client: ClientSession | None = None
         self.web_search_settings = WebSearchSettings.from_env()
         self.web_search: WebSearchExecutor | None = None
@@ -687,6 +726,7 @@ class RouterState:
                 self._stop_other_backends(profile.slug)
             if not self._profile_ready(profile):
                 self._stop_profile(profile)
+                self.live_slot_by_model.pop(profile.slug, None)
                 self._start_profile(profile)
                 self._wait_for_profile(profile)
             self.current_model = profile.slug
@@ -731,6 +771,7 @@ class RouterState:
     def _stop_profile(self, profile: ModelProfile) -> None:
         pid = self._port_owner_pid(profile.port)
         if pid is None:
+            self.live_slot_by_model.pop(profile.slug, None)
             self._profile_pid_file(profile).unlink(missing_ok=True)
             return
         cmd = self._pid_cmdline(pid)
@@ -743,12 +784,14 @@ class RouterState:
         for _ in range(10):
             time.sleep(1)
             if self._port_owner_pid(profile.port) is None:
+                self.live_slot_by_model.pop(profile.slug, None)
                 self._profile_pid_file(profile).unlink(missing_ok=True)
                 return
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        self.live_slot_by_model.pop(profile.slug, None)
         self._profile_pid_file(profile).unlink(missing_ok=True)
 
     def _start_profile(self, profile: ModelProfile) -> None:
@@ -957,6 +1000,167 @@ class RouterState:
     async def restore_slot(self, profile: ModelProfile, filename: str) -> dict[str, Any]:
         return await self._slot_action(profile, "restore", filename)
 
+    def _slot_save_dir(self, profile: ModelProfile) -> Path:
+        return self.slot_save_root / profile.alias
+
+    def _delete_slot_snapshots_sync(self, profile: ModelProfile) -> dict[str, Any]:
+        slot_dir = self._slot_save_dir(profile)
+        deleted: list[str] = []
+        deleted_bytes = 0
+        if not slot_dir.is_dir():
+            return {
+                "enabled": True,
+                "deleted": deleted,
+                "deleted_count": 0,
+                "deleted_bytes": 0,
+                "slot_dir": str(slot_dir),
+            }
+
+        prefix = f"{profile.slug}__"
+        for path in slot_dir.glob(f"{prefix}*.bin"):
+            try:
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            deleted.append(path.name)
+            deleted_bytes += size
+
+        return {
+            "enabled": True,
+            "deleted": deleted,
+            "deleted_count": len(deleted),
+            "deleted_bytes": deleted_bytes,
+            "slot_dir": str(slot_dir),
+        }
+
+    async def clean_startup_slot_snapshots(self) -> list[dict[str, Any]]:
+        if not self.slot_snapshot_clean_startup:
+            return []
+        results: list[dict[str, Any]] = []
+        for profile in self.available_profiles.values():
+            result = await asyncio.to_thread(self._delete_slot_snapshots_sync, profile)
+            if result.get("deleted_count"):
+                results.append({"profile_slug": profile.slug, **result})
+        return results
+
+    def _prune_slot_snapshots_sync(
+        self,
+        profile: ModelProfile,
+        protected_filename: str | None,
+    ) -> dict[str, Any]:
+        max_count = self.slot_snapshot_max_count
+        max_bytes = self.slot_snapshot_max_bytes
+        if max_count <= 0 and max_bytes <= 0:
+            return {
+                "enabled": False,
+                "deleted": [],
+                "deleted_bytes": 0,
+                "kept_count": 0,
+                "kept_bytes": 0,
+            }
+
+        slot_dir = self._slot_save_dir(profile)
+        if not slot_dir.is_dir():
+            return {
+                "enabled": True,
+                "deleted": [],
+                "deleted_bytes": 0,
+                "kept_count": 0,
+                "kept_bytes": 0,
+            }
+
+        prefix = f"{profile.slug}__"
+        snapshots: list[dict[str, Any]] = []
+        for path in slot_dir.glob(f"{prefix}*.bin"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if not path.is_file():
+                continue
+            snapshots.append(
+                {
+                    "path": path,
+                    "name": path.name,
+                    "size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                }
+            )
+
+        snapshots.sort(key=lambda item: (item["mtime"], item["name"]), reverse=True)
+        kept_count = 0
+        kept_bytes = 0
+        deleted: list[str] = []
+        deleted_bytes = 0
+
+        for snapshot in snapshots:
+            name = str(snapshot["name"])
+            size = int(snapshot["size"])
+            path = snapshot["path"]
+            if size <= 0:
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                deleted.append(name)
+                continue
+
+            if protected_filename and name == protected_filename:
+                kept_count += 1
+                kept_bytes += size
+                continue
+
+            within_count = max_count <= 0 or kept_count < max_count
+            within_bytes = max_bytes <= 0 or kept_bytes + size <= max_bytes
+            if within_count and within_bytes:
+                kept_count += 1
+                kept_bytes += size
+                continue
+
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            deleted.append(name)
+            deleted_bytes += size
+
+        return {
+            "enabled": True,
+            "max_count": max_count,
+            "max_bytes": max_bytes,
+            "deleted": deleted,
+            "deleted_count": len(deleted),
+            "deleted_bytes": deleted_bytes,
+            "kept_count": kept_count,
+            "kept_bytes": kept_bytes,
+            "slot_dir": str(slot_dir),
+        }
+
+    async def prune_slot_snapshots(
+        self,
+        profile: ModelProfile,
+        protected_filename: str | None = None,
+    ) -> dict[str, Any]:
+        result = await asyncio.to_thread(
+            self._prune_slot_snapshots_sync,
+            profile,
+            protected_filename,
+        )
+        deleted = result.get("deleted")
+        if isinstance(deleted, list) and deleted:
+            deleted_names = {str(name) for name in deleted}
+            async with self.lineage_lock:
+                for snapshot in self.lineage.values():
+                    if (
+                        snapshot.profile_slug == profile.slug
+                        and snapshot.snapshot_filename in deleted_names
+                    ):
+                        snapshot.snapshot_filename = ""
+        return result
+
     async def backend_health(self, profile: ModelProfile | None = None) -> dict[str, Any]:
         target_profile = profile or self.resolve_model(self.current_model or self.default_model)
         return await self._request_json(target_profile, "GET", "/health")
@@ -992,6 +1196,22 @@ class RouterState:
                 "a", encoding="utf-8"
             ) as handle:
                 handle.write(f"{tool} error for {key!r}: {exc}\n")
+        except Exception:
+            pass
+
+    def _log_slot_cleanup(self, results: list[dict[str, Any]]) -> None:
+        if not results:
+            return
+        deleted_count = sum(int(result.get("deleted_count") or 0) for result in results)
+        deleted_bytes = sum(int(result.get("deleted_bytes") or 0) for result in results)
+        try:
+            with self.log_dir.joinpath("codex_local_router.log").open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write(
+                    "slot snapshot startup cleanup deleted "
+                    f"{deleted_count} files / {deleted_bytes} bytes\n"
+                )
         except Exception:
             pass
 
@@ -1399,22 +1619,35 @@ class RouterState:
             restore_error: str | None = None
             slot_prepare_mode = "erase-root"
             slot_prepare_start = time.perf_counter()
+            live_parent = (
+                parent_snapshot is not None
+                and previous_response_id is not None
+                and self.live_slot_by_model.get(profile.slug) == previous_response_id
+            )
             if parent_snapshot is None:
                 erase_result = await self.erase_slot(profile)
+                self.live_slot_by_model.pop(profile.slug, None)
             elif not scaffold_matches:
                 slot_prepare_mode = "erase-scaffold-mismatch"
                 erase_result = await self.erase_slot(profile)
+                self.live_slot_by_model.pop(profile.slug, None)
+            elif live_parent:
+                slot_prepare_mode = "reuse-live-parent"
+                restore_result = {"status": "skipped", "reason": "live slot already matches parent"}
             elif not parent_snapshot.snapshot_filename:
                 slot_prepare_mode = "erase-parent-no-snapshot"
                 erase_result = await self.erase_slot(profile)
+                self.live_slot_by_model.pop(profile.slug, None)
             else:
                 slot_prepare_mode = "restore-parent"
                 try:
                     restore_result = await self.restore_slot(profile, parent_snapshot.snapshot_filename)
+                    self.live_slot_by_model[profile.slug] = previous_response_id
                 except Exception as exc:
                     restore_error = str(exc)
                     slot_prepare_mode = "erase-restore-error"
                     erase_result = await self.erase_slot(profile)
+                    self.live_slot_by_model.pop(profile.slug, None)
             slot_prepare_ms = (time.perf_counter() - slot_prepare_start) * 1000.0
 
             backend_start = time.perf_counter()
@@ -1430,7 +1663,9 @@ class RouterState:
                 backend_response.get("id") or self.mint_response_id("resp")
             )
             snapshot_filename = f"{profile.slug}__{response_id}.bin"
+            snapshot_path = self._slot_save_dir(profile) / snapshot_filename
 
+            pre_prune_result = await self.prune_slot_snapshots(profile)
             save_start = time.perf_counter()
             save_result: dict[str, Any] | None = None
             save_error: str | None = None
@@ -1439,6 +1674,20 @@ class RouterState:
             except Exception as exc:
                 save_error = str(exc)
             slot_save_ms = (time.perf_counter() - save_start) * 1000.0
+            snapshot_saved = False
+            if save_error is None:
+                try:
+                    snapshot_saved = snapshot_path.is_file() and snapshot_path.stat().st_size > 0
+                except OSError:
+                    snapshot_saved = False
+                if not snapshot_saved:
+                    save_error = "slot save produced an empty or missing snapshot"
+            post_prune_result: dict[str, Any] | None = None
+            post_prune_result = await self.prune_slot_snapshots(
+                profile,
+                protected_filename=snapshot_filename if snapshot_saved else None,
+            )
+            self.live_slot_by_model[profile.slug] = response_id
 
         output_items = all_output_items
 
@@ -1450,7 +1699,7 @@ class RouterState:
                 response_id=response_id,
                 profile_slug=profile.slug,
                 conversation_items=conversation_items,
-                snapshot_filename=snapshot_filename,
+                snapshot_filename=snapshot_filename if snapshot_saved else "",
                 instructions_hash=instructions_hash,
                 tools_hash=tools_hash,
                 created_at=time.time(),
@@ -1491,7 +1740,10 @@ class RouterState:
                         "restore_error": restore_error,
                         "save_result": save_result,
                         "save_error": save_error,
+                        "pre_prune_result": pre_prune_result,
+                        "post_prune_result": post_prune_result,
                         "snapshot_filename": snapshot_filename,
+                        "snapshot_saved": snapshot_saved,
                     },
                     "backend": {
                         "usage": usage_payload,
@@ -1539,7 +1791,13 @@ async def handle_health(request: web.Request) -> web.Response:
             "current_model": state.current_model,
             "available_models": list(state.available_profiles),
             "slot_id": state.slot_id,
+            "slot_snapshot_retention": {
+                "max_count": state.slot_snapshot_max_count,
+                "max_bytes": state.slot_snapshot_max_bytes,
+                "clean_startup": state.slot_snapshot_clean_startup,
+            },
             "known_lineage": len(state.lineage),
+            "live_slots": dict(state.live_slot_by_model),
             "backend_health": backend_status,
         }
     )
@@ -1748,10 +2006,10 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
 
     return ws
 
-
 async def on_startup(app: web.Application) -> None:
     state: RouterState = app["state"]
     await state.open()
+    state._log_slot_cleanup(await state.clean_startup_slot_snapshots())
     threading.Thread(target=state.ensure_model, args=(state.default_model,), daemon=True).start()
 
 
