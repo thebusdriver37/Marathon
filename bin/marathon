@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$SOURCE_DIR/$SOURCE"
+done
+ROOT_DIR="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
 usage() {
   cat <<USAGE
@@ -9,13 +15,11 @@ Usage: marathon [command] [codex args...]
 
 Commands:
   chat            Launch the default local Codex TUI (default)
-  128k            Launch Qwen3.6 27B Q4 128K
-  128k-single     Launch Qwen3.6 27B Q4 128K on one GPU
-  fast            Launch Qwen3.6 27B Q4 32K
-  a3b             Launch Qwen3.6 35B A3B
+  backend <sub>   Manage the local router and llama.cpp backend
   resume          Resume a previous Marathon interactive session
   fork            Fork a previous Marathon interactive session
   exec            Run headless Codex exec against the default local model
+  install         Install the marathon command into ~/.local/bin
   search <sub>    Manage the SearXNG container (up | down | status | logs | url | restart | pull)
   setup-deps      Create .marathon/venv and install router Python dependencies
   build           Build patched Marathon binaries
@@ -42,17 +46,8 @@ case "$cmd" in
   chat)
     exec "$ROOT_DIR/scripts/launchers/start_codex.sh" "$@"
     ;;
-  128k)
-    exec "$ROOT_DIR/scripts/launchers/start_128k.sh" "$@"
-    ;;
-  128k-single)
-    exec "$ROOT_DIR/scripts/launchers/start_128k_single.sh" "$@"
-    ;;
-  fast)
-    exec "$ROOT_DIR/scripts/launchers/start_fast.sh" "$@"
-    ;;
-  a3b)
-    exec "$ROOT_DIR/scripts/launchers/start_a3b.sh" "$@"
+  backend)
+    exec "$ROOT_DIR/scripts/ops/backend.sh" "$@"
     ;;
   resume)
     exec "$ROOT_DIR/scripts/launchers/start_codex.sh" resume "$@"
@@ -62,6 +57,9 @@ case "$cmd" in
     ;;
   exec)
     exec "$ROOT_DIR/scripts/launchers/start_codex.sh" exec "$@"
+    ;;
+  install)
+    exec "$ROOT_DIR/scripts/ops/install_cli.sh" "$@"
     ;;
   search)
     exec "$ROOT_DIR/scripts/ops/searxng.sh" "$@"

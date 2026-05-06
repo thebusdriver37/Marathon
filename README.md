@@ -12,13 +12,27 @@ The design goal is to keep Codex upstream-friendly:
 ## Quick Start
 
 ```bash
+git clone --recurse-submodules <marathon-repo-url>
+cd Marathon
+./bin/marathon install        # makes `marathon` available from any repo
 git submodule update --init --recursive
-./bin/marathon build
-./bin/marathon setup-llama
-./bin/marathon setup-deps     # creates .marathon/venv for router Python deps
-./bin/marathon search up      # optional: brings up SearXNG for web_search/web_fetch tools
-./bin/marathon 128k --no-alt-screen
+marathon build
+marathon setup-llama
+marathon setup-deps           # creates .marathon/venv for router Python deps
+marathon search up            # optional: brings up SearXNG for web_search/web_fetch tools
+marathon backend start 128k-single
 ```
+
+After `marathon install`, run Marathon from the project directory you want
+Codex to edit:
+
+```bash
+cd /path/to/your/repo
+marathon
+```
+
+If your shell cannot find `marathon`, make sure `~/.local/bin` is on `PATH`.
+The install command prints the exact `export PATH=...` line when needed.
 
 By default Marathon looks for models under `~/models`.
 
@@ -37,20 +51,26 @@ Expected 35B A3B path:
 You can override paths:
 
 ```bash
-QWEN36_27B_GGUF=/path/to/model.gguf ./bin/marathon 128k
-QWEN36_35B_A3B_GGUF=/path/to/model.gguf ./bin/marathon a3b
+QWEN36_27B_GGUF=/path/to/model.gguf marathon backend start 128k-single
+QWEN36_35B_A3B_GGUF=/path/to/model.gguf marathon backend start a3b
 ```
 
 ## Commands
 
 ```bash
-./bin/marathon 128k          # default long-context Qwen3.6 27B profile
-./bin/marathon fast          # faster 32K Qwen3.6 27B profile
-./bin/marathon a3b           # Qwen3.6 35B A3B profile
-./bin/marathon exec "..."    # headless Codex exec
-./bin/marathon sweep-128k    # focused config sweep
-./bin/marathon search up     # bring up the SearXNG container (web search backend)
+marathon backend start 128k-single   # start router + llama.cpp backend
+marathon backend status              # show backend health
+marathon backend logs -f             # follow router logs
+marathon backend stop                # stop router + llama.cpp backend
+marathon                             # launch the TUI from the current repo
+marathon exec "..."                  # headless Codex exec from the current repo
+marathon search up                   # bring up the SearXNG container
+marathon sweep-128k                  # focused config sweep
 ```
+
+The backend is intentionally explicit. Start it once, leave it running, then
+open Marathon from any repo with `marathon`. The frontend does not start or
+switch model servers on its own.
 
 ## Prompt Cache Snapshots
 
@@ -101,7 +121,8 @@ Python 3.10+ on the host.
 ```bash
 ./bin/marathon setup-deps       # one-time: create .marathon/venv for the router
 ./bin/marathon search up        # one-time: pull image, generate secret, start SearXNG
-./bin/marathon                  # launch — router auto-wires the web tools
+./bin/marathon backend start 128k-single
+./bin/marathon                  # launch — router wires the web tools
 ```
 
 The first `search up` writes `docker/searxng/.env` from `.env.example`,

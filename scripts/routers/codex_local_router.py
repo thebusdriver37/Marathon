@@ -94,6 +94,7 @@ BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES = {
 }
 
 WS_KEEPALIVE_INTERVAL_SECONDS = float(os.getenv("MARATHON_WS_KEEPALIVE_INTERVAL_SECONDS", "15"))
+WS_SEND_TIMEOUT_SECONDS = float(os.getenv("MARATHON_WS_SEND_TIMEOUT_SECONDS", "5"))
 DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 16
 DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = True
@@ -108,6 +109,15 @@ CODEX_STREAM_EVENT_TYPES = {
     "response.reasoning_summary_part.added",
     "response.reasoning_summary_text.delta",
     "response.reasoning_text.delta",
+}
+
+FOLLOWUP_WORK_ITEM_TYPES = {
+    "function_call",
+    "custom_tool_call",
+    "local_shell_call",
+    "tool_search_call",
+    "web_search_call",
+    "image_generation_call",
 }
 
 
@@ -157,7 +167,7 @@ def _repo_root() -> Path:
 
 
 def _prompt_path() -> Path:
-    configured = os.getenv("MARATHON_PROMPT_FILE") or os.getenv("CODEX_QWEN_PROMPT_FILE")
+    configured = os.getenv("MARATHON_PROMPT_FILE")
     if configured:
         return Path(configured).expanduser().resolve()
     return _repo_root() / "codex" / "codex-rs" / "models-manager" / "prompt.md"
@@ -314,6 +324,65 @@ def _stable_json(value: Any) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _is_assistant_message_item(item: Any) -> bool:
+    return (
+        isinstance(item, dict)
+        and item.get("type") == "message"
+        and item.get("role") == "assistant"
+    )
+
+
+def _starts_followup_work(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return str(item.get("type") or "") in FOLLOWUP_WORK_ITEM_TYPES
+
+
+def _set_assistant_message_phase(item: dict[str, Any], phase: str) -> None:
+    if _is_assistant_message_item(item) and not item.get("phase"):
+        item["phase"] = phase
+
+
+def _assistant_message_text(item: dict[str, Any]) -> str:
+    if not _is_assistant_message_item(item):
+        return ""
+    content = item.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") not in {"output_text", "text"}:
+            continue
+        text = part.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    return "".join(parts)
+
+
+def _is_ellipsis_filler_text(text: str) -> bool:
+    compact = "".join(text.strip().split())
+    if not compact:
+        return True
+    return len(compact) <= 6 and all(ch in {".", "…"} for ch in compact)
+
+
+def _is_droppable_commentary_message(item: dict[str, Any]) -> bool:
+    return (
+        _is_assistant_message_item(item)
+        and item.get("phase") == "commentary"
+        and _is_ellipsis_filler_text(_assistant_message_text(item))
+    )
+
+
+def _annotate_message_phases(items: list[dict[str, Any]], final_response: bool) -> None:
+    contains_followup_work = any(_starts_followup_work(item) for item in items)
+    phase = "commentary" if contains_followup_work or not final_response else "final_answer"
+    for item in items:
+        _set_assistant_message_phase(item, phase)
 
 
 def _pop_sse_frame(buffer: bytes) -> tuple[bytes | None, bytes]:
@@ -900,12 +969,53 @@ class RouterState:
         output_items: list[dict[str, Any]] = []
         completed_response: dict[str, Any] | None = None
         suppressed_item_ids: set[str] = set()
+        pending_message_done: dict[str, Any] | None = None
+        pending_message_added: dict[str, dict[str, Any]] = {}
+        pending_message_deltas: dict[str, list[dict[str, Any]]] = {}
+        pending_message_text: dict[str, str] = {}
+        forwarded_message_ids: set[str] = set()
 
         async def send_event(event: dict[str, Any]) -> None:
             if event_sink is None:
                 return
             if not await event_sink(event):
                 raise ConnectionError("websocket client disconnected")
+
+        async def flush_pending_message_stream(item_id: str) -> None:
+            if not item_id or item_id in forwarded_message_ids:
+                return
+            added = pending_message_added.pop(item_id, None)
+            if added is not None:
+                await send_event(added)
+            for delta_event in pending_message_deltas.pop(item_id, []):
+                await send_event(delta_event)
+            pending_message_text.pop(item_id, None)
+            forwarded_message_ids.add(item_id)
+
+        def drop_pending_message_stream(item_id: str) -> None:
+            if not item_id:
+                return
+            pending_message_added.pop(item_id, None)
+            pending_message_deltas.pop(item_id, None)
+            pending_message_text.pop(item_id, None)
+            forwarded_message_ids.discard(item_id)
+
+        async def flush_pending_message(phase: str) -> None:
+            nonlocal pending_message_done
+            if pending_message_done is None:
+                return
+            item = pending_message_done.get("item")
+            if isinstance(item, dict):
+                _set_assistant_message_phase(item, phase)
+                item_id = str(item.get("id") or "")
+                if _is_droppable_commentary_message(item):
+                    drop_pending_message_stream(item_id)
+                    pending_message_done = None
+                    return
+                await flush_pending_message_stream(item_id)
+                output_items.append(copy.deepcopy(item))
+            await send_event(pending_message_done)
+            pending_message_done = None
 
         async with self.http_client.post(url, json=request) as response:
             if response.status >= 400:
@@ -929,6 +1039,16 @@ class RouterState:
                     item_id = event_item_id
 
                 if event_type == "response.output_item.added":
+                    if isinstance(item, dict) and _is_assistant_message_item(item) and item_id:
+                        pending_message_added[item_id] = copy.deepcopy(event)
+                        pending_message_text[item_id] = _assistant_message_text(item)
+                        if not _is_ellipsis_filler_text(pending_message_text[item_id]):
+                            await flush_pending_message_stream(item_id)
+                        continue
+
+                    if isinstance(item, dict):
+                        await flush_pending_message("commentary")
+
                     if isinstance(item, dict) and (
                         is_web_search_function_call(item)
                         or is_web_fetch_function_call(item)
@@ -941,15 +1061,31 @@ class RouterState:
                         await send_event(event)
                     continue
 
+                if event_type == "response.output_text.delta" and item_id in pending_message_added:
+                    pending_message_deltas.setdefault(item_id, []).append(copy.deepcopy(event))
+                    delta = event.get("delta")
+                    if isinstance(delta, str):
+                        pending_message_text[item_id] = pending_message_text.get(item_id, "") + delta
+                    if not _is_ellipsis_filler_text(pending_message_text.get(item_id, "")):
+                        await flush_pending_message_stream(item_id)
+                    continue
+
                 if event_type == "response.output_item.done":
                     if isinstance(item, dict):
                         sanitized = self.sanitize_output_item(item)
+                        if _is_assistant_message_item(sanitized):
+                            pending_message_done = copy.deepcopy(event)
+                            pending_message_done["item"] = sanitized
+                            continue
                         output_items.append(sanitized)
                         if collect_managed_calls([sanitized]):
+                            await flush_pending_message("commentary")
                             if item_id:
                                 suppressed_item_ids.add(item_id)
                             continue
                     if event_type in CODEX_STREAM_EVENT_TYPES:
+                        if isinstance(item, dict) and _starts_followup_work(item):
+                            await flush_pending_message("commentary")
                         await send_event(event)
                     continue
 
@@ -957,6 +1093,7 @@ class RouterState:
                     continue
 
                 if event_type == "response.completed":
+                    await flush_pending_message("final_answer")
                     response_payload = event.get("response")
                     if isinstance(response_payload, dict):
                         completed_response = copy.deepcopy(response_payload)
@@ -975,7 +1112,9 @@ class RouterState:
                     await send_event(event)
 
         backend_response = completed_response or {}
-        if not isinstance(backend_response.get("output"), list):
+        if output_items:
+            backend_response["output"] = copy.deepcopy(output_items)
+        elif not isinstance(backend_response.get("output"), list):
             backend_response["output"] = copy.deepcopy(output_items)
         if "usage" not in backend_response:
             backend_response["usage"] = copy.deepcopy(DEFAULT_USAGE)
@@ -1374,6 +1513,12 @@ class RouterState:
             for item in response.get("output", []):
                 if isinstance(item, dict):
                     iter_items.append(self.sanitize_output_item(item))
+            pending_calls = collect_managed_calls(iter_items)
+            _annotate_message_phases(iter_items, final_response=not pending_calls)
+            iter_items = [
+                item for item in iter_items if not _is_droppable_commentary_message(item)
+            ]
+            pending_calls = collect_managed_calls(iter_items)
 
             iter_usage = response.get("usage")
             if isinstance(iter_usage, dict):
@@ -1388,7 +1533,6 @@ class RouterState:
             if not web_search_enabled:
                 break
 
-            pending_calls = collect_managed_calls(iter_items)
             if not pending_calls:
                 break
 
@@ -1420,6 +1564,10 @@ class RouterState:
                 for item in final.get("output", []):
                     if isinstance(item, dict):
                         final_items.append(self.sanitize_output_item(item))
+                _annotate_message_phases(final_items, final_response=True)
+                final_items = [
+                    item for item in final_items if not _is_droppable_commentary_message(item)
+                ]
                 final_usage = final.get("usage")
                 if isinstance(final_usage, dict):
                     for key, value in final_usage.items():
@@ -1904,9 +2052,13 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
             async with send_lock:
                 if ws.closed:
                     return False
-                await ws.send_json(message)
+                send = ws.send_json(message)
+                if WS_SEND_TIMEOUT_SECONDS > 0:
+                    await asyncio.wait_for(send, timeout=WS_SEND_TIMEOUT_SECONDS)
+                else:
+                    await send
             return True
-        except (ConnectionResetError, ConnectionError):
+        except (asyncio.TimeoutError, ConnectionResetError, ConnectionError):
             return False
 
     async for msg in ws:
@@ -2038,11 +2190,10 @@ def main() -> None:
     parser.add_argument(
         "--default-model",
         default=os.getenv("MARATHON_DEFAULT_MODEL")
-        or os.getenv("CODEX_QWEN_DEFAULT_MODEL")
-        or "qwen3.6-27b-q4-128k",
+        or "qwen3.6-27b-q4-128k-single",
     )
     parser.add_argument("--state-dir", default=str(_repo_root() / ".marathon" / "state"))
-    parser.add_argument("--log-dir", default=str(_repo_root() / "scripts" / "logs"))
+    parser.add_argument("--log-dir", default=str(_repo_root() / "logs"))
     parser.add_argument("--debug", action="store_true", default=bool(os.getenv("CODEX_LLAMA_DEBUG")))
     args = parser.parse_args()
 
