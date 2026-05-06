@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROUTER_HOST="${MARATHON_PROXY_HOST:-${CODEX_QWEN_PROXY_HOST:-127.0.0.1}}"
 ROUTER_PORT="${MARATHON_PROXY_PORT:-${CODEX_QWEN_PROXY_PORT:-18111}}"
-DEFAULT_MODEL="${MARATHON_DEFAULT_MODEL:-${CODEX_QWEN_DEFAULT_MODEL:-qwen3.6-27b-q4-128k}}"
+DEFAULT_MODEL="${MARATHON_DEFAULT_MODEL:-${CODEX_QWEN_DEFAULT_MODEL:-qwen3.6-27b-q4-128k-single}}"
 PATCHED_CODEX_BIN="${MARATHON_CODEX_BIN_PATH:-${MARATHON_CODEX_TARGET_DIR:-$ROOT_DIR/.marathon/codex-target}/debug/codex}"
 LEGACY_CODEX_BIN="$ROOT_DIR/codex/codex-rs/target/debug/codex"
 CODEX_BIN="${MARATHON_CODEX_BIN:-${CODEX_QWEN_CODEX_BIN:-}}"
@@ -202,8 +202,7 @@ ensure_router() {
   fi
 
   if ! wait_for_router; then
-    echo "error: Codex local router failed to become ready at http://$router_host" >&2
-    echo "router log: $ROUTER_LOG_FILE" >&2
+    echo "warning: existing Codex local router did not become ready; restarting it..." >&2
     if [[ -f "$ROUTER_PID_FILE" ]]; then
       tracked_pid="$(cat "$ROUTER_PID_FILE" 2>/dev/null || true)"
       if [[ -n "$tracked_pid" ]]; then
@@ -211,7 +210,19 @@ ensure_router() {
       fi
       rm -f "$ROUTER_PID_FILE"
     fi
-    exit 1
+    start_router
+    if ! wait_for_router; then
+      echo "error: Codex local router failed to become ready at http://$router_host" >&2
+      echo "router log: $ROUTER_LOG_FILE" >&2
+      if [[ -f "$ROUTER_PID_FILE" ]]; then
+        tracked_pid="$(cat "$ROUTER_PID_FILE" 2>/dev/null || true)"
+        if [[ -n "$tracked_pid" ]]; then
+          kill "$tracked_pid" 2>/dev/null || true
+        fi
+        rm -f "$ROUTER_PID_FILE"
+      fi
+      exit 1
+    fi
   fi
 }
 

@@ -184,6 +184,27 @@ def _profiles() -> dict[str, ModelProfile]:
             auto_compact_token_limit=115000,
             truncation_limit=110000,
         ),
+        "qwen3.6-27b-q4-128k-single": ModelProfile(
+            slug="qwen3.6-27b-q4-128k-single",
+            alias="qwen3.6-27b-q4-128k-single",
+            display_name="Qwen3.6 27B Q4 128K Single GPU",
+            description="Single-GPU long-context local Qwen3.6 27B Q4 profile",
+            launcher=str(root / "scripts/launchers/server_27b_128k_single_gpu.sh"),
+            model_paths=_model_candidates(
+                "QWEN36_27B_GGUF",
+                (
+                    "Qwen3.6-27B-GGUF/qwen3.6-27b-q4_k_m.gguf",
+                    "Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf",
+                ),
+            ),
+            target=_target_override(
+                "MARATHON_QWEN36_27B_128K_SINGLE_TARGET",
+                "http://127.0.0.1:18094",
+            ),
+            context_window=131072,
+            auto_compact_token_limit=115000,
+            truncation_limit=110000,
+        ),
         "qwen3.6-27b-q4": ModelProfile(
             slug="qwen3.6-27b-q4",
             alias="qwen3.6-27b-q4",

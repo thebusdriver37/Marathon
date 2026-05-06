@@ -10,6 +10,7 @@ Usage: marathon [command] [codex args...]
 Commands:
   chat            Launch the default local Codex TUI (default)
   128k            Launch Qwen3.6 27B Q4 128K
+  128k-single     Launch Qwen3.6 27B Q4 128K on one GPU
   fast            Launch Qwen3.6 27B Q4 32K
   a3b             Launch Qwen3.6 35B A3B
   resume          Resume a previous Marathon interactive session
@@ -43,6 +44,9 @@ case "$cmd" in
     ;;
   128k)
     exec "$ROOT_DIR/scripts/launchers/start_128k.sh" "$@"
+    ;;
+  128k-single)
+    exec "$ROOT_DIR/scripts/launchers/start_128k_single.sh" "$@"
     ;;
   fast)
     exec "$ROOT_DIR/scripts/launchers/start_fast.sh" "$@"
