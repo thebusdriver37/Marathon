@@ -25,6 +25,8 @@ import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Awaitable
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -92,6 +94,24 @@ BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES = {
 }
 
 WS_KEEPALIVE_INTERVAL_SECONDS = float(os.getenv("MARATHON_WS_KEEPALIVE_INTERVAL_SECONDS", "15"))
+
+StreamEventSink = Callable[[dict[str, Any]], Awaitable[bool]]
+
+CODEX_STREAM_EVENT_TYPES = {
+    "response.output_item.added",
+    "response.output_item.done",
+    "response.output_text.delta",
+    "response.custom_tool_call_input.delta",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_text.delta",
+}
+
+
+@dataclass(frozen=True)
+class SseEvent:
+    name: str | None
+    data: str
 
 
 @dataclass(frozen=True)
@@ -274,6 +294,35 @@ def _stable_json(value: Any) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _pop_sse_frame(buffer: bytes) -> tuple[bytes | None, bytes]:
+    candidates = [
+        (idx, len(marker))
+        for marker in (b"\n\n", b"\r\n\r\n")
+        if (idx := buffer.find(marker)) >= 0
+    ]
+    if not candidates:
+        return None, buffer
+    idx, marker_len = min(candidates, key=lambda item: item[0])
+    return buffer[:idx], buffer[idx + marker_len :]
+
+
+def _parse_sse_frame(frame: bytes) -> SseEvent | None:
+    text = frame.decode("utf-8", errors="replace")
+    event_name: str | None = None
+    data_lines: list[str] = []
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if not raw_line or raw_line.startswith(":"):
+            continue
+        if raw_line.startswith("event:"):
+            event_name = raw_line[6:].lstrip(" ")
+            continue
+        if raw_line.startswith("data:"):
+            data_lines.append(raw_line[5:].lstrip(" "))
+    if not data_lines:
+        return None
+    return SseEvent(name=event_name, data="\n".join(data_lines))
 
 
 def _item_roles(items: list[Any]) -> list[str]:
@@ -731,22 +780,173 @@ class RouterState:
             f"backend for {profile.slug} did not become ready; see {self._profile_log_file(profile)}"
         )
 
-    async def _request_json(self, profile: ModelProfile, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _request_json(
+        self,
+        profile: ModelProfile,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        retry_connection_error: bool = False,
+    ) -> dict[str, Any]:
         if self.http_client is None:
             raise RuntimeError("router HTTP client session is not open")
         url = f"{profile.target.rstrip('/')}{path}"
-        async with self.http_client.request(method, url, json=payload) as response:
-            text = await response.text()
-            if response.status >= 400:
-                raise RuntimeError(f"backend {method} {path} failed: {response.status} {text}")
+        attempts = 2 if retry_connection_error else 1
+        last_connection_error: Exception | None = None
+        for attempt in range(attempts):
             try:
-                return json.loads(text) if text else {}
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(f"backend {method} {path} returned invalid JSON: {exc}") from exc
+                async with self.http_client.request(method, url, json=payload) as response:
+                    text = await response.text()
+                    if response.status >= 400:
+                        raise RuntimeError(f"backend {method} {path} failed: {response.status} {text}")
+                    try:
+                        return json.loads(text) if text else {}
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(f"backend {method} {path} returned invalid JSON: {exc}") from exc
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                last_connection_error = exc
+                if attempt + 1 >= attempts:
+                    break
+                await asyncio.sleep(0.2)
+        raise RuntimeError(f"backend {method} {path} connection failed: {last_connection_error}")
+
+    async def _iter_sse_json(self, response: Any) -> Any:
+        buffer = b""
+        async for chunk in response.content.iter_chunked(8192):
+            buffer += chunk
+            while True:
+                frame, buffer = _pop_sse_frame(buffer)
+                if frame is None:
+                    break
+                event = _parse_sse_frame(frame)
+                if event is None or event.data == "[DONE]":
+                    continue
+                try:
+                    payload = json.loads(event.data)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    yield payload
+
+        if buffer.strip():
+            event = _parse_sse_frame(buffer)
+            if event is not None and event.data != "[DONE]":
+                try:
+                    payload = json.loads(event.data)
+                except json.JSONDecodeError:
+                    return
+                if isinstance(payload, dict):
+                    yield payload
+
+    async def _request_responses_stream(
+        self,
+        profile: ModelProfile,
+        payload: dict[str, Any],
+        *,
+        event_sink: StreamEventSink | None = None,
+    ) -> dict[str, Any]:
+        if self.http_client is None:
+            raise RuntimeError("router HTTP client session is not open")
+
+        request = copy.deepcopy(payload)
+        request["stream"] = True
+        url = f"{profile.target.rstrip('/')}/v1/responses"
+        output_items: list[dict[str, Any]] = []
+        completed_response: dict[str, Any] | None = None
+        suppressed_item_ids: set[str] = set()
+
+        async def send_event(event: dict[str, Any]) -> None:
+            if event_sink is None:
+                return
+            if not await event_sink(event):
+                raise ConnectionError("websocket client disconnected")
+
+        async with self.http_client.post(url, json=request) as response:
+            if response.status >= 400:
+                text = await response.text()
+                raise RuntimeError(f"backend POST /v1/responses failed: {response.status} {text}")
+
+            async for event in self._iter_sse_json(response):
+                event_type = event.get("type")
+                if not isinstance(event_type, str):
+                    continue
+
+                if event_type in {"response.created", "response.in_progress"}:
+                    continue
+
+                item = event.get("item")
+                item_id = ""
+                if isinstance(item, dict):
+                    item_id = str(item.get("id") or "")
+                event_item_id = event.get("item_id")
+                if isinstance(event_item_id, str) and event_item_id:
+                    item_id = event_item_id
+
+                if event_type == "response.output_item.added":
+                    if isinstance(item, dict) and (
+                        is_web_search_function_call(item)
+                        or is_web_fetch_function_call(item)
+                        or is_web_browse_function_call(item)
+                    ):
+                        if item_id:
+                            suppressed_item_ids.add(item_id)
+                        continue
+                    if event_type in CODEX_STREAM_EVENT_TYPES:
+                        await send_event(event)
+                    continue
+
+                if event_type == "response.output_item.done":
+                    if isinstance(item, dict):
+                        sanitized = self.sanitize_output_item(item)
+                        output_items.append(sanitized)
+                        if collect_managed_calls([sanitized]):
+                            if item_id:
+                                suppressed_item_ids.add(item_id)
+                            continue
+                    if event_type in CODEX_STREAM_EVENT_TYPES:
+                        await send_event(event)
+                    continue
+
+                if item_id and item_id in suppressed_item_ids:
+                    continue
+
+                if event_type == "response.completed":
+                    response_payload = event.get("response")
+                    if isinstance(response_payload, dict):
+                        completed_response = copy.deepcopy(response_payload)
+                    continue
+
+                if event_type == "response.failed":
+                    response_payload = event.get("response")
+                    message = "response.failed event received"
+                    if isinstance(response_payload, dict):
+                        error = response_payload.get("error")
+                        if isinstance(error, dict) and isinstance(error.get("message"), str):
+                            message = error["message"]
+                    raise RuntimeError(message)
+
+                if event_type in CODEX_STREAM_EVENT_TYPES:
+                    await send_event(event)
+
+        backend_response = completed_response or {}
+        if not isinstance(backend_response.get("output"), list):
+            backend_response["output"] = copy.deepcopy(output_items)
+        if "usage" not in backend_response:
+            backend_response["usage"] = copy.deepcopy(DEFAULT_USAGE)
+        return backend_response
 
     async def _slot_action(self, profile: ModelProfile, action: str, filename: str | None = None) -> dict[str, Any]:
         payload = {"filename": filename} if filename is not None else None
-        return await self._request_json(profile, "POST", f"/slots/{self.slot_id}?action={action}", payload)
+        return await self._request_json(
+            profile,
+            "POST",
+            f"/slots/{self.slot_id}?action={action}",
+            payload,
+            retry_connection_error=True,
+        )
 
     async def erase_slot(self, profile: ModelProfile) -> dict[str, Any]:
         return await self._slot_action(profile, "erase")
@@ -922,6 +1122,7 @@ class RouterState:
         profile: ModelProfile,
         forward_request: dict[str, Any],
         web_search_enabled: bool,
+        event_sink: StreamEventSink | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
         """Run the llama.cpp /v1/responses tool-call loop until the model stops calling web_search.
 
@@ -938,7 +1139,16 @@ class RouterState:
         iterations = 0
 
         for iteration in range(max_iters + 1):
-            response = await self._request_json(profile, "POST", "/v1/responses", request)
+            if event_sink is None:
+                request = copy.deepcopy(request)
+                request["stream"] = False
+                response = await self._request_json(profile, "POST", "/v1/responses", request)
+            else:
+                response = await self._request_responses_stream(
+                    profile,
+                    request,
+                    event_sink=event_sink,
+                )
             last_response = response
             iter_items: list[dict[str, Any]] = []
             for item in response.get("output", []):
@@ -976,7 +1186,15 @@ class RouterState:
                 request = copy.deepcopy(request)
                 request["input"] = list(request.get("input") or []) + copy.deepcopy(iter_items) + tool_outputs
                 request["tools"] = _strip_managed_web_tools(request.get("tools"))
-                final = await self._request_json(profile, "POST", "/v1/responses", request)
+                if event_sink is None:
+                    request["stream"] = False
+                    final = await self._request_json(profile, "POST", "/v1/responses", request)
+                else:
+                    final = await self._request_responses_stream(
+                        profile,
+                        request,
+                        event_sink=event_sink,
+                    )
                 last_response = final
                 final_items: list[dict[str, Any]] = []
                 for item in final.get("output", []):
@@ -997,6 +1215,10 @@ class RouterState:
             for idx, call in enumerate(pending_calls):
                 tool_outputs.append(await self._execute_managed_call(call, idx))
             cumulative_items.extend(tool_outputs)
+            if event_sink is not None:
+                for item in externalize_for_codex(copy.deepcopy(pending_calls)):
+                    if not await event_sink({"type": "response.output_item.done", "item": item}):
+                        raise ConnectionError("websocket client disconnected")
 
             request = copy.deepcopy(request)
             request["input"] = list(request.get("input") or []) + copy.deepcopy(iter_items) + tool_outputs
@@ -1011,6 +1233,7 @@ class RouterState:
         payload: dict[str, Any],
         *,
         preset_response_id: str | None = None,
+        event_sink: StreamEventSink | None = None,
     ) -> dict[str, Any]:
         raw_snapshot = copy.deepcopy(payload)
         request = copy.deepcopy(payload)
@@ -1163,6 +1386,7 @@ class RouterState:
                 "usage": copy.deepcopy(DEFAULT_USAGE),
                 "output_items": [],
                 "backend_response": {},
+                "streamed": False,
             }
 
         web_search_enabled = bool(
@@ -1198,6 +1422,7 @@ class RouterState:
                 profile=profile,
                 forward_request=forward_request,
                 web_search_enabled=web_search_enabled,
+                event_sink=event_sink,
             )
             backend_ms = (time.perf_counter() - backend_start) * 1000.0
 
@@ -1289,6 +1514,7 @@ class RouterState:
             "usage": usage_payload,
             "output_items": codex_output_items,
             "backend_response": backend_response,
+            "streamed": event_sink is not None,
         }
 
 
@@ -1411,12 +1637,16 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
     # can falsely treat a healthy client as dead after heartbeat + pong timeout.
     ws = web.WebSocketResponse(heartbeat=None, max_msg_size=32 * 1024 * 1024)
     await ws.prepare(request)
+    send_lock = asyncio.Lock()
 
     async def safe_send(message: dict[str, Any]) -> bool:
         if ws.closed:
             return False
         try:
-            await ws.send_json(message)
+            async with send_lock:
+                if ws.closed:
+                    return False
+                await ws.send_json(message)
             return True
         except (ConnectionResetError, ConnectionError):
             return False
@@ -1452,7 +1682,11 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                 continue
 
             result_task = asyncio.create_task(
-                state.process_websocket_create(payload, preset_response_id=preset_id)
+                state.process_websocket_create(
+                    payload,
+                    preset_response_id=preset_id,
+                    event_sink=safe_send,
+                )
             )
             try:
                 client_connected = True
@@ -1494,11 +1728,12 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                 )
                 continue
 
-            for item in result["output_items"]:
-                if not await safe_send(
-                    {"type": "response.output_item.done", "item": item}
-                ):
-                    break
+            if not result.get("streamed"):
+                for item in result["output_items"]:
+                    if not await safe_send(
+                        {"type": "response.output_item.done", "item": item}
+                    ):
+                        break
             await safe_send(
                 {
                     "type": "response.completed",
