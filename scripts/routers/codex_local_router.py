@@ -79,6 +79,20 @@ DEFAULT_USAGE = {
 
 MANAGED_WEB_TOOL_NAMES = {WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME, WEB_BROWSE_TOOL_NAME}
 
+BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES = {
+    # Codex-native UI/context markers. Official OpenAI accepts these in
+    # replayed Responses input, but llama.cpp does not know their item types.
+    "web_search_call",
+    "tool_search_call",
+    "tool_search_output",
+    "reasoning",
+    "compaction",
+    "compaction_summary",
+    "image_generation_call",
+}
+
+WS_KEEPALIVE_INTERVAL_SECONDS = float(os.getenv("MARATHON_WS_KEEPALIVE_INTERVAL_SECONDS", "15"))
+
 
 @dataclass(frozen=True)
 class ModelProfile:
@@ -332,9 +346,14 @@ def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
 
     lifted_messages: list[str] = []
     normalized_input: list[Any] = []
+    input_changed = False
     for item in input_items:
         if not isinstance(item, dict):
             normalized_input.append(item)
+            continue
+
+        if item.get("type") in BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES:
+            input_changed = True
             continue
 
         role = item.get("role")
@@ -342,6 +361,7 @@ def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
             text = _content_text(item.get("content"))
             if text:
                 lifted_messages.append(text)
+            input_changed = True
             continue
 
         normalized_input.append(item)
@@ -350,6 +370,7 @@ def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
         existing = data.get("instructions")
         instructions = existing if isinstance(existing, str) else ""
         data["instructions"] = "\n\n".join(part for part in [instructions, *lifted_messages] if part)
+    if input_changed:
         data["input"] = normalized_input
 
     return data
@@ -1364,7 +1385,10 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
 
 async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
     state: RouterState = request.app["state"]
-    ws = web.WebSocketResponse(heartbeat=30.0, max_msg_size=32 * 1024 * 1024)
+    # Do not use aiohttp's server heartbeat here. During long local prefills the
+    # handler is awaiting llama.cpp and not reading client pong frames, so aiohttp
+    # can falsely treat a healthy client as dead after heartbeat + pong timeout.
+    ws = web.WebSocketResponse(heartbeat=None, max_msg_size=32 * 1024 * 1024)
     await ws.prepare(request)
 
     async def safe_send(message: dict[str, Any]) -> bool:
@@ -1406,10 +1430,36 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                 # Client dropped before we could ack; skip the heavy work.
                 continue
 
+            result_task = asyncio.create_task(
+                state.process_websocket_create(payload, preset_response_id=preset_id)
+            )
             try:
-                result = await state.process_websocket_create(
-                    payload, preset_response_id=preset_id
-                )
+                client_connected = True
+                while True:
+                    done, _ = await asyncio.wait(
+                        {result_task},
+                        timeout=WS_KEEPALIVE_INTERVAL_SECONDS
+                        if WS_KEEPALIVE_INTERVAL_SECONDS > 0
+                        else None,
+                    )
+                    if done:
+                        result = result_task.result()
+                        break
+                    if not await safe_send(
+                        {
+                            "type": "response.in_progress",
+                            "response": {"id": preset_id, "status": "in_progress"},
+                        }
+                    ):
+                        result_task.cancel()
+                        try:
+                            await result_task
+                        except asyncio.CancelledError:
+                            pass
+                        client_connected = False
+                        break
+                if not client_connected:
+                    continue
             except Exception as exc:
                 await safe_send(
                     {

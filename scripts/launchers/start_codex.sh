@@ -12,6 +12,11 @@ LOG_DIR="${MARATHON_LOG_DIR:-$ROOT_DIR/logs}"
 ROUTER_LOG_FILE="$LOG_DIR/codex_local_router.log"
 STATE_DIR="${MARATHON_STATE_DIR:-${CODEX_QWEN_STATE_DIR:-$ROOT_DIR/.marathon/state}}"
 ROUTER_PID_FILE="$STATE_DIR/codex-local-router.pid"
+ROUTER_SCRIPT="$ROOT_DIR/scripts/routers/codex_local_router.py"
+ROUTER_SOURCE_FILES=(
+  "$ROUTER_SCRIPT"
+  "$ROOT_DIR/scripts/routers/marathon_web_search.py"
+)
 LOCAL_MODELS_FILE="${MARATHON_MODELS_FILE:-${CODEX_QWEN_MODELS_FILE:-$ROOT_DIR/config/qwen_models.json}}"
 MODEL_PROVIDER_ID="${MARATHON_MODEL_PROVIDER_ID:-marathon-local}"
 MODEL_PROVIDER_NAME="${MARATHON_MODEL_PROVIDER_NAME:-Marathon Local}"
@@ -94,6 +99,20 @@ is_expected_router_pid() {
     [[ "$cmd" == *"--default-model $DEFAULT_MODEL"* ]]
 }
 
+router_pid_is_fresh() {
+  local pid="$1"
+  local proc_dir="/proc/$pid"
+  local source
+
+  [[ -e "$proc_dir" ]] || return 1
+  for source in "${ROUTER_SOURCE_FILES[@]}"; do
+    if [[ -e "$source" && "$source" -nt "$proc_dir" ]]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 router_model_matches() {
   json_model_matches "http://$router_host" "$DEFAULT_MODEL"
 }
@@ -102,7 +121,7 @@ router_identity_matches() {
   local pid
   pid="$(port_owner_pid "$ROUTER_PORT")"
   [[ -n "$pid" ]] || return 1
-  is_expected_router_pid "$pid" && router_model_matches
+  is_expected_router_pid "$pid" && router_pid_is_fresh "$pid" && router_model_matches
 }
 
 router_healthy() {
@@ -122,7 +141,7 @@ JSON
 }
 
 start_router() {
-  nohup "$ROUTER_PYTHON" "$ROOT_DIR/scripts/routers/codex_local_router.py" \
+  nohup "$ROUTER_PYTHON" "$ROUTER_SCRIPT" \
     --host "$ROUTER_HOST" \
     --port "$ROUTER_PORT" \
     --default-model "$DEFAULT_MODEL" \
@@ -167,7 +186,7 @@ ensure_router() {
   if [[ -f "$ROUTER_PID_FILE" ]]; then
     tracked_pid="$(cat "$ROUTER_PID_FILE" 2>/dev/null || true)"
     if [[ -n "$tracked_pid" ]] && kill -0 "$tracked_pid" 2>/dev/null; then
-      if is_expected_router_pid "$tracked_pid"; then
+      if is_expected_router_pid "$tracked_pid" && router_pid_is_fresh "$tracked_pid"; then
         echo "waiting for existing router pid $tracked_pid..." >&2
       else
         kill "$tracked_pid" 2>/dev/null || true
