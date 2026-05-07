@@ -80,6 +80,7 @@ DEFAULT_USAGE = {
 }
 
 MANAGED_WEB_TOOL_NAMES = {WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME, WEB_BROWSE_TOOL_NAME}
+APPLY_PATCH_TOOL_NAME = "apply_patch"
 
 BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES = {
     # Codex-native UI/context markers. Official OpenAI accepts these in
@@ -477,11 +478,118 @@ def _strip_managed_web_tools(tools: Any) -> list[Any]:
     ]
 
 
+def _apply_patch_function_tool() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": APPLY_PATCH_TOOL_NAME,
+        "description": (
+            "Use apply_patch to edit files. Put the complete patch envelope in "
+            "the input field, starting with *** Begin Patch and ending with "
+            "*** End Patch."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "The entire contents of the apply_patch command.",
+                }
+            },
+            "required": ["input"],
+            "additionalProperties": False,
+        },
+        "strict": False,
+    }
+
+
+def _backend_tool_for_llama(tool: Any) -> dict[str, Any] | None:
+    if not isinstance(tool, dict):
+        return None
+    if tool.get("type") == "function":
+        return tool
+    if tool.get("type") == "custom" and tool.get("name") == APPLY_PATCH_TOOL_NAME:
+        return _apply_patch_function_tool()
+    return None
+
+
+def _apply_patch_input_from_arguments(arguments: Any) -> str:
+    if isinstance(arguments, dict):
+        value = arguments.get("input")
+        return value if isinstance(value, str) else ""
+    if not isinstance(arguments, str):
+        return ""
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return arguments if arguments.startswith("*** Begin Patch") else ""
+    if isinstance(parsed, dict) and isinstance(parsed.get("input"), str):
+        return parsed["input"]
+    return ""
+
+
+def _apply_patch_arguments_from_input(patch_input: Any) -> str:
+    return json.dumps(
+        {"input": patch_input if isinstance(patch_input, str) else ""},
+        separators=(",", ":"),
+    )
+
+
+def _is_apply_patch_function_call(item: Any) -> bool:
+    return (
+        isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("name") == APPLY_PATCH_TOOL_NAME
+    )
+
+
+def _is_apply_patch_custom_call(item: Any) -> bool:
+    return (
+        isinstance(item, dict)
+        and item.get("type") == "custom_tool_call"
+        and item.get("name") == APPLY_PATCH_TOOL_NAME
+    )
+
+
+def _stream_keys_for_item(item_id: str, item: dict[str, Any]) -> list[str]:
+    keys = []
+    for value in (item_id, item.get("id"), item.get("call_id")):
+        if isinstance(value, str) and value and value not in keys:
+            keys.append(value)
+    return keys
+
+
+def _apply_patch_function_to_custom_call(item: dict[str, Any]) -> dict[str, Any]:
+    converted = copy.deepcopy(item)
+    converted["type"] = "custom_tool_call"
+    converted["input"] = _apply_patch_input_from_arguments(converted.pop("arguments", ""))
+    converted.pop("namespace", None)
+    return converted
+
+
+def _apply_patch_custom_to_function_call(item: dict[str, Any]) -> dict[str, Any]:
+    converted = copy.deepcopy(item)
+    converted["type"] = "function_call"
+    converted["arguments"] = _apply_patch_arguments_from_input(converted.pop("input", ""))
+    converted.pop("status", None)
+    return converted
+
+
+def _apply_patch_custom_output_to_function_output(item: dict[str, Any]) -> dict[str, Any]:
+    converted = copy.deepcopy(item)
+    converted["type"] = "function_call_output"
+    converted.pop("name", None)
+    return converted
+
+
 def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
     tools = data.get("tools")
     web_search_requested = request_has_web_search_tool(tools) if isinstance(tools, list) else False
     if isinstance(tools, list):
-        data["tools"] = [tool for tool in tools if tool.get("type") == "function"]
+        data["tools"] = [
+            converted
+            for tool in tools
+            if (converted := _backend_tool_for_llama(tool)) is not None
+        ]
     if web_search_requested:
         existing = data.get("tools")
         normalized_tools = existing if isinstance(existing, list) else []
@@ -506,9 +614,28 @@ def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
     lifted_messages: list[str] = []
     normalized_input: list[Any] = []
     input_changed = False
+    apply_patch_custom_call_ids = {
+        str(item.get("call_id"))
+        for item in input_items
+        if _is_apply_patch_custom_call(item) and item.get("call_id")
+    }
+
     for item in input_items:
         if not isinstance(item, dict):
             normalized_input.append(item)
+            continue
+
+        if _is_apply_patch_custom_call(item):
+            normalized_input.append(_apply_patch_custom_to_function_call(item))
+            input_changed = True
+            continue
+
+        if (
+            item.get("type") == "custom_tool_call_output"
+            and item.get("call_id") in apply_patch_custom_call_ids
+        ):
+            normalized_input.append(_apply_patch_custom_output_to_function_output(item))
+            input_changed = True
             continue
 
         if item.get("type") in BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES:
@@ -653,7 +780,7 @@ class RouterState:
                     "default_reasoning_summary": "auto",
                     "support_verbosity": False,
                     "default_verbosity": None,
-                    "apply_patch_tool_type": "function",
+                    "apply_patch_tool_type": "freeform",
                     "web_search_tool_type": "text",
                     "truncation_policy": {"mode": "tokens", "limit": profile.truncation_limit},
                     "supports_parallel_tool_calls": False,
@@ -974,6 +1101,7 @@ class RouterState:
         pending_message_deltas: dict[str, list[dict[str, Any]]] = {}
         pending_message_text: dict[str, str] = {}
         forwarded_message_ids: set[str] = set()
+        apply_patch_function_items: dict[str, str] = {}
 
         async def send_event(event: dict[str, Any]) -> None:
             if event_sink is None:
@@ -1049,6 +1177,16 @@ class RouterState:
                     if isinstance(item, dict):
                         await flush_pending_message("commentary")
 
+                    if isinstance(item, dict) and _is_apply_patch_function_call(item):
+                        converted_item = _apply_patch_function_to_custom_call(item)
+                        call_id = str(converted_item.get("call_id") or "")
+                        for key in _stream_keys_for_item(item_id, converted_item):
+                            apply_patch_function_items[key] = call_id
+                        converted_event = copy.deepcopy(event)
+                        converted_event["item"] = converted_item
+                        await send_event(converted_event)
+                        continue
+
                     if isinstance(item, dict) and (
                         is_web_search_function_call(item)
                         or is_web_fetch_function_call(item)
@@ -1070,8 +1208,38 @@ class RouterState:
                         await flush_pending_message_stream(item_id)
                     continue
 
+                if event_type == "response.function_call_arguments.delta":
+                    if item_id and item_id in apply_patch_function_items:
+                        continue
+                    event_call_id = event.get("call_id")
+                    if isinstance(event_call_id, str) and event_call_id in apply_patch_function_items:
+                        continue
+
                 if event_type == "response.output_item.done":
                     if isinstance(item, dict):
+                        if _is_apply_patch_function_call(item):
+                            converted_item = self.sanitize_output_item(
+                                _apply_patch_function_to_custom_call(item)
+                            )
+                            call_id = str(converted_item.get("call_id") or "")
+                            patch_input = converted_item.get("input")
+                            if isinstance(patch_input, str) and patch_input:
+                                await send_event(
+                                    {
+                                        "type": "response.custom_tool_call_input.delta",
+                                        "item_id": item_id or call_id,
+                                        "call_id": call_id,
+                                        "delta": patch_input,
+                                    }
+                                )
+                            output_items.append(converted_item)
+                            converted_event = copy.deepcopy(event)
+                            converted_event["item"] = converted_item
+                            await send_event(converted_event)
+                            for key in _stream_keys_for_item(item_id, converted_item):
+                                apply_patch_function_items.pop(key, None)
+                            continue
+
                         sanitized = self.sanitize_output_item(item)
                         if _is_assistant_message_item(sanitized):
                             pending_message_done = copy.deepcopy(event)
