@@ -7,11 +7,12 @@ ROUTER_PORT="${MARATHON_PROXY_PORT:-18111}"
 PATCHED_CODEX_BIN="${MARATHON_CODEX_BIN_PATH:-${MARATHON_CODEX_TARGET_DIR:-$ROOT_DIR/.marathon/codex-target}/debug/codex}"
 CODEX_BIN="${MARATHON_CODEX_BIN:-}"
 LOG_DIR="${MARATHON_LOG_DIR:-$ROOT_DIR/logs}"
+STATE_DIR="${MARATHON_ROUTER_STATE_DIR:-$ROOT_DIR/.marathon/state}"
 LOCAL_MODELS_FILE="${MARATHON_MODELS_FILE:-$ROOT_DIR/config/qwen_models.json}"
 MODEL_PROVIDER_ID="${MARATHON_MODEL_PROVIDER_ID:-marathon-local}"
 MODEL_PROVIDER_NAME="${MARATHON_MODEL_PROVIDER_NAME:-Marathon Local}"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$STATE_DIR"
 
 router_base="http://$ROUTER_HOST:$ROUTER_PORT"
 router_v1="$router_base/v1"
@@ -86,7 +87,19 @@ MSG
 fi
 
 export CODEX_OSS_BASE_URL="$router_v1"
-export CODEX_EXTRA_MODELS_PATH="${CODEX_EXTRA_MODELS_PATH:-$LOCAL_MODELS_FILE}"
+
+if [[ -z "${CODEX_EXTRA_MODELS_PATH:-}" ]]; then
+  runtime_models_file="${MARATHON_RUNTIME_MODELS_FILE:-$STATE_DIR/codex_models.json}"
+  model_catalog="$(curl -fsS --max-time 3 "$router_v1/models" 2>/dev/null || true)"
+  if [[ -n "$model_catalog" ]]; then
+    tmp_models_file="$(mktemp "$STATE_DIR/codex_models.XXXXXX")"
+    printf '%s\n' "$model_catalog" >"$tmp_models_file"
+    mv "$tmp_models_file" "$runtime_models_file"
+    export CODEX_EXTRA_MODELS_PATH="$runtime_models_file"
+  else
+    export CODEX_EXTRA_MODELS_PATH="$LOCAL_MODELS_FILE"
+  fi
+fi
 
 if [[ -z "${CODEX_CLI_NAME:-}" ]]; then
   if command -v marathon >/dev/null 2>&1; then

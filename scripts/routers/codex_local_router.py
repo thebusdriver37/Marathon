@@ -19,6 +19,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -147,8 +148,9 @@ class ModelProfile:
 
     def resolved_model_path(self) -> str | None:
         for candidate in self.model_paths:
-            if Path(candidate).exists():
-                return candidate
+            path = Path(candidate).expanduser()
+            if path.exists():
+                return str(path.resolve())
         return None
 
 
@@ -214,9 +216,54 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _env_str(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip()
+
+
+def _safe_model_slug(raw: str) -> str:
+    value = raw.strip()
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+        return value
+    return "custom"
+
+
+def _custom_model_profile(root: Path) -> ModelProfile | None:
+    model_path = os.getenv("MARATHON_MODEL_PATH") or os.getenv("MODEL_PATH")
+    if not model_path or not model_path.strip():
+        return None
+
+    slug = _safe_model_slug(_env_str("MARATHON_MODEL_SLUG", "custom"))
+    context_window = _env_int(
+        "MARATHON_MODEL_CONTEXT",
+        _env_int("MARATHON_CONTEXT", _env_int("CTX_SIZE", 32768)),
+    )
+    auto_compact_limit = _env_int(
+        "MARATHON_MODEL_AUTO_COMPACT_TOKEN_LIMIT",
+        max(1, context_window * 9 // 10),
+    )
+    truncation_limit = _env_int("MARATHON_MODEL_TRUNCATION_LIMIT", auto_compact_limit)
+    port = _env_int("MARATHON_MODEL_PORT", 18095)
+
+    return ModelProfile(
+        slug=slug,
+        alias=slug,
+        display_name=_env_str("MARATHON_MODEL_DISPLAY_NAME", slug),
+        description=_env_str("MARATHON_MODEL_DESCRIPTION", "Custom GGUF model served by llama.cpp."),
+        launcher=str(root / "scripts/launchers/server_custom.sh"),
+        model_paths=(str(Path(model_path).expanduser()),),
+        target=_target_override("MARATHON_MODEL_TARGET", f"http://127.0.0.1:{port}"),
+        context_window=context_window,
+        auto_compact_token_limit=auto_compact_limit,
+        truncation_limit=truncation_limit,
+    )
+
+
 def _profiles() -> dict[str, ModelProfile]:
     root = _repo_root()
-    return {
+    profiles = {
         "qwen3.6-27b-q4-128k": ModelProfile(
             slug="qwen3.6-27b-q4-128k",
             alias="qwen3.6-27b-q4-128k",
@@ -277,8 +324,8 @@ def _profiles() -> dict[str, ModelProfile]:
         "qwen3.6-35b-a3b": ModelProfile(
             slug="qwen3.6-35b-a3b",
             alias="qwen3.6-35b-a3b",
-            display_name="Qwen3.6 35B A3B 32K",
-            description="Single-GPU specialist local Qwen3.6 35B A3B profile",
+            display_name="Qwen3.6 35B A3B 128K",
+            description="Long-context single-GPU specialist local Qwen3.6 35B A3B profile",
             launcher=str(root / "scripts/launchers/server_35b_a3b.sh"),
             model_paths=_model_candidates(
                 "QWEN36_35B_A3B_GGUF",
@@ -288,11 +335,51 @@ def _profiles() -> dict[str, ModelProfile]:
                 ),
             ),
             target=_target_override("MARATHON_QWEN36_35B_A3B_TARGET", "http://127.0.0.1:18092"),
-            context_window=32768,
-            auto_compact_token_limit=28000,
-            truncation_limit=26000,
+            context_window=131072,
+            auto_compact_token_limit=115000,
+            truncation_limit=110000,
+        ),
+        "qwopus3.6-35b-a3b-v1": ModelProfile(
+            slug="qwopus3.6-35b-a3b-v1",
+            alias="qwopus3.6-35b-a3b-v1",
+            display_name="Qwopus3.6 35B A3B v1",
+            description="Qwopus3.6 35B A3B v1 GGUF profile served by llama.cpp.",
+            launcher=str(root / "scripts/launchers/server_35b_a3b.sh"),
+            model_paths=_model_candidates(
+                "QWOPUS36_35B_A3B_GGUF",
+                (
+                    "Qwopus3.6-35B-A3B-v1-GGUF/Qwopus3.6-35B-A3B-v1-Q4_K_M.gguf",
+                    "Qwopus3.6-35B-A3B-v1-GGUF/Qwopus3.6-35B-A3B-v1-IQ4_XS.gguf",
+                ),
+            ),
+            target=_target_override("MARATHON_QWOPUS36_35B_A3B_TARGET", "http://127.0.0.1:18096"),
+            context_window=131072,
+            auto_compact_token_limit=115000,
+            truncation_limit=110000,
+        ),
+        "gemma4-26b-a4b-it-128k": ModelProfile(
+            slug="gemma4-26b-a4b-it-128k",
+            alias="gemma4-26b-a4b-it-128k",
+            display_name="Gemma 4 26B A4B IT 128K",
+            description="Single-GPU local Gemma 4 26B A4B instruction profile served by llama.cpp.",
+            launcher=str(root / "scripts/launchers/server_gemma4_26b_a4b.sh"),
+            model_paths=_model_candidates(
+                "GEMMA4_26B_A4B_GGUF",
+                (
+                    "gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+                    "gemma-4-26b-a4b-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+                ),
+            ),
+            target=_target_override("MARATHON_GEMMA4_26B_A4B_TARGET", "http://127.0.0.1:18097"),
+            context_window=131072,
+            auto_compact_token_limit=115000,
+            truncation_limit=110000,
         ),
     }
+    custom_profile = _custom_model_profile(root)
+    if custom_profile is not None:
+        profiles[custom_profile.slug] = custom_profile
+    return profiles
 
 
 def _available_profiles() -> dict[str, ModelProfile]:

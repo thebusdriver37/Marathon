@@ -7,7 +7,7 @@ The design goal is to keep Codex upstream-friendly:
 - `codex/` is the official OpenAI Codex repo as a git submodule.
 - `patches/codex/` contains the small local patches Marathon needs.
 - `scripts/` owns model launchers, routing, benchmarks, and llama.cpp setup.
-- `config/qwen_models.json` owns local model metadata outside Codex.
+- The router owns local model metadata and exports it to Codex at launch time.
 
 ## Quick Start
 
@@ -48,17 +48,58 @@ Expected 35B A3B path:
 ~/models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf
 ```
 
+Expected Qwopus path:
+
+```text
+~/models/Qwopus3.6-35B-A3B-v1-GGUF/Qwopus3.6-35B-A3B-v1-Q4_K_M.gguf
+```
+
+Expected Gemma 4 26B A4B path:
+
+```text
+~/models/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf
+```
+
 You can override paths:
 
 ```bash
 QWEN36_27B_GGUF=/path/to/model.gguf marathon backend start 128k-single
 QWEN36_35B_A3B_GGUF=/path/to/model.gguf marathon backend start a3b
+QWOPUS36_35B_A3B_GGUF=/path/to/model.gguf marathon backend start qwopus
+GEMMA4_26B_A4B_GGUF=/path/to/model.gguf marathon backend start gemma
 ```
+
+### Custom GGUF Models
+
+Marathon can also run any local GGUF model through llama.cpp without editing
+the repo:
+
+```bash
+marathon backend start custom /path/to/model.gguf
+```
+
+Optional metadata and llama.cpp tuning:
+
+```bash
+MARATHON_MODEL_SLUG=local-coder \
+MARATHON_MODEL_DISPLAY_NAME="Local Coder" \
+MARATHON_MODEL_CONTEXT=32768 \
+MARATHON_LLAMACPP_ARGS="--jinja" \
+marathon backend start custom /path/to/model.gguf
+```
+
+You can also set `MARATHON_MODEL_PATH=/path/to/model.gguf` and run
+`marathon backend start custom`. Custom models still use llama.cpp and
+Marathon's slot-save path, so `previous_response_id` resume behavior continues
+to work the same way as the built-in Qwen profiles.
 
 ## Commands
 
 ```bash
 marathon backend start 128k-single   # start router + llama.cpp backend
+marathon backend start qwopus         # start Qwopus3.6 35B A3B v1
+marathon backend start gemma          # start Gemma 4 26B A4B IT
+marathon backend start custom ./model.gguf
 marathon backend status              # show backend health
 marathon backend logs -f             # follow router logs
 marathon backend stop                # stop router + llama.cpp backend

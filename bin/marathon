@@ -31,8 +31,13 @@ Commands:
 
 Environment:
   MARATHON_MODELS_DIR       Base directory for GGUF files (default: ~/models)
+  MARATHON_MODEL_PATH       Custom GGUF path for `marathon backend start custom`
+  MARATHON_MODEL_SLUG       Custom model slug/alias (default: custom)
+  MARATHON_MODEL_CONTEXT    Custom model context window (default: 32768)
   QWEN36_27B_GGUF           Exact Qwen3.6 27B GGUF path
   QWEN36_35B_A3B_GGUF       Exact Qwen3.6 35B A3B GGUF path
+  QWOPUS36_35B_A3B_GGUF     Exact Qwopus3.6 35B A3B v1 GGUF path
+  GEMMA4_26B_A4B_GGUF       Exact Gemma 4 26B A4B IT GGUF path
   LLAMACPP_BIN              Exact llama-server binary path
 USAGE
 }

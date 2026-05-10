@@ -13,10 +13,10 @@ START_TIMEOUT_SECONDS="${MARATHON_BACKEND_START_TIMEOUT_SECONDS:-360}"
 
 usage() {
   cat <<USAGE
-Usage: marathon backend <command> [profile]
+Usage: marathon backend <command> [profile] [path]
 
 Commands:
-  start [profile]      Start the Marathon router and model backend
+  start [profile] [path]  Start the Marathon router and model backend
   stop                 Stop the Marathon router and model backends
   restart [profile]    Stop, then start the backend
   status               Show router and model backend health
@@ -26,14 +26,29 @@ Profiles:
   128k-single          Qwen3.6 27B Q4 128K on one GPU (default)
   128k                 Qwen3.6 27B Q4 128K
   fast                 Qwen3.6 27B Q4 32K
-  a3b                  Qwen3.6 35B A3B 32K
+  a3b                  Qwen3.6 35B A3B 128K
+  qwopus               Qwopus3.6 35B A3B v1 128K
+  gemma                Gemma 4 26B A4B IT 128K
+  custom [path]        Any local GGUF model served by llama.cpp
 
 Examples:
   marathon backend start 128k-single
+  marathon backend start qwopus
+  marathon backend start gemma
+  marathon backend start custom /path/to/model.gguf
+  MARATHON_MODEL_SLUG=local-coder marathon backend start /path/to/model.gguf
   marathon backend status
   marathon backend logs -f
   marathon backend stop
 USAGE
+}
+
+custom_slug() {
+  printf '%s\n' "${MARATHON_MODEL_SLUG:-custom}"
+}
+
+custom_port() {
+  printf '%s\n' "${MARATHON_MODEL_PORT:-18095}"
 }
 
 profile_slug() {
@@ -50,6 +65,15 @@ profile_slug() {
     a3b|qwen3.6-35b-a3b)
       printf '%s\n' "qwen3.6-35b-a3b"
       ;;
+    qwopus|qwopus3.6-35b-a3b-v1)
+      printf '%s\n' "qwopus3.6-35b-a3b-v1"
+      ;;
+    gemma|gemma4|gemma4-26b-a4b-it-128k)
+      printf '%s\n' "gemma4-26b-a4b-it-128k"
+      ;;
+    custom)
+      custom_slug
+      ;;
     *)
       echo "error: unknown backend profile: $1" >&2
       usage >&2
@@ -59,17 +83,66 @@ profile_slug() {
 }
 
 profile_port() {
+  local custom
+  custom="$(custom_slug)"
   case "$1" in
     qwen3.6-27b-q4-128k-single) printf '%s\n' "18094" ;;
     qwen3.6-27b-q4-128k) printf '%s\n' "18091" ;;
     qwen3.6-27b-q4) printf '%s\n' "18090" ;;
     qwen3.6-35b-a3b) printf '%s\n' "18092" ;;
+    qwopus3.6-35b-a3b-v1) printf '%s\n' "18096" ;;
+    gemma4-26b-a4b-it-128k) printf '%s\n' "18097" ;;
+    "$custom") custom_port ;;
     *) return 1 ;;
   esac
 }
 
 profile_log() {
   printf '%s/%s.log\n' "$LOG_DIR" "$1"
+}
+
+looks_like_model_path() {
+  case "$1" in
+    *.gguf|*.GGUF|/*|./*|../*|~/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+absolute_path() {
+  local path="$1"
+  case "$path" in
+    "~/"*) path="$HOME/${path#~/}" ;;
+  esac
+  if [[ "$path" == /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s/%s\n' "$PWD" "$path"
+  fi
+}
+
+validate_custom_profile() {
+  if [[ -z "${MARATHON_MODEL_PATH:-}" ]]; then
+    echo "error: custom model path is required." >&2
+    echo "run: marathon backend start custom /path/to/model.gguf" >&2
+    echo "or set MARATHON_MODEL_PATH=/path/to/model.gguf" >&2
+    exit 1
+  fi
+  if [[ ! -f "$MARATHON_MODEL_PATH" ]]; then
+    echo "error: custom model not found: $MARATHON_MODEL_PATH" >&2
+    exit 1
+  fi
+  if [[ ! "$(custom_slug)" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    echo "error: MARATHON_MODEL_SLUG may only contain letters, numbers, '.', '_', and '-'" >&2
+    exit 1
+  fi
+  if [[ ! "$(custom_port)" =~ ^[0-9]+$ ]]; then
+    echo "error: MARATHON_MODEL_PORT must be a number" >&2
+    exit 1
+  fi
 }
 
 router_base_url() {
@@ -134,8 +207,9 @@ stop_router() {
 
 stop_model_backends() {
   local slug port pid cmd
-  for slug in qwen3.6-27b-q4-128k-single qwen3.6-27b-q4-128k qwen3.6-27b-q4 qwen3.6-35b-a3b; do
-    port="$(profile_port "$slug")"
+  for slug in qwen3.6-27b-q4-128k-single qwen3.6-27b-q4-128k qwen3.6-27b-q4 qwen3.6-35b-a3b qwopus3.6-35b-a3b-v1 gemma4-26b-a4b-it-128k "$(custom_slug)"; do
+    port="$(profile_port "$slug" 2>/dev/null || true)"
+    [[ -n "$port" ]] || continue
     pid="$(port_owner_pid "$port" || true)"
     if [[ -z "$pid" ]]; then
       rm -f "$STATE_DIR/$slug.pid"
@@ -147,6 +221,20 @@ stop_model_backends() {
       rm -f "$STATE_DIR/$slug.pid"
     else
       echo "warning: model port $port is owned by another process: $cmd" >&2
+    fi
+  done
+
+  local pid_file
+  for pid_file in "$STATE_DIR"/*.pid; do
+    [[ -e "$pid_file" ]] || continue
+    [[ "$(basename "$pid_file")" != "codex-local-router.pid" ]] || continue
+    slug="$(basename "$pid_file" .pid)"
+    pid="$(tr -cd '0-9' <"$pid_file" || true)"
+    [[ -n "$pid" ]] || continue
+    cmd="$(pid_cmdline "$pid")"
+    if [[ "$cmd" == *"llama-server"* ]]; then
+      terminate_pid "$pid" "$slug"
+      rm -f "$pid_file"
     fi
   done
 }
@@ -265,8 +353,26 @@ wait_until_ready() {
 }
 
 start_backend() {
-  local slug
-  slug="$(profile_slug "${1:-$DEFAULT_PROFILE}")"
+  local profile_arg slug
+  profile_arg="${1:-$DEFAULT_PROFILE}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  if looks_like_model_path "$profile_arg"; then
+    export MARATHON_MODEL_PATH
+    MARATHON_MODEL_PATH="$(absolute_path "$profile_arg")"
+    profile_arg="custom"
+  elif [[ "$profile_arg" == "custom" && $# -gt 0 ]]; then
+    export MARATHON_MODEL_PATH
+    MARATHON_MODEL_PATH="$(absolute_path "$1")"
+  fi
+
+  if [[ "$profile_arg" == "custom" ]]; then
+    validate_custom_profile
+  fi
+
+  slug="$(profile_slug "$profile_arg")"
 
   local json current status
   json="$(health_json)"
@@ -321,14 +427,18 @@ logs_backend() {
         follow=1
         shift
         ;;
-      router|current|128k-single|128k|fast|a3b|qwen3.6-*)
+      router|current|128k-single|128k|fast|a3b|qwopus|gemma|custom|qwen3.6-*|qwopus3.6-*|gemma4-*)
         target="$1"
         shift
         ;;
-      *)
+      -*)
         echo "error: unknown logs target or option: $1" >&2
         usage >&2
         exit 1
+        ;;
+      *)
+        target="$1"
+        shift
         ;;
     esac
   done
@@ -345,7 +455,14 @@ logs_backend() {
       log_file="$(profile_log "$slug")"
       ;;
     *)
-      slug="$(profile_slug "$target")"
+      case "$target" in
+        128k-single|128k|fast|a3b|qwopus|gemma|custom|qwen3.6-*|qwopus3.6-*|gemma4-*)
+          slug="$(profile_slug "$target")"
+          ;;
+        *)
+          slug="$target"
+          ;;
+      esac
       log_file="$(profile_log "$slug")"
       ;;
   esac
@@ -365,7 +482,7 @@ cmd="${1:-}"
 case "$cmd" in
   start)
     shift
-    start_backend "${1:-$DEFAULT_PROFILE}"
+    start_backend "$@"
     ;;
   stop)
     shift || true
@@ -374,7 +491,7 @@ case "$cmd" in
   restart)
     shift
     stop_backend
-    start_backend "${1:-$DEFAULT_PROFILE}"
+    start_backend "$@"
     ;;
   status)
     shift || true

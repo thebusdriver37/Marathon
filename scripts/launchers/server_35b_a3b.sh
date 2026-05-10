@@ -26,7 +26,7 @@ exec "$ROOT_DIR/scripts/ops/run_llama_server.sh" \
   --alias "$MODEL_ALIAS" \
   --host "$HOST" \
   --port "$PORT" \
-  --ctx "${CTX_SIZE:-32768}" \
+  --ctx "${CTX_SIZE:-131072}" \
   --ngl "${N_GPU_LAYERS:-999}" \
   --split-mode "${SPLIT_MODE:-none}" \
   --threads "${THREADS:-24}" \
