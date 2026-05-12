@@ -16,6 +16,8 @@ Usage: marathon [command] [codex args...]
 Commands:
   chat            Launch the default local Codex TUI (default)
   backend <sub>   Manage the local router and llama.cpp backend
+  doctor          Check local setup, backend health, models, ports, GPU, and cache usage
+  eval coding     Run a temporary Codex-style coding gauntlet against the active backend
   resume          Resume a previous Marathon interactive session
   fork            Fork a previous Marathon interactive session
   exec            Run headless Codex exec against the default local model
@@ -53,6 +55,32 @@ case "$cmd" in
     ;;
   backend)
     exec "$ROOT_DIR/scripts/ops/backend.sh" "$@"
+    ;;
+  doctor)
+    exec "$ROOT_DIR/scripts/ops/doctor.sh" "$@"
+    ;;
+  eval)
+    subcmd="${1:-}"
+    if [[ $# -gt 0 ]]; then
+      shift
+    fi
+    case "$subcmd" in
+      coding)
+        exec "$ROOT_DIR/scripts/evals/coding_gauntlet.sh" "$@"
+        ;;
+      help|--help|-h|"")
+        cat <<USAGE
+Usage: marathon eval <subcommand>
+
+Subcommands:
+  coding          Run a temporary Codex-style coding gauntlet
+USAGE
+        ;;
+      *)
+        echo "Unknown eval subcommand: $subcmd"
+        exit 1
+        ;;
+    esac
     ;;
   resume)
     exec "$ROOT_DIR/scripts/launchers/start_codex.sh" resume "$@"

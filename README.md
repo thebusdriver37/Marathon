@@ -21,6 +21,7 @@ marathon setup-llama
 marathon setup-deps           # creates .marathon/venv for router Python deps
 marathon search up            # optional: brings up SearXNG for web_search/web_fetch tools
 marathon backend start 128k-single
+marathon doctor               # verify setup, backend health, GPU, models, ports, and cache usage
 ```
 
 After `marathon install`, run Marathon from the project directory you want
@@ -103,6 +104,8 @@ marathon backend start custom ./model.gguf
 marathon backend status              # show backend health
 marathon backend logs -f             # follow router logs
 marathon backend stop                # stop router + llama.cpp backend
+marathon doctor                      # diagnose setup and runtime health
+marathon eval coding                 # run a temporary coding gauntlet against the active model
 marathon                             # launch the TUI from the current repo
 marathon exec "..."                  # headless Codex exec from the current repo
 marathon search up                   # bring up the SearXNG container
@@ -112,6 +115,20 @@ marathon sweep-128k                  # focused config sweep
 The backend is intentionally explicit. Start it once, leave it running, then
 open Marathon from any repo with `marathon`. The frontend does not start or
 switch model servers on its own.
+
+## Diagnostics and Model Checks
+
+Use `marathon doctor` when setting up a new machine or debugging a failed run.
+It checks the patched Codex binary, llama.cpp server binary, router Python venv,
+Python, Docker, GPU visibility, known model paths, router/backend health,
+SearXNG reachability, and local snapshot/log disk usage.
+
+Use `marathon eval coding` to sanity-check a model before recommending it. The
+eval creates a temporary repository under `/tmp`, asks the active Marathon model
+to fix a small Python package, runs the included unit tests, and prints the
+result, duration, token count when available, logs, and diffstat. It is designed
+to catch the practical failure modes that matter for agentic coding: no edits,
+broken shell commands, corrupted files, and tests that do not go green.
 
 ## Prompt Cache Snapshots
 
