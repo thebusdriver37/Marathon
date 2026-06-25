@@ -12,7 +12,7 @@ The design goal is to keep Codex upstream-friendly:
 ## Quick Start
 
 ```bash
-git clone --recurse-submodules <marathon-repo-url>
+git clone --recurse-submodules https://github.com/thebusdriver37/Marathon.git
 cd Marathon
 ./bin/marathon install        # makes `marathon` available from any repo
 git submodule update --init --recursive
@@ -23,6 +23,10 @@ marathon search up            # optional: brings up SearXNG for web_search/web_f
 marathon backend start 128k-single
 marathon doctor               # verify setup, backend health, GPU, models, ports, and cache usage
 ```
+
+The first `marathon build` compiles Codex from source using Codex's pinned Rust
+toolchain. Expect Rustup to install that toolchain if it is missing, and keep
+several dozen GB of free disk space available for Cargo build artifacts.
 
 After `marathon install`, run Marathon from the project directory you want
 Codex to edit:

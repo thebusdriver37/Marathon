@@ -15,9 +15,10 @@ fi
 export CODEX_SKIP_VENDORED_BWRAP="${CODEX_SKIP_VENDORED_BWRAP:-1}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${MARATHON_CODEX_TARGET_DIR:-$ROOT_DIR/.marathon/codex-target}}"
 
-cargo +1.93.0 build \
-  --manifest-path "$BUILD_CODEX_DIR/codex-rs/Cargo.toml" \
-  -p codex-cli
+(
+  cd "$BUILD_CODEX_DIR/codex-rs"
+  cargo build -p codex-cli
+)
 
 echo
 echo "Codex source: $BUILD_CODEX_DIR"

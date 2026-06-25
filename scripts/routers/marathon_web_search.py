@@ -180,7 +180,7 @@ class WebFetchSettings:
         # User-Agent policy for non-browser clients.
         default_ua = (
             "Mozilla/5.0 (compatible; Marathon/1.0; "
-            "+https://github.com/anthropics/marathon) local-codex-router/web_fetch"
+            "+https://github.com/thebusdriver37/Marathon) local-codex-router/web_fetch"
         )
         return cls(
             timeout_s=_env_float("MARATHON_WEB_FETCH_TIMEOUT", 25.0),

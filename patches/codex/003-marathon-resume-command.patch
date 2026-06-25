@@ -1,21 +1,62 @@
-diff --git a/codex-rs/core/src/util.rs b/codex-rs/core/src/util.rs
-index 97fb44ba11..86d73cfd26 100644
---- a/codex-rs/core/src/util.rs
-+++ b/codex-rs/core/src/util.rs
-@@ -1,3 +1,4 @@
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index 897f1ec83f..0eed09cca2 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -1474,13 +1474,14 @@ async fn run_ratatui_app(
+         terminal_restore_guard.restore_silently();
+         session_log::log_session_end();
+         let _ = tui.terminal.clear();
++        let action_command = codex_utils_cli::cli_command_for_action(action);
+         Ok(AppExitInfo {
+             token_usage: crate::token_usage::TokenUsage::default(),
+             thread_id: None,
+             resume_hint: None,
+             update_action: None,
+             exit_reason: ExitReason::Fatal(format!(
+-                "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
++                "No saved session found with ID {id_str}. Run `{action_command}` without an ID to choose from existing sessions."
+             )),
+         })
+     };
+diff --git a/codex-rs/utils/cli/Cargo.toml b/codex-rs/utils/cli/Cargo.toml
+index 9d330c5ce6..32385f01d2 100644
+--- a/codex-rs/utils/cli/Cargo.toml
++++ b/codex-rs/utils/cli/Cargo.toml
+@@ -16,6 +16,7 @@ toml = { workspace = true }
+
+ [dev-dependencies]
+ pretty_assertions = { workspace = true }
++serial_test = { workspace = true }
+
+ [lib]
+ doctest = false
+diff --git a/codex-rs/utils/cli/src/lib.rs b/codex-rs/utils/cli/src/lib.rs
+index 633638e72d..ac0819c71d 100644
+--- a/codex-rs/utils/cli/src/lib.rs
++++ b/codex-rs/utils/cli/src/lib.rs
+@@ -9,6 +9,7 @@ pub use approval_mode_cli_arg::ApprovalModeCliArg;
+ pub use codex_protocol::config_types::ProfileV2Name;
+ pub use config_override::CliConfigOverrides;
+ pub use format_env_display::format_env_display;
++pub use resume_command::cli_command_for_action;
+ pub use resume_command::resume_command;
+ pub use resume_command::resume_hint;
+ pub use sandbox_mode_cli_arg::SandboxModeCliArg;
+diff --git a/codex-rs/utils/cli/src/resume_command.rs b/codex-rs/utils/cli/src/resume_command.rs
+index d3c6839057..868a67ed0b 100644
+--- a/codex-rs/utils/cli/src/resume_command.rs
++++ b/codex-rs/utils/cli/src/resume_command.rs
+@@ -2,6 +2,9 @@
+
+ use codex_protocol::ThreadId;
+ use codex_shell_command::parse_command::shlex_join;
 +use std::env;
- use std::path::Path;
- use std::path::PathBuf;
- use std::time::Duration;
-@@ -10,6 +11,7 @@ use codex_shell_command::parse_command::shlex_join;
- 
- const INITIAL_DELAY_MS: u64 = 200;
- const BACKOFF_FACTOR: f64 = 2.0;
++
 +pub const CODEX_CLI_NAME_ENV_VAR: &str = "CODEX_CLI_NAME";
- 
- /// Emit structured feedback metadata as key/value pairs.
- ///
-@@ -124,16 +126,33 @@ pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) ->
+
+ pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+     let resume_target = thread_name
+@@ -9,16 +12,33 @@ pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) ->
          .map(str::to_string)
          .or_else(|| thread_id.map(|thread_id| thread_id.to_string()));
      resume_target.map(|target| {
@@ -31,7 +72,7 @@ index 97fb44ba11..86d73cfd26 100644
          }
      })
  }
- 
+
 +pub fn cli_command_for_action(action: &str) -> String {
 +    let cli_name = env::var(CODEX_CLI_NAME_ENV_VAR)
 +        .ok()
@@ -48,136 +89,120 @@ index 97fb44ba11..86d73cfd26 100644
 +    shlex_join(&[cli_name, action.to_string()])
 +}
 +
- #[cfg(test)]
- #[path = "util_tests.rs"]
- mod tests;
-diff --git a/codex-rs/core/src/util_tests.rs b/codex-rs/core/src/util_tests.rs
-index 48dd6fc9a0..39915543d7 100644
---- a/codex-rs/core/src/util_tests.rs
-+++ b/codex-rs/core/src/util_tests.rs
-@@ -3,7 +3,10 @@ use codex_feedback::FeedbackRequestTags;
- use codex_feedback::emit_feedback_request_tags;
- use codex_feedback::emit_feedback_request_tags_with_auth_env;
- use codex_login::AuthEnvTelemetry;
-+use serial_test::serial;
- use std::collections::BTreeMap;
-+use std::env;
-+use std::ffi::OsStr;
- use std::sync::Arc;
- use std::sync::Mutex;
- use tracing::Event;
-@@ -15,6 +18,34 @@ use tracing_subscriber::layer::SubscriberExt;
- use tracing_subscriber::registry::LookupSpan;
- use tracing_subscriber::util::SubscriberInitExt;
- 
-+struct EnvVarGuard {
-+    key: &'static str,
-+    original: Option<std::ffi::OsString>,
-+}
+ pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+     let thread_id = thread_id?;
+     match thread_name.filter(|name| !name.is_empty()) {
+@@ -33,8 +53,39 @@ pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Op
+ mod tests {
+     use super::*;
+     use pretty_assertions::assert_eq;
++    use serial_test::serial;
++    use std::ffi::OsStr;
 +
-+impl EnvVarGuard {
-+    fn set(key: &'static str, value: &OsStr) -> Self {
-+        let original = env::var_os(key);
-+        unsafe {
-+            env::set_var(key, value);
-+        }
-+        Self { key, original }
++    struct EnvVarGuard {
++        key: &'static str,
++        original: Option<std::ffi::OsString>,
 +    }
-+}
 +
-+impl Drop for EnvVarGuard {
-+    fn drop(&mut self) {
-+        match self.original.take() {
-+            Some(value) => unsafe {
-+                env::set_var(self.key, value);
-+            },
-+            None => unsafe {
-+                env::remove_var(self.key);
-+            },
++    impl EnvVarGuard {
++        fn set(key: &'static str, value: &OsStr) -> Self {
++            let original = env::var_os(key);
++            unsafe {
++                env::set_var(key, value);
++            }
++            Self { key, original }
 +        }
 +    }
-+}
 +
- #[test]
- fn feedback_tags_macro_compiles() {
-     #[derive(Debug)]
-@@ -434,6 +465,7 @@ fn normalize_thread_name_trims_and_rejects_empty() {
- }
- 
- #[test]
-+#[serial]
- fn resume_command_prefers_name_over_id() {
-     let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
-     let command = resume_command(Some("my-thread"), Some(thread_id));
-@@ -441,6 +473,7 @@ fn resume_command_prefers_name_over_id() {
- }
- 
- #[test]
-+#[serial]
- fn resume_command_with_only_id() {
-     let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
-     let command = resume_command(/*thread_name*/ None, Some(thread_id));
-@@ -451,12 +484,14 @@ fn resume_command_with_only_id() {
- }
- 
- #[test]
-+#[serial]
- fn resume_command_with_no_name_or_id() {
-     let command = resume_command(/*thread_name*/ None, /*thread_id*/ None);
-     assert_eq!(command, None);
- }
- 
- #[test]
-+#[serial]
- fn resume_command_quotes_thread_name_when_needed() {
-     let command = resume_command(Some("-starts-with-dash"), /*thread_id*/ None);
-     assert_eq!(
-@@ -470,3 +505,28 @@ fn resume_command_quotes_thread_name_when_needed() {
-     let command = resume_command(Some("quote'case"), /*thread_id*/ None);
-     assert_eq!(command, Some("codex resume \"quote'case\"".to_string()));
- }
++    impl Drop for EnvVarGuard {
++        fn drop(&mut self) {
++            match self.original.take() {
++                Some(value) => unsafe {
++                    env::set_var(self.key, value);
++                },
++                None => unsafe {
++                    env::remove_var(self.key);
++                },
++            }
++        }
++    }
+
+     #[test]
++    #[serial]
+     fn prefers_name_over_id() {
+         let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+         let command = resume_command(Some("my-thread"), Some(thread_id));
+@@ -42,6 +93,7 @@ mod tests {
+     }
+
+     #[test]
++    #[serial]
+     fn formats_thread_id_when_name_is_missing() {
+         let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+         let command = resume_command(/*thread_name*/ None, Some(thread_id));
+@@ -52,12 +104,14 @@ mod tests {
+     }
+
+     #[test]
++    #[serial]
+     fn returns_none_without_a_resume_target() {
+         let command = resume_command(/*thread_name*/ None, /*thread_id*/ None);
+         assert_eq!(command, None);
+     }
+
+     #[test]
++    #[serial]
+     fn quotes_thread_names_when_needed() {
+         let command = resume_command(Some("-starts-with-dash"), /*thread_id*/ None);
+         assert_eq!(
+@@ -73,6 +127,7 @@ mod tests {
+     }
+
+     #[test]
++    #[serial]
+     fn resume_hint_names_picker_item_with_id() {
+         let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+         let hint = resume_hint(Some("my-thread"), Some(thread_id));
+@@ -86,6 +141,7 @@ mod tests {
+     }
+
+     #[test]
++    #[serial]
+     fn resume_hint_uses_direct_id_command_without_name() {
+         let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+         let hint = resume_hint(/*thread_name*/ None, Some(thread_id));
+@@ -96,8 +152,34 @@ mod tests {
+     }
+
+     #[test]
++    #[serial]
+     fn resume_hint_requires_thread_id() {
+         let hint = resume_hint(Some("my-thread"), /*thread_id*/ None);
+         assert_eq!(hint, None);
+     }
 +
-+#[test]
-+#[serial]
-+fn resume_command_uses_cli_name_env_override() {
-+    let _guard = EnvVarGuard::set(CODEX_CLI_NAME_ENV_VAR, OsStr::new("marathon"));
-+    let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
-+    let command = resume_command(/*thread_name*/ None, Some(thread_id));
-+    assert_eq!(
-+        command,
-+        Some("marathon resume 123e4567-e89b-12d3-a456-426614174000".to_string())
-+    );
-+}
++    #[test]
++    #[serial]
++    fn resume_command_uses_cli_name_env_override() {
++        let _guard = EnvVarGuard::set(CODEX_CLI_NAME_ENV_VAR, OsStr::new("marathon"));
++        let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
++        let command = resume_command(/*thread_name*/ None, Some(thread_id));
++        assert_eq!(
++            command,
++            Some("marathon resume 123e4567-e89b-12d3-a456-426614174000".to_string())
++        );
++    }
 +
-+#[test]
-+#[serial]
-+fn cli_command_for_action_quotes_cli_name_env_override() {
-+    let _guard = EnvVarGuard::set(
-+        CODEX_CLI_NAME_ENV_VAR,
-+        OsStr::new("/tmp/My Marathon/bin/marathon"),
-+    );
-+    assert_eq!(
-+        cli_command_for_action("resume"),
-+        "'/tmp/My Marathon/bin/marathon' resume"
-+    );
-+}
-diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index 334e412c0a..70b4b539e7 100644
---- a/codex-rs/tui/src/lib.rs
-+++ b/codex-rs/tui/src/lib.rs
-@@ -1203,13 +1203,14 @@ async fn run_ratatui_app(
-         terminal_restore_guard.restore_silently();
-         session_log::log_session_end();
-         let _ = tui.terminal.clear();
-+        let action_command = crate::legacy_core::util::cli_command_for_action(action);
-         Ok(AppExitInfo {
-             token_usage: crate::token_usage::TokenUsage::default(),
-             thread_id: None,
-             thread_name: None,
-             update_action: None,
-             exit_reason: ExitReason::Fatal(format!(
--                "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
-+                "No saved session found with ID {id_str}. Run `{action_command}` without an ID to choose from existing sessions."
-             )),
-         })
-     };
++    #[test]
++    #[serial]
++    fn cli_command_for_action_quotes_cli_name_env_override() {
++        let _guard = EnvVarGuard::set(
++            CODEX_CLI_NAME_ENV_VAR,
++            OsStr::new("/tmp/My Marathon/bin/marathon"),
++        );
++        assert_eq!(
++            cli_command_for_action("resume"),
++            "'/tmp/My Marathon/bin/marathon' resume"
++        );
++    }
+ }

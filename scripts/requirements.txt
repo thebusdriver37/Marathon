@@ -2,7 +2,7 @@
 #
 # Installed into .marathon/venv/ by ./bin/marathon setup-deps.
 #
-# Pin loosely: tighten before cutting an OSS release.
+# Keep upper bounds below the next major version for router compatibility.
 
 # HTML / page-content extraction backing the web_fetch tool.
 trafilatura>=2.0,<3.0
