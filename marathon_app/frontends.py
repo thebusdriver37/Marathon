@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 import urllib.request
 from pathlib import Path
 from typing import Callable
@@ -14,6 +15,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+from .codex_telemetry import snapshot_sessions, summarize_session_changes
 from .runtime import Runtime
 
 
@@ -35,14 +37,14 @@ def _codex_binary() -> str:
 def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list[str]:
     binary = _codex_binary()
     provider = (
-        'model_providers.marathon_local={ name = "Marathon Local", '
+        'model_providers.marathon-local={ name = "Marathon Local", '
         f'base_url = "{runtime.router_url}/v1", wire_api = "responses", '
         "requires_openai_auth = false, supports_websockets = true }"
     )
     command = [
         binary,
         "-c", provider,
-        "-c", 'model_provider="marathon_local"',
+        "-c", 'model_provider="marathon-local"',
         "-m", runtime.model.alias,
         "-c", f"model_context_window={runtime.context_window}",
         "-c", f"model_auto_compact_token_limit={runtime.auto_compact_token_limit}",
@@ -56,6 +58,12 @@ def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list
 def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
     command = codex_command(runtime, extra_args)
     environment = os.environ.copy()
+    before = snapshot_sessions()
+    started = time.monotonic()
+    runtime.record(
+        "frontend.started",
+        {"frontend": "codex", "binary": command[0], "cwd": str(Path.cwd())},
+    )
     with runtime.frontend_signals():
         result = subprocess.run(
             command,
@@ -64,6 +72,19 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
             preexec_fn=_restore_sigint,
             check=False,
         )
+    summaries = summarize_session_changes(before, cwd=Path.cwd())
+    for summary in summaries:
+        runtime.record("codex.session.completed", summary)
+    runtime.record(
+        "frontend.completed",
+        {
+            "frontend": "codex",
+            "returncode": result.returncode,
+            "duration_ms": (time.monotonic() - started) * 1000.0,
+            "sessions_changed": len(summaries),
+        },
+        level="info" if result.returncode in (0, 130) else "error",
+    )
     return result.returncode
 
 
@@ -72,11 +93,13 @@ def _stream_chat(
     messages: list[dict[str, str]],
     on_text: Callable[[str], None] | None = None,
 ) -> str:
+    started = time.monotonic()
     payload = json.dumps(
         {
             "model": runtime.model.alias,
             "messages": messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": 0.7,
         }
     ).encode("utf-8")
@@ -87,6 +110,15 @@ def _stream_chat(
         method="POST",
     )
     parts: list[str] = []
+    first_text_at: float | None = None
+    usage: dict[str, object] | None = None
+    runtime.record(
+        "direct.turn.started",
+        {
+            "message_count": len(messages),
+            "input_characters": sum(len(item.get("content", "")) for item in messages),
+        },
+    )
     with urllib.request.urlopen(request, timeout=3600) as response:
         for raw in response:
             line = raw.decode("utf-8", errors="replace").strip()
@@ -97,19 +129,37 @@ def _stream_chat(
                 break
             try:
                 event = json.loads(data)
+                if isinstance(event.get("usage"), dict):
+                    usage = event["usage"]
                 delta = event.get("choices", [{}])[0].get("delta", {})
                 text = delta.get("content")
             except (json.JSONDecodeError, IndexError, AttributeError):
                 continue
             if isinstance(text, str):
+                if first_text_at is None:
+                    first_text_at = time.monotonic()
                 parts.append(text)
                 if on_text:
                     on_text(text)
-    return "".join(parts)
+    answer = "".join(parts)
+    ended = time.monotonic()
+    runtime.record(
+        "direct.turn.completed",
+        {
+            "duration_ms": (ended - started) * 1000.0,
+            "ttft_ms": (first_text_at - started) * 1000.0 if first_text_at else None,
+            "output_characters": len(answer),
+            "chunks": len(parts),
+            "usage": usage,
+        },
+    )
+    return answer
 
 
 def direct_chat(runtime: Runtime, console: Console) -> None:
     messages: list[dict[str, str]] = []
+    frontend_started = time.monotonic()
+    runtime.record("frontend.started", {"frontend": "direct"})
     console.clear()
     console.print(
         Panel.fit(
@@ -125,10 +175,18 @@ def direct_chat(runtime: Runtime, console: Console) -> None:
             prompt = Prompt.ask("\n[bold green]You[/bold green]").strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
+            runtime.record(
+                "frontend.completed",
+                {"frontend": "direct", "duration_ms": (time.monotonic() - frontend_started) * 1000.0},
+            )
             return
         if not prompt:
             continue
         if prompt in {"/back", "/exit", "/quit"}:
+            runtime.record(
+                "frontend.completed",
+                {"frontend": "direct", "duration_ms": (time.monotonic() - frontend_started) * 1000.0},
+            )
             return
         if prompt == "/new":
             messages.clear()
@@ -147,6 +205,7 @@ def direct_chat(runtime: Runtime, console: Console) -> None:
             )
             console.print()
         except Exception as error:
+            runtime.record("direct.turn.error", {"error": str(error)}, level="error")
             console.print(f"[bold red]Request failed:[/bold red] {error}")
             messages.pop()
             continue

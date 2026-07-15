@@ -413,8 +413,10 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
                 save_selection(selection.model, selection.profile, warm_action)
                 _launch_frontend(console, runtime, warm_action)
         except KeyboardInterrupt:
+            runtime.record("runtime.interrupted", {}, level="error")
             action = "quit"
         except Exception as error:
+            runtime.record("runtime.error", {"error": str(error)}, level="error")
             console.print(Panel(str(error), title="Marathon could not start", border_style="red"))
             Prompt.ask("Press Enter to return", default="")
             action = "switch"

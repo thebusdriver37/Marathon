@@ -20,6 +20,8 @@ Commands:
   models          List centrally installed GGUF models
   status          Show whether the foreground runtime is active
   stop            Ask an active runtime to stop and free the GPUs
+  report [run]    Summarize a telemetry trace (default: latest run)
+  compare A B     Compare two telemetry traces
   chat            Alias for dashboard (backward compatible)
   backend <sub>   Manage the local router and llama.cpp backend
   doctor          Check local setup, backend health, models, ports, GPU, and cache usage
@@ -43,6 +45,10 @@ Environment:
   MARATHON_MODEL_PATH       Custom GGUF path for the legacy custom backend command
   MARATHON_MODEL_SLUG       Custom model slug/alias (default: custom)
   MARATHON_MODEL_CONTEXT    Custom model context window (default: 32768)
+  MARATHON_RUNS_DIR         Per-run JSONL trace directory (default: ~/.local/state/marathon/runs)
+  MARATHON_TELEMETRY_INTERVAL  GPU/metrics sample interval in seconds (default: 2)
+  MARATHON_TELEMETRY_PROCESS_OUTPUT  Mirror backend/router operational lines (default: 1)
+  MARATHON_ELECTRICITY_RATE_USD_KWH  Optional rate for estimated GPU energy cost
   QWEN36_27B_GGUF           Exact Qwen3.6 27B GGUF path
   QWEN36_35B_A3B_GGUF       Exact Qwen3.6 35B A3B GGUF path
   QWOPUS36_35B_A3B_GGUF     Exact Qwopus3.6 35B A3B v1 GGUF path
@@ -70,7 +76,7 @@ case "$cmd" in
   dashboard|chat)
     run_app dashboard "$@"
     ;;
-  codex|direct|models|status|stop)
+  codex|direct|models|status|stop|report|compare)
     run_app "$cmd" "$@"
     ;;
   backend)

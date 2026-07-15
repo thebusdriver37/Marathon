@@ -13,6 +13,7 @@ from rich.table import Table
 from . import __version__
 from .catalog import discover_models, format_size, settings
 from .runtime import SESSION_FILE, request_stop
+from .telemetry import resolve_run, summarize_run
 from .ui import run_dashboard
 
 
@@ -44,6 +45,142 @@ def _status() -> int:
         return 1
     console.print(f"[green]● Marathon running[/green] · {session.get('model')} / {session.get('profile')}")
     console.print(f"Supervisor PID {session.get('supervisor_pid')} · backend {health.get('backend_health') or 'ready'}")
+    if session.get("run_log"):
+        console.print(f"Trace: {session['run_log']}", style="dim")
+    return 0
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    return f"{int(seconds // 60)}m {seconds % 60:.0f}s"
+
+
+def _report(target: str | None) -> int:
+    console = Console()
+    try:
+        summary = summarize_run(resolve_run(target))
+    except (OSError, ValueError) as error:
+        console.print(f"[bold red]Cannot read run:[/bold red] {error}")
+        return 2
+    console.print(
+        f"[bold magenta]Marathon run {summary['run_id']}[/bold magenta] · "
+        f"{summary['model']} / {summary['profile']}"
+    )
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="cyan")
+    table.add_column()
+    table.add_row("Trace", str(summary["path"]))
+    table.add_row("State", "complete" if summary["complete"] else "incomplete / interrupted")
+    table.add_row("Duration", _format_duration(float(summary["duration_s"])))
+    table.add_row("Events", f"{summary['event_count']:,} ({summary['errors']} errors)")
+    table.add_row(
+        "Activity",
+        f"{summary['router_turns']} Codex responses · {summary['direct_turns']} direct turns · "
+        f"{summary['codex_sessions']} Codex launches",
+    )
+    usage = summary["usage"]
+    if usage:
+        table.add_row(
+            "Backend tokens",
+            f"{usage.get('input_tokens', 0):,} input · {usage.get('output_tokens', 0):,} output · "
+            f"{usage.get('total_tokens', 0):,} total",
+        )
+    codex_usage = summary["codex_usage"]
+    if codex_usage:
+        table.add_row(
+            "Codex tokens",
+            f"{codex_usage.get('input_tokens', 0):,} input · "
+            f"{codex_usage.get('cached_input_tokens', 0):,} cached · "
+            f"{codex_usage.get('output_tokens', 0):,} output · "
+            f"{codex_usage.get('reasoning_output_tokens', 0):,} reasoning",
+        )
+    if summary["avg_backend_latency_ms"] is not None:
+        table.add_row("Average backend latency", f"{summary['avg_backend_latency_ms'] / 1000:.2f}s")
+    if summary["prompt_tps"] is not None or summary["decode_tps"] is not None:
+        table.add_row(
+            "Model throughput",
+            f"{summary['prompt_tps'] or 0:.1f} prompt tok/s · {summary['decode_tps'] or 0:.1f} decode tok/s",
+        )
+    if summary["avg_direct_ttft_ms"] is not None:
+        table.add_row("Direct Chat TTFT", f"{summary['avg_direct_ttft_ms'] / 1000:.2f}s average")
+    if summary["gpu_samples"]:
+        table.add_row(
+            "GPU telemetry",
+            f"{summary['gpu_samples']} samples · {summary['avg_gpu_power_w'] or 0:.1f}W average/card · "
+            f"{summary['avg_gpu_utilization_pct'] or 0:.0f}% utilization · "
+            f"{summary['peak_gpu_memory_mib'] or 0:.0f} MiB peak/card · "
+            f"{summary['peak_gpu_temperature_c'] or 0:.0f}°C peak",
+        )
+        table.add_row("Estimated GPU energy", f"{summary['energy_wh']:.2f} Wh")
+        if summary["estimated_gpu_energy_cost_usd"] is not None:
+            table.add_row(
+                "Estimated GPU energy cost",
+                f"${summary['estimated_gpu_energy_cost_usd']:.4f}",
+            )
+    if summary["tool_calls"]:
+        tools = ", ".join(f"{name} ×{count}" for name, count in sorted(summary["tool_calls"].items()))
+        table.add_row("Codex tools", tools)
+        if summary["avg_tool_duration_ms"] is not None:
+            table.add_row("Average tool duration", f"{summary['avg_tool_duration_ms'] / 1000:.2f}s")
+    if summary["reasoning_efforts"]:
+        efforts = ", ".join(
+            f"{name} ×{count}" for name, count in sorted(summary["reasoning_efforts"].items())
+        )
+        table.add_row("Reasoning effort", efforts)
+    if summary["router_tool_calls"]:
+        tools = ", ".join(
+            f"{name} ×{count}" for name, count in sorted(summary["router_tool_calls"].items())
+        )
+        table.add_row("Model tool calls", tools)
+    table.add_row("Dropped telemetry", str(summary["dropped_events"]))
+    console.print(table)
+    if summary["error_events"]:
+        errors = Table(title="Recent errors", show_lines=False)
+        errors.add_column("Time", style="dim")
+        errors.add_column("Event", style="red")
+        errors.add_column("Detail")
+        for item in summary["error_events"]:
+            errors.add_row(
+                str(item.get("ts") or ""),
+                str(item.get("event") or ""),
+                str(item.get("message") or "")[:240],
+            )
+        console.print(errors)
+    return 0
+
+
+def _compare(targets: list[str]) -> int:
+    console = Console()
+    if len(targets) != 2:
+        console.print("[bold red]Usage:[/bold red] marathon compare <run-a> <run-b>")
+        return 2
+    try:
+        left, right = (summarize_run(resolve_run(target)) for target in targets)
+    except (OSError, ValueError) as error:
+        console.print(f"[bold red]Cannot compare runs:[/bold red] {error}")
+        return 2
+    table = Table(title="Marathon run comparison")
+    table.add_column("Metric", style="cyan")
+    table.add_column(str(left["run_id"]), justify="right")
+    table.add_column(str(right["run_id"]), justify="right")
+    rows = (
+        ("Model", left["model"], right["model"]),
+        ("Profile", left["profile"], right["profile"]),
+        ("Duration", _format_duration(left["duration_s"]), _format_duration(right["duration_s"])),
+        ("Backend turns", left["router_turns"], right["router_turns"]),
+        ("Backend output tokens", left["usage"].get("output_tokens", 0), right["usage"].get("output_tokens", 0)),
+        ("Average backend latency", f"{(left['avg_backend_latency_ms'] or 0) / 1000:.2f}s", f"{(right['avg_backend_latency_ms'] or 0) / 1000:.2f}s"),
+        ("Prompt throughput", f"{left['prompt_tps'] or 0:.1f} tok/s", f"{right['prompt_tps'] or 0:.1f} tok/s"),
+        ("Decode throughput", f"{left['decode_tps'] or 0:.1f} tok/s", f"{right['decode_tps'] or 0:.1f} tok/s"),
+        ("Average GPU power/card", f"{left['avg_gpu_power_w'] or 0:.1f}W", f"{right['avg_gpu_power_w'] or 0:.1f}W"),
+        ("Estimated GPU energy", f"{left['energy_wh']:.2f} Wh", f"{right['energy_wh']:.2f} Wh"),
+        ("Peak GPU memory/card", f"{left['peak_gpu_memory_mib'] or 0:.0f} MiB", f"{right['peak_gpu_memory_mib'] or 0:.0f} MiB"),
+        ("Errors", left["errors"], right["errors"]),
+    )
+    for metric, a, b in rows:
+        table.add_row(str(metric), str(a), str(b))
+    console.print(table)
     return 0
 
 
@@ -51,9 +188,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="marathon", description="One-command local AI runtime")
     parser.add_argument("--version", action="version", version=f"Marathon {__version__}")
     parser.add_argument(
-        "command", nargs="?", choices=("dashboard", "codex", "direct", "models", "status", "stop"),
+        "command", nargs="?", choices=("dashboard", "codex", "direct", "models", "status", "stop", "report", "compare"),
         default="dashboard",
     )
+    parser.add_argument("targets", nargs="*")
     return parser
 
 
@@ -67,6 +205,10 @@ def main(argv: list[str] | None = None) -> int:
         stopped = request_stop()
         Console().print("[green]Stop requested.[/green]" if stopped else "[dim]Marathon is already stopped.[/dim]")
         return 0
+    if args.command == "report":
+        return _report(args.targets[0] if args.targets else None)
+    if args.command == "compare":
+        return _compare(args.targets)
     return run_dashboard(args.command if args.command in {"codex", "direct"} else None)
 
 

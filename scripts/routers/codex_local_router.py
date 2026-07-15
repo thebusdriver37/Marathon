@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import Counter
 from collections.abc import Awaitable
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +37,8 @@ from aiohttp import ClientSession
 from aiohttp import ClientTimeout
 from aiohttp import WSMsgType
 from aiohttp import web
+
+from marathon_app.telemetry import EventWriter
 
 from marathon_web_search import WebFetchExecutor
 from marathon_web_search import WebFetchSettings
@@ -782,6 +785,7 @@ class RouterState:
         self.debug = debug
         self.state_dir = state_dir
         self.log_dir = log_dir
+        self.telemetry = EventWriter.from_env("router")
         self.available_profiles = self._refresh_profiles()
         if not self.available_profiles:
             raise RuntimeError("no available local model profiles found")
@@ -912,9 +916,7 @@ class RouterState:
         method: str,
         lineage: dict[str, Any] | None = None,
     ) -> None:
-        if not self.debug:
-            return
-
+        telemetry_started = time.perf_counter()
         raw_input = raw_request.get("input")
         normalized_input = normalized_request.get("input")
         raw_input_items = raw_input if isinstance(raw_input, list) else []
@@ -990,17 +992,20 @@ class RouterState:
             }
             if lineage is not None:
                 entry["lineage"] = lineage
+            entry["telemetry_prepare_ms"] = (time.perf_counter() - telemetry_started) * 1000.0
             self._last_trace_by_model[profile.slug] = {
                 "input_items": copy.deepcopy(normalized_input_items),
                 "instructions_hash": instructions_hash,
                 "tools_hash": tools_hash,
                 "body_hash": normalized_hash,
             }
-            try:
-                with self.trace_log_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(entry, sort_keys=True) + "\n")
-            except Exception:
-                pass
+            self.telemetry.emit("router.request.normalized", entry)
+            if self.debug:
+                try:
+                    with self.trace_log_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+                except Exception:
+                    pass
 
     def resolve_model(self, requested_model: str | None) -> ModelProfile:
         self._refresh_profiles()
@@ -1956,10 +1961,9 @@ class RouterState:
                 )
                 self.last_response_by_model[profile.slug] = response_id
 
-            if self.debug:
-                with self.lock:
-                    self._trace_seq += 1
-                    trace_entry = {
+            with self.lock:
+                self._trace_seq += 1
+                trace_entry = {
                         "trace_id": self._trace_seq,
                         "timestamp": time.time(),
                         "method": "WS",
@@ -1991,7 +1995,9 @@ class RouterState:
                             "save_result": None,
                             "snapshot_filename": "",
                         },
-                    }
+                }
+                self.telemetry.emit("router.response.completed", trace_entry)
+                if self.debug:
                     try:
                         with self.trace_log_path.open("a", encoding="utf-8") as handle:
                             handle.write(json.dumps(trace_entry, sort_keys=True) + "\n")
@@ -2111,10 +2117,9 @@ class RouterState:
             )
             self.last_response_by_model[profile.slug] = response_id
 
-        if self.debug:
-            with self.lock:
-                self._trace_seq += 1
-                trace_entry = {
+        with self.lock:
+            self._trace_seq += 1
+            trace_entry = {
                     "trace_id": self._trace_seq,
                     "timestamp": time.time(),
                     "method": "WS",
@@ -2155,7 +2160,24 @@ class RouterState:
                         "timings": backend_response.get("timings"),
                         "latency_ms": backend_ms,
                     },
+                    "output": {
+                        "item_types": dict(Counter(
+                            str(item.get("type") or "unknown")
+                            for item in output_items if isinstance(item, dict)
+                        )),
+                        "tool_calls": dict(Counter(
+                            str(item.get("name") or item.get("type") or "unknown")
+                            for item in output_items
+                            if isinstance(item, dict) and item.get("type") in {
+                                "function_call", "custom_tool_call", "local_shell_call",
+                                "web_search_call", "tool_search_call",
+                            }
+                        )),
+                        "web_search_iterations": web_search_iterations,
+                    },
                 }
+            self.telemetry.emit("router.response.completed", trace_entry)
+            if self.debug:
                 try:
                     with self.trace_log_path.open("a", encoding="utf-8") as handle:
                         handle.write(json.dumps(trace_entry, sort_keys=True) + "\n")
@@ -2210,6 +2232,7 @@ async def handle_health(request: web.Request) -> web.Response:
 
 async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
     state: RouterState = request.app["state"]
+    request_started = time.perf_counter()
     raw_body = await request.read()
     path = request.path.rstrip("/")
     if path not in {"/v1/responses", "/v1/chat/completions", "/v1/completions"}:
@@ -2233,9 +2256,28 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
             except Exception:
                 pass
 
+    state.telemetry.emit(
+        "router.http.started",
+        {
+            "method": request.method,
+            "path": path,
+            "body_bytes": len(raw_body),
+            "requested_model": requested_model,
+            "stream": data.get("stream") if isinstance(data, dict) else None,
+            "message_count": len(data.get("messages", []))
+            if isinstance(data, dict) and isinstance(data.get("messages"), list)
+            else None,
+        },
+    )
+
     try:
         profile = await state.ensure_model_async(requested_model)
     except Exception as exc:
+        state.telemetry.emit(
+            "router.http.error",
+            {"path": path, "phase": "model", "error": str(exc)},
+            level="error",
+        )
         return web.json_response({"error": {"message": str(exc)}}, status=502)
 
     body = raw_body
@@ -2280,16 +2322,42 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
             headers=headers,
             allow_redirects=False,
         ) as upstream:
+            first_chunk_ms: float | None = None
+            response_bytes = 0
             response = web.StreamResponse(status=upstream.status)
             for key, value in upstream.headers.items():
                 if key.lower() not in HOP_BY_HOP_HEADERS:
                     response.headers[key] = value
             await response.prepare(request)
             async for chunk in upstream.content.iter_chunked(8192):
+                if first_chunk_ms is None:
+                    first_chunk_ms = (time.perf_counter() - request_started) * 1000.0
+                response_bytes += len(chunk)
                 await response.write(chunk)
             await response.write_eof()
+            state.telemetry.emit(
+                "router.http.completed",
+                {
+                    "path": path,
+                    "status": upstream.status,
+                    "duration_ms": (time.perf_counter() - request_started) * 1000.0,
+                    "first_chunk_ms": first_chunk_ms,
+                    "response_bytes": response_bytes,
+                },
+                level="info" if upstream.status < 400 else "error",
+            )
             return response
     except Exception as exc:
+        state.telemetry.emit(
+            "router.http.error",
+            {
+                "path": path,
+                "phase": "upstream",
+                "duration_ms": (time.perf_counter() - request_started) * 1000.0,
+                "error": str(exc),
+            },
+            level="error",
+        )
         return web.json_response({"error": {"message": str(exc)}}, status=502)
 
 

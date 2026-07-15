@@ -11,13 +11,16 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from pathlib import Path
 from typing import Callable, Iterator, TextIO
 
 from .catalog import Model, Profile, ROOT_DIR, server_command, settings
+from .telemetry import EventWriter, create_run_writer, redact_text, runs_dir
 
 
 def _xdg_path(env_name: str, fallback: Path) -> Path:
@@ -41,7 +44,7 @@ LOCK_FILE = RUNTIME_DIR / "runtime.lock"
 
 
 def ensure_dirs() -> None:
-    for path in (CONFIG_DIR, USER_STATE_DIR / "logs", RUNTIME_DIR, ROUTER_STATE_DIR, SLOT_ROOT):
+    for path in (CONFIG_DIR, USER_STATE_DIR / "logs", runs_dir(), RUNTIME_DIR, ROUTER_STATE_DIR, SLOT_ROOT):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -223,9 +226,17 @@ class Runtime:
         self.profile = profile
         self.config = settings()
         self._context_window = profile.context
-        self.llama: subprocess.Popen[bytes] | None = None
-        self.router: subprocess.Popen[bytes] | None = None
+        self.llama: subprocess.Popen[str] | None = None
+        self.router: subprocess.Popen[str] | None = None
         self._logs: list[TextIO] = []
+        self._log_threads: list[threading.Thread] = []
+        self._recent_model_lines: deque[str] = deque(maxlen=120)
+        self._sample_stop = threading.Event()
+        self._sampler: threading.Thread | None = None
+        self._journal_cursor: str | None = None
+        self._last_kernel_poll = 0.0
+        self.telemetry: EventWriter | None = None
+        self._run_started_mono: float | None = None
         self._lock: TextIO | None = None
         self._owns_lock = False
         self._cleaned = False
@@ -254,6 +265,14 @@ class Runtime:
     @property
     def catalog_file(self) -> Path:
         return RUNTIME_DIR / "codex-models.json"
+
+    @property
+    def run_id(self) -> str | None:
+        return self.telemetry.run_id if self.telemetry else None
+
+    @property
+    def run_log(self) -> Path | None:
+        return self.telemetry.path if self.telemetry else None
 
     @property
     def context_window(self) -> int:
@@ -329,36 +348,143 @@ class Runtime:
         self._logs.append(handle)
         return handle
 
-    def _spawn(self, command: list[str], log: TextIO, env: dict[str, str]) -> subprocess.Popen[bytes]:
-        return subprocess.Popen(
+    def record(self, event: str, data: dict[str, object] | None = None, *, level: str = "info") -> None:
+        if self.telemetry:
+            self.telemetry.emit(event, data, level=level)
+
+    def _capture_output(self, source: str, stream: TextIO, legacy_log: TextIO) -> None:
+        capture = os.environ.get("MARATHON_TELEMETRY_PROCESS_OUTPUT", "1").lower() not in {
+            "0", "false", "no", "off"
+        }
+        try:
+            for line in stream:
+                legacy_log.write(line)
+                legacy_log.flush()
+                message = line.rstrip("\r\n")
+                if source == "llama" and message:
+                    self._recent_model_lines.append(message)
+                if capture and message:
+                    level = "error" if any(word in message.lower() for word in ("error", "failed", "xid")) else "info"
+                    self.record("process.output", {"process": source, "message": redact_text(message)}, level=level)
+        except (OSError, ValueError) as error:
+            self.record("process.capture.error", {"process": source, "error": str(error)}, level="error")
+
+    def _spawn(
+        self, command: list[str], log: TextIO, env: dict[str, str], source: str
+    ) -> subprocess.Popen[str]:
+        process = subprocess.Popen(
             command,
             cwd=ROOT_DIR,
             env=env,
-            stdout=log,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
             start_new_session=True,
             preexec_fn=_set_parent_death_signal,
         )
+        assert process.stdout is not None
+        thread = threading.Thread(
+            target=self._capture_output,
+            args=(source, process.stdout, log),
+            name=f"marathon-{source}-log",
+            daemon=True,
+        )
+        thread.start()
+        self._log_threads.append(thread)
+        self.record(
+            "process.started",
+            {"process": source, "pid": process.pid, "command": command},
+        )
+        return process
 
     def start(self, progress: Callable[[str], None] | None = None) -> None:
         self.acquire()
         self._install_handlers()
+        self.telemetry = create_run_writer(self.model.id)
+        self._run_started_mono = time.monotonic()
+        llama_command = server_command(self.model, self.profile)
+        slot_path = SLOT_ROOT / self.model.alias
+        llama_command.extend(["--slot-save-path", str(slot_path)])
+        self.record(
+            "run.started",
+            {
+                "model": {
+                    "id": self.model.id,
+                    "display_name": self.model.display_name,
+                    "path": str(self.model.path),
+                    "size_bytes": self.model.size_bytes,
+                    "mtime_ns": self.model.path.stat().st_mtime_ns if self.model.path.exists() else None,
+                    "quant": self.model.quant,
+                    "family": self.model.family.id,
+                },
+                "profile": {
+                    "id": self.profile.id,
+                    "display_name": self.profile.display_name,
+                    "requested_context": self.profile.context,
+                    "batch": self.profile.batch,
+                    "ubatch": self.profile.ubatch,
+                    "parallel": self.profile.parallel,
+                    "split_mode": self.profile.split_mode,
+                    "tensor_split": self.profile.tensor_split,
+                    "cache_k": self.profile.cache_k,
+                    "cache_v": self.profile.cache_v,
+                    "confidence": self.profile.confidence,
+                },
+                "llama_command": llama_command,
+                "cwd": str(Path.cwd()),
+                "python": sys.version.split()[0],
+                "platform": sys.platform,
+                "kernel": os.uname().release if hasattr(os, "uname") else None,
+                "backend_binary": {
+                    "path": llama_command[0],
+                    "size_bytes": Path(llama_command[0]).stat().st_size
+                    if Path(llama_command[0]).exists() else None,
+                    "mtime_ns": Path(llama_command[0]).stat().st_mtime_ns
+                    if Path(llama_command[0]).exists() else None,
+                },
+                "trace_disk": {
+                    "free_bytes": shutil.disk_usage(runs_dir()).free,
+                    "total_bytes": shutil.disk_usage(runs_dir()).total,
+                },
+                "telemetry": {
+                    "process_output": os.environ.get("MARATHON_TELEMETRY_PROCESS_OUTPUT", "1"),
+                    "sample_interval_s": os.environ.get("MARATHON_TELEMETRY_INTERVAL", "2"),
+                    "capture_content": False,
+                    "electricity_rate_usd_kwh": os.environ.get(
+                        "MARATHON_ELECTRICITY_RATE_USD_KWH"
+                    ),
+                },
+            },
+        )
+        self._start_sampler()
         stop_legacy_services()
-        self._check_conflicts()
+        try:
+            self._check_conflicts()
+        except Exception as error:
+            self.record("runtime.conflict", {"error": str(error)}, level="error")
+            raise
         environment = os.environ.copy()
         environment.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         environment.setdefault("CUDA_SCALE_LAUNCH_QUEUES", "4x")
         if progress:
             progress("Starting llama.cpp")
-        slot_path = SLOT_ROOT / self.model.alias
         slot_path.mkdir(parents=True, exist_ok=True)
-        llama_command = server_command(self.model, self.profile)
-        llama_command.extend(["--slot-save-path", str(slot_path)])
+        load_started = time.monotonic()
         self.llama = self._spawn(
-            llama_command, self._open_log(self.model_log), environment
+            llama_command, self._open_log(self.model_log), environment, "llama"
         )
         self._write_session()
         self._wait_for_model(progress)
+        self.record(
+            "backend.model.ready",
+            {
+                "load_ms": (time.monotonic() - load_started) * 1000.0,
+                "loaded_context": self.context_window,
+            },
+        )
         if progress:
             progress("Starting Marathon router")
         router_env = environment.copy()
@@ -379,6 +505,8 @@ class Runtime:
                 "MARATHON_MODEL_PORT": str(self.config.llama_port),
                 "MARATHON_MODEL_TARGET": self.llama_url,
                 "MARATHON_SLOT_SAVE_ROOT": str(SLOT_ROOT),
+                "MARATHON_RUN_ID": str(self.run_id or ""),
+                "MARATHON_RUN_LOG": str(self.run_log or ""),
             }
         )
         configured_python = os.environ.get("MARATHON_ROUTER_PYTHON")
@@ -401,12 +529,201 @@ class Runtime:
             ],
             self._open_log(self.router_log),
             router_env,
+            "router",
         )
         self._write_session()
         self._wait_for_router(progress)
         self._write_catalog()
         if progress:
             progress("Backend ready")
+        self.record(
+            "runtime.ready",
+            {
+                "startup_ms": (time.monotonic() - (self._run_started_mono or time.monotonic())) * 1000.0,
+                "context": self.context_window,
+                "llama_pid": self.llama.pid if self.llama else None,
+                "router_pid": self.router.pid if self.router else None,
+            },
+        )
+
+    @staticmethod
+    def _parse_number(value: str) -> float | int | None:
+        value = value.strip()
+        try:
+            number = float(value)
+        except ValueError:
+            return None
+        return int(number) if number.is_integer() else number
+
+    def _sample_gpus(self) -> None:
+        fields = (
+            "index,name,uuid,pci.bus_id,driver_version,utilization.gpu,memory.used,memory.total,"
+            "temperature.gpu,power.draw,power.limit,clocks.current.sm,pstate"
+        )
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+            self.record("hardware.gpu.error", {"error": str(error)}, level="error")
+            return
+        # A foreground Ctrl-C is also delivered to an in-flight nvidia-smi
+        # child. That is an orderly Marathon shutdown, not a GPU failure.
+        if result.returncode in {-signal.SIGINT, -signal.SIGTERM}:
+            return
+        if result.returncode != 0:
+            self.record(
+                "hardware.gpu.error",
+                {"returncode": result.returncode, "stderr": redact_text(result.stderr)},
+                level="error",
+            )
+            return
+        names = (
+            "index", "name", "uuid", "pci_bus_id", "driver_version", "utilization_pct", "memory_used_mib",
+            "memory_total_mib", "temperature_c", "power_w", "power_limit_w",
+            "sm_clock_mhz", "pstate",
+        )
+        gpus: list[dict[str, object]] = []
+        for line in result.stdout.splitlines():
+            values = [part.strip() for part in line.split(",")]
+            if len(values) != len(names):
+                continue
+            gpu: dict[str, object] = {}
+            for name, value in zip(names, values):
+                if name in {"name", "uuid", "pci_bus_id", "driver_version", "pstate"}:
+                    gpu[name] = value
+                else:
+                    parsed = self._parse_number(value)
+                    gpu[name] = parsed if parsed is not None else value
+            gpus.append(gpu)
+        self.record("hardware.gpu.sample", {"gpus": gpus})
+
+    def _sample_host(self) -> None:
+        memory: dict[str, int] = {}
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                key, raw = line.split(":", 1)
+                if key in {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"}:
+                    memory[f"{key.lower()}_kib"] = int(raw.strip().split()[0])
+        except (OSError, ValueError, IndexError):
+            pass
+        self.record(
+            "hardware.host.sample",
+            {
+                "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
+                **memory,
+            },
+        )
+
+    def _initialize_kernel_cursor(self) -> None:
+        if not shutil.which("journalctl"):
+            return
+        try:
+            result = subprocess.run(
+                ["journalctl", "-k", "-n", "0", "--show-cursor", "--no-pager"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith("-- cursor: "):
+                    self._journal_cursor = line.removeprefix("-- cursor: ").strip()
+
+    def _sample_kernel_events(self) -> None:
+        if not self._journal_cursor or time.monotonic() - self._last_kernel_poll < 10:
+            return
+        self._last_kernel_poll = time.monotonic()
+        try:
+            result = subprocess.run(
+                [
+                    "journalctl", "-k", f"--after-cursor={self._journal_cursor}",
+                    "--show-cursor", "--output=json", "--no-pager",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return
+        if result.returncode != 0:
+            return
+        keywords = ("nvrm", "xid", "pcie", "aer:", "fallen off", "gpu has fallen")
+        for line in result.stdout.splitlines():
+            if line.startswith("-- cursor: "):
+                self._journal_cursor = line.removeprefix("-- cursor: ").strip()
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = str(item.get("MESSAGE") or "")
+            if any(keyword in message.lower() for keyword in keywords):
+                self.record(
+                    "system.kernel.alert",
+                    {
+                        "message": redact_text(message),
+                        "priority": item.get("PRIORITY"),
+                        "identifier": item.get("SYSLOG_IDENTIFIER"),
+                        "kernel_timestamp": item.get("__REALTIME_TIMESTAMP"),
+                    },
+                    level="error",
+                )
+
+    def _sample_backend_metrics(self) -> None:
+        try:
+            with urllib.request.urlopen(f"{self.llama_url}/metrics", timeout=2) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except (OSError, urllib.error.URLError):
+            return
+        metrics: dict[str, float | int] = {}
+        for line in body.splitlines():
+            if not line or line.startswith("#") or " " not in line:
+                continue
+            key, raw_value = line.rsplit(None, 1)
+            try:
+                number = float(raw_value)
+            except ValueError:
+                continue
+            if key.startswith(("llamacpp:", "llama_", "process_")):
+                metrics[key] = int(number) if number.is_integer() else number
+        if metrics:
+            self.record("backend.metrics.sample", {"metrics": metrics})
+
+    def _sample_loop(self) -> None:
+        try:
+            interval = max(0.5, float(os.environ.get("MARATHON_TELEMETRY_INTERVAL", "2")))
+        except ValueError:
+            interval = 2.0
+        while not self._sample_stop.is_set():
+            started = time.monotonic()
+            self._sample_gpus()
+            self._sample_host()
+            self._sample_backend_metrics()
+            self._sample_kernel_events()
+            elapsed = time.monotonic() - started
+            self._sample_stop.wait(max(0.1, interval - elapsed))
+
+    def _start_sampler(self) -> None:
+        self._sample_stop.clear()
+        self._initialize_kernel_cursor()
+        self._sampler = threading.Thread(
+            target=self._sample_loop,
+            name="marathon-telemetry-sampler",
+            daemon=True,
+        )
+        self._sampler.start()
 
     def _wait_for_model(self, progress: Callable[[str], None] | None) -> None:
         deadline = time.monotonic() + self.config.health_timeout
@@ -454,12 +771,8 @@ class Runtime:
         raise TimeoutError("Marathon router did not become ready within 30 seconds")
 
     def latest_model_status(self) -> str:
-        try:
-            lines = self.model_log.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return "Loading model weights"
         interesting = [
-            line.strip() for line in lines[-80:]
+            line.strip() for line in list(self._recent_model_lines)[-80:]
             if any(token in line.lower() for token in ("load", "cuda", "buffer", "graph", "slot"))
         ]
         return interesting[-1][-120:] if interesting else "Loading model weights"
@@ -481,6 +794,8 @@ class Runtime:
             "profile": self.profile.id,
             "context": self.context_window,
             "started_at": int(time.time()),
+            "run_id": self.run_id,
+            "run_log": str(self.run_log) if self.run_log else None,
         }
         temporary = SESSION_FILE.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -496,6 +811,8 @@ class Runtime:
             "router_url": f"{self.router_url}/v1",
             "llama_pid": self.llama.pid if self.llama and self.llama.poll() is None else None,
             "router_pid": self.router.pid if self.router and self.router.poll() is None else None,
+            "run_id": self.run_id,
+            "run_log": str(self.run_log) if self.run_log else None,
         }
 
     @contextlib.contextmanager
@@ -511,11 +828,30 @@ class Runtime:
         if self._cleaned:
             return
         self._cleaned = True
+        self._sample_stop.set()
+        if self._sampler is not None:
+            self._sampler.join(timeout=5)
         for process in (self.router, self.llama):
             self._terminate(process)
+        for thread in self._log_threads:
+            thread.join(timeout=3)
         for handle in self._logs:
             with contextlib.suppress(OSError):
                 handle.close()
+        duration = (
+            time.monotonic() - self._run_started_mono
+            if self._run_started_mono is not None
+            else 0.0
+        )
+        self.record(
+            "run.completed",
+            {
+                "duration_s": duration,
+                "router_returncode": self.router.poll() if self.router else None,
+                "llama_returncode": self.llama.poll() if self.llama else None,
+                "dropped_events": self.telemetry.dropped_events if self.telemetry else 0,
+            },
+        )
         if self._owns_lock:
             SESSION_FILE.unlink(missing_ok=True)
             self.catalog_file.unlink(missing_ok=True)
@@ -530,20 +866,43 @@ class Runtime:
             self._lock = None
             self._owns_lock = False
 
-    def _terminate(self, process: subprocess.Popen[bytes] | None) -> None:
+    def _terminate(self, process: subprocess.Popen[str] | None) -> None:
         if process is None or process.poll() is not None:
             return
+        name = "router" if process is self.router else "llama"
+        started = time.monotonic()
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
         deadline = time.monotonic() + self.config.stop_timeout
         while time.monotonic() < deadline:
             if process.poll() is not None:
+                self.record(
+                    "process.stopped",
+                    {
+                        "process": name,
+                        "pid": process.pid,
+                        "returncode": process.returncode,
+                        "stop_ms": (time.monotonic() - started) * 1000.0,
+                        "forced": False,
+                    },
+                )
                 return
             time.sleep(0.2)
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired):
             process.wait(timeout=5)
+        self.record(
+            "process.stopped",
+            {
+                "process": name,
+                "pid": process.pid,
+                "returncode": process.returncode,
+                "stop_ms": (time.monotonic() - started) * 1000.0,
+                "forced": True,
+            },
+            level="error",
+        )
 
     def __enter__(self) -> "Runtime":
         return self

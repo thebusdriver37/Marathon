@@ -67,6 +67,9 @@ marathon direct           # dashboard with clean Direct Chat selected
 marathon models           # list installed centralized GGUF models
 marathon status           # inspect an active foreground runtime
 marathon stop             # emergency stop request from another SSH shell
+marathon report           # post-mortem for the latest run
+marathon report <run-id>  # inspect a particular run
+marathon compare A B      # compare two runs or model/profile configurations
 marathon doctor           # diagnose setup, GPUs, models, and ports
 marathon search up        # optional local SearXNG for Codex web tools
 ```
@@ -107,8 +110,46 @@ skills, memory, or Hermes harness. Use `/new` to clear the conversation and
 - Models and backends: `~/AI/`
 - Slot cache and router state: `~/AI/cache/marathon/`
 - Remembered selection: `~/.config/marathon/selection.json`
-- Logs: `~/.local/state/marathon/logs/`
+- Per-run telemetry: `~/.local/state/marathon/runs/*.jsonl`
+- Compatibility process logs: `~/.local/state/marathon/logs/`
 - Live lock and PID metadata: `$XDG_RUNTIME_DIR/marathon/`
+
+## Per-run observability
+
+Every foreground backend launch creates one append-only JSONL flight recorder.
+The supervisor, router, Codex importer, Direct Chat, llama.cpp output capture,
+GPU sampler, host sampler, and llama.cpp `/metrics` sampler all append correlated
+events to that same file. A trace remains readable when Marathon or the machine
+stops unexpectedly; a missing `run.completed` event marks an interrupted run.
+
+The default trace is metadata-oriented. It records model/profile arguments,
+loaded context, timings, token counters, reasoning effort and exposed reasoning
+token counts, tool names and durations, cache/slot behavior, process output,
+GPU identity/utilization/VRAM/power/temperature, host load/memory, and errors. It
+also follows the system journal for NVIDIA Xids, NVRM failures, and PCIe/AER
+alerts while the run is alive. It
+does not intentionally copy Codex prompt text, responses, tool arguments, tool
+outputs, developer instructions, or hidden model reasoning. Common credential
+shapes in operational process output are redacted and long lines are bounded.
+
+```bash
+marathon report                 # latest trace
+marathon report a82f31          # unique filename/run-id fragment
+marathon compare a82f31 b4c901  # side-by-side throughput/resource comparison
+```
+
+No telemetry daemon or database runs in the background, and Marathon does not
+automatically delete traces. Set `MARATHON_RUNS_DIR` to place them on another
+disk. Sampling defaults to two seconds; `MARATHON_TELEMETRY_INTERVAL=5` reduces
+sampling overhead. Set `MARATHON_TELEMETRY_PROCESS_OUTPUT=0` to omit mirrored
+llama.cpp/router operational lines. Set `MARATHON_ELECTRICITY_RATE_USD_KWH` to
+include an estimated GPU-energy cost in reports; this excludes CPU and PSU
+conversion losses and is therefore not a wall-power measurement.
+
+These traces measure real workloads. Repeatable model-quality claims still
+require fixed eval tasks, seeds, sampling settings, software versions, and
+warm/cold conditions; `marathon compare` deliberately reports measurements
+rather than inventing a quality score.
 
 ## Diagnostics and Model Checks
 

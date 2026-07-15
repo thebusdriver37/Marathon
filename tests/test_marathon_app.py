@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from unittest import mock
 
 from marathon_app import catalog
 from marathon_app.frontends import _codex_binary, _stream_chat, codex_command
+from marathon_app.codex_telemetry import snapshot_sessions, summarize_session_changes
 from marathon_app import runtime as runtime_module
 from marathon_app.runtime import (
     Runtime,
@@ -18,6 +20,7 @@ from marathon_app.runtime import (
     _props_context_window,
 )
 from marathon_app.ui import Selection, _home
+from marathon_app.telemetry import EventWriter, read_events, summarize_run
 
 
 def fixture_model(family_id: str = "qwen3.6-27b") -> catalog.Model:
@@ -213,7 +216,7 @@ class FrontendTests(unittest.TestCase):
         runtime._context_window = 262_144
         command = codex_command(runtime)
         joined = " ".join(command)
-        self.assertIn("marathon_local", joined)
+        self.assertIn("marathon-local", joined)
         self.assertIn("model_catalog_json", joined)
         self.assertIn("model_context_window=262144", command)
         self.assertIn("model_auto_compact_token_limit=235929", command)
@@ -247,6 +250,105 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual(answer, "hello")
         self.assertNotIn("tools", captured)
         self.assertNotIn("instructions", captured)
+
+
+class TelemetryTests(unittest.TestCase):
+    def test_event_writer_appends_redacted_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.jsonl"
+            writer = EventWriter(path, "run-test", "test")
+            writer.emit("test.event", {"header": "Authorization: Bearer secret-value"})
+            events = list(read_events(path))
+
+        self.assertEqual(events[0]["run_id"], "run-test")
+        self.assertEqual(events[0]["event"], "test.event")
+        self.assertNotIn("secret-value", json.dumps(events[0]))
+
+    def test_run_summary_calculates_throughput_and_energy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.jsonl"
+            writer = EventWriter(path, "run-test", "runtime")
+            writer.emit(
+                "run.started",
+                {"model": {"id": "test-model"}, "profile": {"id": "fast", "requested_context": 65536}},
+            )
+            router = EventWriter(path, "run-test", "router")
+            router.emit(
+                "router.response.completed",
+                {
+                    "backend": {
+                        "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+                        "timings": {"prompt_n": 100, "prompt_ms": 500, "predicted_n": 20, "predicted_ms": 1000},
+                        "latency_ms": 1500,
+                    }
+                },
+            )
+            writer.emit(
+                "hardware.gpu.sample",
+                {"gpus": [{"power_w": 100, "utilization_pct": 80, "memory_used_mib": 1000, "temperature_c": 60}]},
+            )
+            writer.emit(
+                "codex.session.completed",
+                {"tool_metrics": [{"duration_ms": 49}]},
+            )
+            writer.emit("run.completed", {"duration_s": 2, "dropped_events": 0})
+            summary = summarize_run(path)
+
+        self.assertEqual(summary["model"], "test-model")
+        self.assertEqual(summary["usage"]["output_tokens"], 20)
+        self.assertEqual(summary["prompt_tps"], 200)
+        self.assertEqual(summary["decode_tps"], 20)
+        self.assertEqual(summary["duration_s"], 2)
+
+    def test_gpu_sampler_does_not_report_shutdown_signal_as_hardware_error(self) -> None:
+        model = fixture_model()
+        runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"))
+        interrupted = mock.Mock(returncode=-signal.SIGINT, stdout="", stderr="")
+        with mock.patch("marathon_app.runtime.subprocess.run", return_value=interrupted):
+            with mock.patch.object(runtime, "record") as record:
+                runtime._sample_gpus()
+
+        record.assert_not_called()
+
+    def test_codex_import_reads_new_complete_line_and_no_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sessions = Path(directory) / "sessions" / "2026" / "01" / "01"
+            sessions.mkdir(parents=True)
+            path = sessions / "rollout.jsonl"
+            path.write_text('{"type":"session_meta","payload":{"id":"session-1"}}\n', encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": directory}, clear=False):
+                before = snapshot_sessions()
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({
+                        "type": "turn_context",
+                        "payload": {"model": "local", "effort": "high", "developer_instructions": "private"},
+                    }) + "\n")
+                    handle.write(json.dumps({
+                        "type": "event_msg",
+                        "payload": {"type": "token_count", "info": {
+                            "total_token_usage": {"input_tokens": 30, "output_tokens": 5, "total_tokens": 35},
+                            "last_token_usage": {"input_tokens": 30, "output_tokens": 5, "total_tokens": 35},
+                            "model_context_window": 65536,
+                        }},
+                    }) + "\n")
+                    handle.write(json.dumps({
+                        "timestamp": "2026-01-01T00:00:00.000Z",
+                        "type": "response_item",
+                        "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-1", "arguments": "private"},
+                    }) + "\n")
+                    handle.write(json.dumps({
+                        "timestamp": "2026-01-01T00:00:00.250Z",
+                        "type": "response_item",
+                        "payload": {"type": "function_call_output", "call_id": "call-1", "output": "private"},
+                    }) + "\n")
+                summaries = summarize_session_changes(before)
+
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["reasoning_efforts"], ["high"])
+        self.assertEqual(summaries[0]["token_delta"]["total_tokens"], 35)
+        self.assertEqual(summaries[0]["tool_calls"], {"exec_command": 1})
+        self.assertEqual(summaries[0]["tool_metrics"][0]["duration_ms"], 250)
+        self.assertNotIn("private", json.dumps(summaries[0]))
 
 
 class UiTests(unittest.TestCase):
