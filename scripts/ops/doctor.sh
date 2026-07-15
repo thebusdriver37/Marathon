@@ -11,6 +11,8 @@ MODELS_DIR="${MARATHON_MODELS_DIR:-$AI_ROOT/models/gguf}"
 LLAMACPP_BIN="${LLAMACPP_BIN:-$AI_ROOT/backends/llama.cpp-current/build/bin/llama-server}"
 SLOT_DIR="${MARATHON_SLOT_SAVE_ROOT:-$AI_ROOT/cache/marathon/slots}"
 ROUTER_STATE_DIR="$AI_ROOT/cache/marathon/router"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+PATCHED_CODEX_BIN="${MARATHON_PATCHED_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
 
 failures=0
 warnings=0
@@ -117,10 +119,12 @@ else
   fail "launcher missing or not executable"
 fi
 
-if have codex; then
-  pass "stock Codex available: $(codex --version 2>&1)"
+if [[ -x "$PATCHED_CODEX_BIN" ]]; then
+  pass "Marathon Codex available: $($PATCHED_CODEX_BIN --version 2>&1)"
+elif have codex; then
+  warn "using stock Codex; run 'marathon build-codex' for the raw context meter"
 else
-  fail "stock Codex is not installed or not on PATH"
+  fail "Codex is not installed; run: marathon build-codex"
 fi
 
 if [[ -x "$LLAMACPP_BIN" ]]; then

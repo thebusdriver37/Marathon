@@ -76,11 +76,24 @@ but the dashboard does not use their detached-process lifecycle.
 
 ## Codex behavior
 
-Marathon launches the installed stock `codex` command and leaves `CODEX_HOME`
-untouched. Global configuration, installed skills, plugins, session history,
-and normal global/repository/nested `AGENTS.md` discovery therefore work as
-they do in Codex itself. Marathon supplies only per-invocation overrides for
-its local provider, selected model, context window, and generated model catalog.
+Marathon prefers its small patched Codex binary at
+`$XDG_DATA_HOME/marathon/bin/codex` and falls back to the installed stock
+`codex` command. It leaves `CODEX_HOME` untouched, so global configuration,
+installed skills, plugins, session history, and normal global/repository/nested
+`AGENTS.md` discovery work as they do in Codex itself. Marathon supplies only
+per-invocation overrides for its local provider, selected model, context window,
+and generated model catalog.
+
+The selected profile requests llama.cpp's context allocation, but Marathon does
+not assume that request became the loaded size. After startup it reads the
+backend's reported `n_ctx` and propagates that exact runtime value to the router,
+Codex model catalog, session status, compaction limit, and truncation policy.
+The same path therefore handles 64K, 128K, 256K, or another backend-supported
+window without a model-specific context constant in the application code.
+The Marathon Codex patch removes stock Codex's fixed 12K display normalization,
+so the visible percentage is the backend-reported active tokens divided by that
+loaded window. `marathon build-codex` performs a release build in a temporary
+target directory, installs only the resulting binary, and removes build output.
 
 ## Direct Chat
 

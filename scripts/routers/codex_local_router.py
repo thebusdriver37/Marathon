@@ -885,7 +885,7 @@ class RouterState:
                     "context_window": profile.context_window,
                     "max_context_window": profile.context_window,
                     "auto_compact_token_limit": profile.auto_compact_token_limit,
-                    "effective_context_window_percent": 90,
+                    "effective_context_window_percent": 100,
                     "experimental_supported_tools": [],
                     "input_modalities": ["text"],
                     "supports_search_tool": True,
@@ -1759,7 +1759,6 @@ class RouterState:
         max_iters = max(1, self.web_search_settings.max_iterations)
         cumulative_items: list[dict[str, Any]] = []
         last_response: dict[str, Any] = {}
-        usage_acc = copy.deepcopy(DEFAULT_USAGE)
         iterations = 0
 
         for iteration in range(max_iters + 1):
@@ -1784,14 +1783,6 @@ class RouterState:
                 item for item in iter_items if not _is_droppable_commentary_message(item)
             ]
             pending_calls = collect_managed_calls(iter_items)
-
-            iter_usage = response.get("usage")
-            if isinstance(iter_usage, dict):
-                for key, value in iter_usage.items():
-                    if isinstance(value, (int, float)) and isinstance(usage_acc.get(key), (int, float)):
-                        usage_acc[key] = (usage_acc.get(key) or 0) + value
-                    elif key not in usage_acc or usage_acc.get(key) is None:
-                        usage_acc[key] = value
 
             cumulative_items.extend(iter_items)
 
@@ -1833,13 +1824,6 @@ class RouterState:
                 final_items = [
                     item for item in final_items if not _is_droppable_commentary_message(item)
                 ]
-                final_usage = final.get("usage")
-                if isinstance(final_usage, dict):
-                    for key, value in final_usage.items():
-                        if isinstance(value, (int, float)) and isinstance(usage_acc.get(key), (int, float)):
-                            usage_acc[key] = (usage_acc.get(key) or 0) + value
-                        elif key not in usage_acc or usage_acc.get(key) is None:
-                            usage_acc[key] = value
                 cumulative_items.extend(final_items)
                 iterations = max_iters
                 break
@@ -1858,7 +1842,7 @@ class RouterState:
             iterations += 1
 
         last_response = copy.deepcopy(last_response)
-        last_response["usage"] = usage_acc
+        last_response["usage"] = self.usage_payload(last_response.get("usage"))
         return last_response, cumulative_items, iterations
 
     async def process_websocket_create(

@@ -181,7 +181,7 @@ index 566953dfc2..4df930c3fb 100644
 +        max_context_window: Some(max_context_window),
 +        auto_compact_token_limit: Some(auto_compact_token_limit),
 +        comp_hash: None,
-+        effective_context_window_percent: 95,
++        effective_context_window_percent: 100,
 +        experimental_supported_tools: Vec::new(),
 +        input_modalities: vec![codex_protocol::openai_models::InputModality::Text],
 +        used_fallback_model_metadata: false,

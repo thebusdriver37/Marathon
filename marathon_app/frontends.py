@@ -21,8 +21,19 @@ def _restore_sigint() -> None:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
+def _codex_binary() -> str:
+    configured = os.environ.get("MARATHON_CODEX_BIN")
+    if configured:
+        return configured
+    data_home = Path(
+        os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    ).expanduser()
+    patched = data_home / "marathon" / "bin" / "codex"
+    return str(patched) if patched.is_file() and os.access(patched, os.X_OK) else "codex"
+
+
 def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list[str]:
-    binary = os.environ.get("MARATHON_CODEX_BIN", "codex")
+    binary = _codex_binary()
     provider = (
         'model_providers.marathon_local={ name = "Marathon Local", '
         f'base_url = "{runtime.router_url}/v1", wire_api = "responses", '
@@ -33,8 +44,8 @@ def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list
         "-c", provider,
         "-c", 'model_provider="marathon_local"',
         "-m", runtime.model.alias,
-        "-c", f"model_context_window={runtime.profile.context}",
-        "-c", f"model_auto_compact_token_limit={runtime.profile.context * 9 // 10}",
+        "-c", f"model_context_window={runtime.context_window}",
+        "-c", f"model_auto_compact_token_limit={runtime.auto_compact_token_limit}",
         "-c", f"model_catalog_json={json.dumps(str(runtime.catalog_file))}",
         "-c", 'web_search="cached"',
     ]

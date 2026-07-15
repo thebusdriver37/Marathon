@@ -9,9 +9,14 @@ from pathlib import Path
 from unittest import mock
 
 from marathon_app import catalog
-from marathon_app.frontends import _stream_chat, codex_command
+from marathon_app.frontends import _codex_binary, _stream_chat, codex_command
 from marathon_app import runtime as runtime_module
-from marathon_app.runtime import Runtime
+from marathon_app.runtime import (
+    Runtime,
+    _loaded_model_context,
+    _model_is_loaded,
+    _props_context_window,
+)
 from marathon_app.ui import Selection, _home
 
 
@@ -99,6 +104,38 @@ class CatalogTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_loaded_context_uses_backend_runtime_value(self) -> None:
+        payload = {
+            "data": [
+                {
+                    "id": "local-model",
+                    "meta": {"n_ctx": 262_144, "n_ctx_train": 1_048_576},
+                }
+            ]
+        }
+
+        self.assertEqual(_loaded_model_context(payload, "local-model"), 262_144)
+
+    def test_loaded_context_can_fall_back_to_backend_props(self) -> None:
+        payload = {"default_generation_settings": {"n_ctx": 131_072}}
+
+        self.assertEqual(_props_context_window(payload), 131_072)
+
+    def test_model_readiness_accepts_llama_models_shape(self) -> None:
+        payload = {"models": [{"name": "local-model"}]}
+
+        self.assertTrue(_model_is_loaded(payload, "local-model"))
+
+    def test_context_limits_follow_loaded_model_context(self) -> None:
+        model = fixture_model()
+        profile = catalog.find_profile(model, None)
+        runtime = Runtime(model, profile)
+        runtime._context_window = 131_072
+
+        self.assertEqual(runtime.context_window, 131_072)
+        self.assertEqual(runtime.auto_compact_token_limit, 117_964)
+        self.assertEqual(runtime.truncation_limit, 111_411)
+
     def test_cleanup_terminates_owned_process_group(self) -> None:
         model = fixture_model()
         profile = catalog.find_profile(model, None)
@@ -154,13 +191,32 @@ class RuntimeTests(unittest.TestCase):
 
 
 class FrontendTests(unittest.TestCase):
+    def test_patched_codex_is_preferred_when_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "marathon" / "bin" / "codex"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            binary.chmod(0o755)
+            with mock.patch.dict(
+                os.environ,
+                {"XDG_DATA_HOME": directory},
+                clear=True,
+            ):
+                selected = _codex_binary()
+
+        self.assertEqual(selected, str(binary))
+
     def test_codex_uses_runtime_overrides_without_ignoring_user_config(self) -> None:
         model = fixture_model()
         profile = catalog.find_profile(model, "balanced", "codex")
-        command = codex_command(Runtime(model, profile))
+        runtime = Runtime(model, profile)
+        runtime._context_window = 262_144
+        command = codex_command(runtime)
         joined = " ".join(command)
         self.assertIn("marathon_local", joined)
         self.assertIn("model_catalog_json", joined)
+        self.assertIn("model_context_window=262144", command)
+        self.assertIn("model_auto_compact_token_limit=235929", command)
         self.assertNotIn("--ignore-user-config", command)
 
     def test_direct_chat_sends_no_tools_or_agent_instructions(self) -> None:

@@ -71,6 +71,52 @@ def _http_json(url: str, timeout: float = 3) -> dict[str, object]:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _loaded_model_context(payload: dict[str, object], model_alias: str) -> int | None:
+    for key in ("data", "models"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            aliases = {
+                str(item.get(field) or "")
+                for field in ("id", "slug", "model", "name")
+            }
+            if model_alias not in aliases:
+                continue
+            meta = item.get("meta")
+            if isinstance(meta, dict):
+                context = meta.get("n_ctx")
+                if isinstance(context, int) and context > 0:
+                    return context
+    return None
+
+
+def _model_is_loaded(payload: dict[str, object], model_alias: str) -> bool:
+    for key in ("data", "models"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if model_alias in {
+                str(item.get(field) or "")
+                for field in ("id", "slug", "model", "name")
+            }:
+                return True
+    return False
+
+
+def _props_context_window(payload: dict[str, object]) -> int | None:
+    settings_payload = payload.get("default_generation_settings")
+    if not isinstance(settings_payload, dict):
+        return None
+    context = settings_payload.get("n_ctx")
+    return context if isinstance(context, int) and context > 0 else None
+
+
 def _port_pid(port: int) -> int | None:
     if shutil.which("ss"):
         result = subprocess.run(
@@ -176,6 +222,7 @@ class Runtime:
         self.model = model
         self.profile = profile
         self.config = settings()
+        self._context_window = profile.context
         self.llama: subprocess.Popen[bytes] | None = None
         self.router: subprocess.Popen[bytes] | None = None
         self._logs: list[TextIO] = []
@@ -207,6 +254,18 @@ class Runtime:
     @property
     def catalog_file(self) -> Path:
         return RUNTIME_DIR / "codex-models.json"
+
+    @property
+    def context_window(self) -> int:
+        return self._context_window
+
+    @property
+    def auto_compact_token_limit(self) -> int:
+        return max(1, self.context_window * 9 // 10)
+
+    @property
+    def truncation_limit(self) -> int:
+        return max(1, self.context_window * 85 // 100)
 
     def acquire(self) -> None:
         ensure_dirs()
@@ -312,9 +371,11 @@ class Runtime:
                 "MARATHON_MODEL_SLUG": self.model.alias,
                 "MARATHON_MODEL_DISPLAY_NAME": self.model.display_name,
                 "MARATHON_MODEL_DESCRIPTION": f"{self.model.display_name} via Marathon",
-                "MARATHON_MODEL_CONTEXT": str(self.profile.context),
-                "MARATHON_MODEL_AUTO_COMPACT_TOKEN_LIMIT": str(self.profile.context * 9 // 10),
-                "MARATHON_MODEL_TRUNCATION_LIMIT": str(self.profile.context * 85 // 100),
+                "MARATHON_MODEL_CONTEXT": str(self.context_window),
+                "MARATHON_MODEL_AUTO_COMPACT_TOKEN_LIMIT": str(
+                    self.auto_compact_token_limit
+                ),
+                "MARATHON_MODEL_TRUNCATION_LIMIT": str(self.truncation_limit),
                 "MARATHON_MODEL_PORT": str(self.config.llama_port),
                 "MARATHON_MODEL_TARGET": self.llama_url,
                 "MARATHON_SLOT_SAVE_ROOT": str(SLOT_ROOT),
@@ -354,8 +415,21 @@ class Runtime:
                 raise RuntimeError(f"llama-server exited while loading; see {self.model_log}")
             try:
                 payload = _http_json(f"{self.llama_url}/v1/models")
-                ids = [item.get("id") for item in payload.get("data", []) if isinstance(item, dict)]
-                if self.model.alias in ids:
+                loaded_context = _loaded_model_context(payload, self.model.alias)
+                if _model_is_loaded(payload, self.model.alias):
+                    if loaded_context is None:
+                        try:
+                            loaded_context = _props_context_window(
+                                _http_json(f"{self.llama_url}/props")
+                            )
+                        except (
+                            OSError,
+                            ValueError,
+                            urllib.error.URLError,
+                            json.JSONDecodeError,
+                        ):
+                            pass
+                    self._context_window = loaded_context or self.profile.context
                     return
             except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError):
                 pass
@@ -405,6 +479,7 @@ class Runtime:
             "router_pid": self.router.pid if self.router else None,
             "model": self.model.id,
             "profile": self.profile.id,
+            "context": self.context_window,
             "started_at": int(time.time()),
         }
         temporary = SESSION_FILE.with_suffix(".tmp")
@@ -417,7 +492,7 @@ class Runtime:
             "model_id": self.model.id,
             "profile": self.profile.display_name,
             "profile_id": self.profile.id,
-            "context": self.profile.context,
+            "context": self.context_window,
             "router_url": f"{self.router_url}/v1",
             "llama_pid": self.llama.pid if self.llama and self.llama.poll() is None else None,
             "router_pid": self.router.pid if self.router and self.router.poll() is None else None,
