@@ -105,9 +105,11 @@ private Python environment, GPU visibility, ports, and optional SearXNG.
 
 ## Prompt Cache Snapshots
 
-Marathon saves llama.cpp prompt-slot snapshots beneath the centralized cache
-directory. Linear follow-up turns reuse the live prompt slot directly, while
-disk snapshots provide a bounded fallback for recent in-process branches.
+Linear follow-up turns reuse llama.cpp's live prompt slot, so normal Codex
+conversations do not write large prompt snapshots to disk. Optional disk
+snapshots can preserve recent in-process branches, but each snapshot can be
+hundreds of megabytes at long context and adds synchronous I/O after a turn.
+They are therefore disabled by default.
 
 At router startup Marathon deletes stale slot snapshots, because the in-memory
 response lineage needed to use them does not survive a router restart. During
@@ -117,6 +119,7 @@ bytes so 128K sessions cannot silently fill the disk.
 | Var | Default | Purpose |
 |---|---|---|
 | `MARATHON_SLOT_SAVE_ROOT` | `~/AI/cache/marathon/slots` | Root directory passed to llama.cpp `--slot-save-path` launchers |
+| `MARATHON_SLOT_SNAPSHOTS_ENABLED` | `0` | Opt into disk snapshots for recent in-process conversation branches |
 | `MARATHON_SLOT_SNAPSHOT_MAX_COUNT` | `16` | Max snapshots retained per model profile during one router process |
 | `MARATHON_SLOT_SNAPSHOT_MAX_BYTES` | `32 GiB` | Max snapshot bytes retained per model profile |
 | `MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP` | `1` | Delete stale snapshots on router startup; set `0` only for debugging |

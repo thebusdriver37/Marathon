@@ -100,6 +100,7 @@ WS_SEND_TIMEOUT_SECONDS = float(os.getenv("MARATHON_WS_SEND_TIMEOUT_SECONDS", "5
 DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 16
 DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = True
+DEFAULT_SLOT_SNAPSHOTS_ENABLED = False
 
 StreamEventSink = Callable[[dict[str, Any]], Awaitable[bool]]
 
@@ -807,6 +808,10 @@ class RouterState:
         self.slot_snapshot_clean_startup = _env_bool(
             "MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP",
             DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP,
+        )
+        self.slot_snapshots_enabled = _env_bool(
+            "MARATHON_SLOT_SNAPSHOTS_ENABLED",
+            DEFAULT_SLOT_SNAPSHOTS_ENABLED,
         )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -2070,31 +2075,39 @@ class RouterState:
             response_id = preset_response_id or str(
                 backend_response.get("id") or self.mint_response_id("resp")
             )
-            snapshot_filename = f"{profile.slug}__{response_id}.bin"
-            snapshot_path = self._slot_save_dir(profile) / snapshot_filename
-
-            pre_prune_result = await self.prune_slot_snapshots(profile)
-            save_start = time.perf_counter()
+            snapshot_filename = ""
+            snapshot_path: Path | None = None
+            pre_prune_result: dict[str, Any] | None = None
             save_result: dict[str, Any] | None = None
             save_error: str | None = None
-            try:
-                save_result = await self.save_slot(profile, snapshot_filename)
-            except Exception as exc:
-                save_error = str(exc)
-            slot_save_ms = (time.perf_counter() - save_start) * 1000.0
             snapshot_saved = False
-            if save_error is None:
+            save_start = time.perf_counter()
+            if self.slot_snapshots_enabled:
+                snapshot_filename = f"{profile.slug}__{response_id}.bin"
+                snapshot_path = self._slot_save_dir(profile) / snapshot_filename
+                pre_prune_result = await self.prune_slot_snapshots(profile)
                 try:
-                    snapshot_saved = snapshot_path.is_file() and snapshot_path.stat().st_size > 0
-                except OSError:
-                    snapshot_saved = False
-                if not snapshot_saved:
-                    save_error = "slot save produced an empty or missing snapshot"
+                    save_result = await self.save_slot(profile, snapshot_filename)
+                except Exception as exc:
+                    save_error = str(exc)
+                if save_error is None:
+                    try:
+                        snapshot_saved = (
+                            snapshot_path.is_file() and snapshot_path.stat().st_size > 0
+                        )
+                    except OSError:
+                        snapshot_saved = False
+                    if not snapshot_saved:
+                        save_error = "slot save produced an empty or missing snapshot"
+            else:
+                save_result = {"status": "skipped", "reason": "snapshots disabled"}
+            slot_save_ms = (time.perf_counter() - save_start) * 1000.0
             post_prune_result: dict[str, Any] | None = None
-            post_prune_result = await self.prune_slot_snapshots(
-                profile,
-                protected_filename=snapshot_filename if snapshot_saved else None,
-            )
+            if self.slot_snapshots_enabled:
+                post_prune_result = await self.prune_slot_snapshots(
+                    profile,
+                    protected_filename=snapshot_filename if snapshot_saved else None,
+                )
             self.live_slot_by_model[profile.slug] = response_id
 
         output_items = all_output_items
