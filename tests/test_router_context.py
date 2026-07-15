@@ -170,6 +170,58 @@ class RouterContextTests(unittest.TestCase):
             "*** End Patch",
         )
 
+    def test_patch_schema_requires_action_specific_fields(self) -> None:
+        tool = router_module._apply_patch_function_tool()
+        variants = tool["parameters"]["properties"]["operations"]["items"]["oneOf"]
+
+        self.assertTrue(tool["strict"])
+        self.assertEqual(
+            [variant["required"] for variant in variants],
+            [
+                ["action", "path", "content"],
+                ["action", "path", "old_text", "new_text"],
+                ["action", "path"],
+            ],
+        )
+
+    def test_structured_patch_rejects_embedded_patch_envelopes(self) -> None:
+        compiled = router_module._structured_patch_to_input(
+            [
+                {
+                    "action": "add",
+                    "path": "example.c",
+                    "content": "int main(void) { return 0; }\n*** End Patch\n",
+                }
+            ]
+        )
+
+        self.assertEqual(compiled, "")
+
+    def test_tool_argument_guard_rejects_loops_invalid_json_and_oversize(self) -> None:
+        repeated = "</tool_call>" * 200
+        self.assertTrue(router_module._has_runaway_repetition(repeated))
+        self.assertFalse(
+            router_module._has_runaway_repetition(
+                "int parse_json(const char *input) {\n    return input != NULL;\n}\n"
+                * 20
+            )
+        )
+        self.assertIn(
+            "structured JSON",
+            router_module._apply_patch_protocol_error(
+                {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "arguments": '{"operations":[{"action":"add","path":"x.c",',
+                },
+                24_576,
+            ),
+        )
+        self.assertIn(
+            "exceeded",
+            router_module._partial_tool_argument_error("x" * 101, 100),
+        )
+
     def test_patch_lineage_and_output_replay_stay_backend_native(self) -> None:
         custom_call = {
             "type": "custom_tool_call",
@@ -180,6 +232,33 @@ class RouterContextTests(unittest.TestCase):
         backend_call = router_module._backend_lineage_item(custom_call)
         self.assertEqual(backend_call["type"], "function_call")
         self.assertIn("input", json.loads(backend_call["arguments"]))
+
+        structured_arguments = json.dumps(
+            {
+                "operations": [
+                    {
+                        "action": "add",
+                        "path": "example.txt",
+                        "content": "hello",
+                    }
+                ]
+            }
+        )
+        custom_call["input"] = router_module._apply_patch_input_from_arguments(
+            structured_arguments
+        )
+        custom_call[router_module._BACKEND_ARGUMENTS_KEY] = structured_arguments
+        backend_call = router_module._backend_lineage_item(custom_call)
+        self.assertEqual(backend_call["arguments"], structured_arguments)
+        self.assertNotIn(router_module._BACKEND_ARGUMENTS_KEY, backend_call)
+
+        custom_call[router_module._BACKEND_ARGUMENTS_KEY] = '{"operations":['
+        backend_call = router_module._backend_lineage_item(custom_call)
+        self.assertNotEqual(backend_call["arguments"], '{"operations":[')
+        self.assertEqual(
+            json.loads(backend_call["arguments"])["input"],
+            custom_call["input"],
+        )
 
         normalized = router_module.normalize_responses_request(
             {
@@ -193,6 +272,21 @@ class RouterContextTests(unittest.TestCase):
             }
         )
         self.assertEqual(normalized["input"][0]["type"], "function_call_output")
+
+    def test_completed_message_stays_commentary_when_tool_precedes_it(self) -> None:
+        items = [
+            {"type": "function_call", "name": "exec_command"},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will test it."}],
+            },
+        ]
+
+        self.assertEqual(router_module._completed_message_phase(items), "commentary")
+        self.assertEqual(
+            router_module._completed_message_phase([items[1]]), "final_answer"
+        )
 
     def test_lifted_instructions_persist_until_base_instructions_change(self) -> None:
         parent = router_module.ResponseSnapshot(
@@ -297,6 +391,60 @@ class RouterContextTests(unittest.TestCase):
         self.assertEqual(items[-1]["name"], "exec_command")
         state.telemetry.emit.assert_called_once_with(
             "router.response.stalled_recovery",
+            mock.ANY,
+            level="warning",
+        )
+
+    def test_tool_protocol_failure_retries_once_with_smaller_budget(self) -> None:
+        profile = fixture_profile(65_536)
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        recovered = {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_1",
+                    "arguments": '{}',
+                }
+            ],
+            "usage": {"input_tokens": 10_500, "output_tokens": 80},
+        }
+        state._request_responses_stream = mock.AsyncMock(
+            side_effect=[
+                router_module.ToolProtocolError(
+                    "apply_patch arguments were not valid structured JSON"
+                ),
+                recovered,
+            ]
+        )
+
+        async def sink(_event: dict[str, object]) -> bool:
+            return True
+
+        response, items, _iterations = asyncio.run(
+            state._run_responses_loop(
+                profile=profile,
+                forward_request={
+                    "input": [],
+                    "tools": [{"type": "function", "name": "apply_patch"}],
+                    "max_output_tokens": 8_192,
+                },
+                web_search_enabled=False,
+                event_sink=sink,
+            )
+        )
+
+        self.assertEqual(response["output"], recovered["output"])
+        self.assertEqual(response["usage"]["output_tokens"], 80)
+        self.assertEqual(items[-1]["name"], "exec_command")
+        retry = state._request_responses_stream.await_args_list[1].args[1]
+        self.assertEqual(retry["tool_choice"], "required")
+        self.assertEqual(retry["max_output_tokens"], 4_096)
+        self.assertIn("split", retry["input"][-1]["content"][0]["text"].lower())
+        state.telemetry.emit.assert_called_once_with(
+            "router.response.tool_protocol_recovery",
             mock.ANY,
             level="warning",
         )

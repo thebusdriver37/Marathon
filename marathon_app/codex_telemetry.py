@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -37,12 +38,42 @@ def _usage(payload: dict[str, Any], key: str) -> dict[str, int]:
     }
 
 
-def summarize_session_changes(
-    before: dict[Path, int], *, cwd: Path | None = None
+def _tool_output_text(output: Any) -> str:
+    if isinstance(output, str):
+        return output
+    if not isinstance(output, list):
+        return ""
+    return "\n".join(
+        str(part.get("text") or "")
+        for part in output
+        if isinstance(part, dict)
+    )
+
+
+def _tool_failure(payload: dict[str, Any]) -> str | None:
+    status = str(payload.get("status") or "").casefold()
+    if status in {"failed", "error", "cancelled"}:
+        return status
+    text = _tool_output_text(payload.get("output"))
+    if "apply_patch verification failed" in text:
+        return "patch verification failed"
+    match = re.search(r"(?:process exited with code|exit code:)\s*(-?\d+)", text, re.I)
+    if match and int(match.group(1)) != 0:
+        return f"process exited with code {match.group(1)}"
+    if re.search(r"\b(?:build|compile|test):\s*FAIL\b", text, re.I):
+        return "command reported failure"
+    return None
+
+
+def _summarize_sessions(
+    before: dict[Path, int],
+    after: dict[Path, int],
+    *,
+    cwd: Path | None = None,
+    provider: str | None = None,
 ) -> list[dict[str, Any]]:
     """Summarize appended Codex events without retaining conversation content."""
 
-    after = snapshot_sessions()
     summaries: list[dict[str, Any]] = []
     for path, size in after.items():
         offset = before.get(path, 0)
@@ -60,6 +91,7 @@ def summarize_session_changes(
         context_window: int | None = None
         session_id: str | None = None
         session_cwd: str | None = None
+        session_provider: str | None = None
         with path.open("rb") as handle:
             if offset:
                 handle.seek(offset - 1)
@@ -79,6 +111,9 @@ def summarize_session_changes(
                 if kind == "session_meta":
                     session_id = str(payload.get("id") or "") or session_id
                     session_cwd = str(payload.get("cwd") or "") or session_cwd
+                    session_provider = (
+                        str(payload.get("model_provider") or "") or session_provider
+                    )
                 elif kind == "turn_context":
                     model = str(payload.get("model") or "") or model
                     session_cwd = str(payload.get("cwd") or "") or session_cwd
@@ -127,12 +162,14 @@ def summarize_session_changes(
                                 duration_ms = max(0.0, (ended_at - started_at).total_seconds() * 1000.0)
                             except ValueError:
                                 pass
+                    failure = _tool_failure(payload)
                     tool_metrics.append(
                         {
                             "call_id": call_id or None,
                             "name": name,
                             "duration_ms": duration_ms,
-                            "status": payload.get("status") or "completed",
+                            "status": "failed" if failure else "completed",
+                            "failure": failure,
                         }
                     )
 
@@ -150,11 +187,14 @@ def summarize_session_changes(
                 matches_cwd = False
             if not matches_cwd:
                 continue
+        if provider is not None and session_provider != provider:
+            continue
         summaries.append(
             {
                 "session_id": session_id,
                 "session_file": str(path),
                 "cwd": session_cwd,
+                "provider": session_provider,
                 "bytes_appended": size - offset,
                 "model": model,
                 "context_window": context_window,
@@ -166,3 +206,53 @@ def summarize_session_changes(
             }
         )
     return summaries
+
+
+def summarize_session_changes(
+    before: dict[Path, int], *, cwd: Path | None = None
+) -> list[dict[str, Any]]:
+    return _summarize_sessions(before, snapshot_sessions(), cwd=cwd)
+
+
+def refresh_legacy_tool_metrics(session: dict[str, Any]) -> dict[str, Any]:
+    """Reclassify old metrics that predate tool-failure detection."""
+
+    metrics = session.get("tool_metrics") or []
+    if not metrics or all("failure" in metric for metric in metrics):
+        return session
+    path = Path(str(session.get("session_file") or ""))
+    try:
+        summaries = _summarize_sessions({}, {path: path.stat().st_size})
+    except OSError:
+        return session
+    fresh = {
+        metric.get("call_id"): metric
+        for summary in summaries
+        for metric in summary.get("tool_metrics") or []
+        if metric.get("call_id")
+    }
+    updated = dict(session)
+    updated["tool_metrics"] = [
+        {**metric, **fresh.get(metric.get("call_id"), {})}
+        for metric in metrics
+    ]
+    return updated
+
+
+def summarize_active_sessions(started_at: datetime, *, cwd: Path) -> list[dict[str, Any]]:
+    """Read a still-running Marathon Codex rollout without starting a monitor."""
+
+    threshold = started_at.timestamp() - 2
+    candidates: dict[Path, int] = {}
+    for path, size in snapshot_sessions().items():
+        try:
+            if path.stat().st_mtime >= threshold:
+                candidates[path] = size
+        except OSError:
+            continue
+    return _summarize_sessions(
+        {},
+        candidates,
+        cwd=cwd,
+        provider="marathon-local",
+    )

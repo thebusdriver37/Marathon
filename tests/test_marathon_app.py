@@ -321,6 +321,103 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(summary["decode_tps"], 20)
         self.assertEqual(summary["duration_s"], 2)
 
+    def test_run_summary_falls_back_to_llama_process_timings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.jsonl"
+            writer = EventWriter(path, "run-test", "runtime")
+            writer.emit(
+                "run.started",
+                {"model": {"id": "test-model"}, "profile": {"id": "fast"}},
+            )
+            writer.emit(
+                "process.output",
+                {
+                    "process": "llama",
+                    "message": "I slot print_timing: id 0 | prompt eval time = 500.00 ms / 100 tokens",
+                },
+            )
+            writer.emit(
+                "process.output",
+                {
+                    "process": "llama",
+                    "message": "I slot print_timing: id 0 | eval time = 1000.00 ms / 40 tokens",
+                },
+            )
+            summary = summarize_run(path)
+
+        self.assertEqual(summary["prompt_tps"], 200)
+        self.assertEqual(summary["decode_tps"], 40)
+
+    def test_active_codex_session_reports_tool_failures_before_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            run_path = root / "run.jsonl"
+            writer = EventWriter(run_path, "run-test", "runtime")
+            writer.emit(
+                "run.started",
+                {"model": {"id": "test-model"}, "profile": {"id": "fast"}},
+            )
+            writer.emit(
+                "frontend.started",
+                {"frontend": "codex", "cwd": str(workspace)},
+            )
+            sessions = root / "sessions" / "2026" / "01" / "01"
+            sessions.mkdir(parents=True)
+            rollout = sessions / "rollout.jsonl"
+            records = [
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "session-1",
+                        "cwd": str(workspace),
+                        "model_provider": "marathon-local",
+                    },
+                },
+                {
+                    "timestamp": "2026-01-01T00:00:00.000Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "apply_patch",
+                        "call_id": "call-1",
+                    },
+                },
+                {
+                    "timestamp": "2026-01-01T00:00:00.250Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-1",
+                        "output": "apply_patch verification failed: invalid patch",
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"input_tokens": 30, "output_tokens": 5},
+                            "last_token_usage": {"input_tokens": 30, "output_tokens": 5},
+                        },
+                    },
+                },
+            ]
+            rollout.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"CODEX_HOME": directory}, clear=False):
+                summary = summarize_run(run_path, live=True)
+
+        self.assertEqual(summary["codex_sessions"], 1)
+        self.assertEqual(summary["active_codex_sessions"], 1)
+        self.assertEqual(summary["tool_calls"], {"apply_patch": 1})
+        self.assertEqual(summary["tool_failures"], 1)
+        self.assertEqual(summary["failed_tools"], {"apply_patch": 1})
+        self.assertEqual(summary["codex_usage"]["output_tokens"], 5)
+
     def test_gpu_sampler_does_not_report_shutdown_signal_as_hardware_error(self) -> None:
         model = fixture_model()
         runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"))

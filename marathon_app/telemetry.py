@@ -19,12 +19,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .codex_telemetry import refresh_legacy_tool_metrics, summarize_active_sessions
+
 
 SCHEMA_VERSION = 1
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(authorization:\s*bearer\s+)[^\s]+"),
     re.compile(r"(?i)\b(sk-[a-z0-9_-]{12,})\b"),
     re.compile(r"(?i)(token|secret|password|api[_-]?key)(\s*[=:]\s*)[^\s,;]+"),
+)
+_LLAMA_PROMPT_TIMING = re.compile(
+    r"prompt eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens"
+)
+_LLAMA_DECODE_TIMING = re.compile(
+    r"\|\s*eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens"
 )
 
 
@@ -173,7 +181,7 @@ def _number(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def summarize_run(path: Path) -> dict[str, Any]:
+def summarize_run(path: Path, *, live: bool = False) -> dict[str, Any]:
     events = list(read_events(path))
     counts = Counter(str(item.get("event", "unknown")) for item in events)
     started = next((item for item in events if item.get("event") == "run.started"), None)
@@ -184,7 +192,43 @@ def summarize_run(path: Path) -> dict[str, Any]:
 
     router_responses = [item.get("data") or {} for item in events if item.get("event") == "router.response.completed"]
     direct_turns = [item.get("data") or {} for item in events if item.get("event") == "direct.turn.completed"]
-    codex_sessions = [item.get("data") or {} for item in events if item.get("event") == "codex.session.completed"]
+    codex_sessions = [
+        refresh_legacy_tool_metrics(item.get("data") or {})
+        for item in events
+        if item.get("event") == "codex.session.completed"
+    ]
+    frontend_starts = [
+        item
+        for item in events
+        if item.get("event") == "frontend.started"
+        and (item.get("data") or {}).get("frontend") == "codex"
+    ]
+    frontend_completions = [
+        item
+        for item in events
+        if item.get("event") == "frontend.completed"
+        and (item.get("data") or {}).get("frontend") == "codex"
+    ]
+    active_codex_sessions: list[dict[str, Any]] = []
+    if live and frontend_starts and (
+        not frontend_completions
+        or (_number(frontend_starts[-1].get("mono_ns")) or 0)
+        > (_number(frontend_completions[-1].get("mono_ns")) or 0)
+    ):
+        active_start = frontend_starts[-1]
+        active_data = active_start.get("data") or {}
+        timestamp = active_start.get("ts")
+        cwd = active_data.get("cwd")
+        if isinstance(timestamp, str) and isinstance(cwd, str):
+            try:
+                started_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                active_codex_sessions = summarize_active_sessions(
+                    started_at,
+                    cwd=Path(cwd),
+                )
+            except (OSError, ValueError):
+                active_codex_sessions = []
+    codex_sessions.extend(active_codex_sessions)
     usage_totals: Counter[str] = Counter()
     backend_latencies: list[float] = []
     warmups = 0
@@ -210,6 +254,34 @@ def summarize_run(path: Path) -> dict[str, Any]:
         generated_tokens += _number(timings.get("predicted_n")) or 0.0
         generated_ms += _number(timings.get("predicted_ms")) or 0.0
         router_tool_counts.update((response.get("output") or {}).get("tool_calls") or {})
+
+    if prompt_ms == 0 or generated_ms == 0:
+        process_prompt_tokens = 0.0
+        process_prompt_ms = 0.0
+        process_generated_tokens = 0.0
+        process_generated_ms = 0.0
+        for event in events:
+            if event.get("event") != "process.output":
+                continue
+            data = event.get("data") or {}
+            if data.get("process") != "llama":
+                continue
+            message = data.get("message")
+            if not isinstance(message, str):
+                continue
+            prompt_match = _LLAMA_PROMPT_TIMING.search(message)
+            if prompt_match:
+                process_prompt_ms += float(prompt_match.group(1))
+                process_prompt_tokens += int(prompt_match.group(2))
+                continue
+            decode_match = _LLAMA_DECODE_TIMING.search(message)
+            if decode_match:
+                process_generated_ms += float(decode_match.group(1))
+                process_generated_tokens += int(decode_match.group(2))
+        if prompt_ms == 0:
+            prompt_ms, prompt_tokens = process_prompt_ms, process_prompt_tokens
+        if generated_ms == 0:
+            generated_ms, generated_tokens = process_generated_ms, process_generated_tokens
 
     direct_ttft = [
         value for value in (_number(turn.get("ttft_ms")) for turn in direct_turns)
@@ -268,6 +340,7 @@ def summarize_run(path: Path) -> dict[str, Any]:
     codex_usage: Counter[str] = Counter()
     reasoning_efforts: Counter[str] = Counter()
     tool_durations: list[float] = []
+    tool_failures: list[dict[str, Any]] = []
     for session in codex_sessions:
         tool_counts.update(session.get("tool_calls") or {})
         reasoning_efforts.update(session.get("reasoning_efforts") or [])
@@ -275,6 +348,8 @@ def summarize_run(path: Path) -> dict[str, Any]:
             tool_duration = _number(tool.get("duration_ms"))
             if tool_duration is not None:
                 tool_durations.append(tool_duration)
+            if tool.get("status") == "failed":
+                tool_failures.append(tool)
         for key, value in (session.get("token_delta") or {}).items():
             if isinstance(value, (int, float)):
                 codex_usage[key] += int(value)
@@ -289,6 +364,7 @@ def summarize_run(path: Path) -> dict[str, Any]:
         "path": path,
         "run_id": (started or {}).get("run_id") or (events[0].get("run_id") if events else "unknown"),
         "complete": completed is not None,
+        "active": live and completed is None,
         "model": start_data.get("model", {}).get("id") or start_data.get("model_id") or "unknown",
         "profile": start_data.get("profile", {}).get("id") or start_data.get("profile_id") or "unknown",
         "context": ((ready or {}).get("data") or {}).get("context")
@@ -301,12 +377,18 @@ def summarize_run(path: Path) -> dict[str, Any]:
         "router_warmups": warmups,
         "direct_turns": len(direct_turns),
         "codex_sessions": len(codex_sessions),
+        "active_codex_sessions": len(active_codex_sessions),
         "usage": dict(usage_totals),
         "codex_usage": dict(codex_usage),
         "tool_calls": dict(tool_counts),
         "reasoning_efforts": dict(reasoning_efforts),
         "avg_tool_duration_ms": sum(tool_durations) / len(tool_durations)
         if tool_durations else None,
+        "tool_failures": len(tool_failures),
+        "failed_tools": dict(
+            Counter(str(tool.get("name") or "unknown") for tool in tool_failures)
+        ),
+        "tool_failure_details": tool_failures[-10:],
         "avg_backend_latency_ms": sum(backend_latencies) / len(backend_latencies) if backend_latencies else None,
         "prompt_tps": prompt_tokens / (prompt_ms / 1000.0) if prompt_ms > 0 else None,
         "decode_tps": generated_tokens / (generated_ms / 1000.0) if generated_ms > 0 else None,

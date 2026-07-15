@@ -112,6 +112,12 @@ If a capped agent response contains only unfinished reasoning, Marathon makes
 one bounded recovery request requiring a concrete tool action instead of
 reporting a false-successful Codex turn. Set
 `MARATHON_STALLED_RESPONSE_RECOVERIES=0` to disable that recovery.
+Tool calls also have a model-agnostic protocol guard: invalid patch JSON, exact
+repetition loops, arguments over 24,576 characters, or 90 seconds without a
+backend stream event are aborted and retried once with a smaller generation
+budget and instructions to split the edit. Valid streamed calls are unaffected.
+`MARATHON_TOOL_ARGUMENT_MAX_CHARS`, `MARATHON_STREAM_IDLE_TIMEOUT_SECONDS`, and
+`MARATHON_TOOL_PROTOCOL_RECOVERIES` tune or disable those bounds.
 The Marathon Codex patch removes stock Codex's fixed 12K display normalization,
 so the visible percentage is the backend-reported active tokens divided by that
 loaded window. `marathon build-codex` performs a release build in a temporary
@@ -156,6 +162,10 @@ marathon report                 # latest trace
 marathon report a82f31          # unique filename/run-id fragment
 marathon compare a82f31 b4c901  # side-by-side throughput/resource comparison
 ```
+
+`marathon report` also reads an open Codex rollout, so token usage, tool calls,
+tool failures, and llama.cpp throughput remain visible while the foreground
+session is still running. It reads on demand; it does not add a monitor process.
 
 No telemetry daemon or database runs in the background, and Marathon does not
 automatically delete traces. Set `MARATHON_RUNS_DIR` to place them on another

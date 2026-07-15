@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
@@ -56,10 +58,22 @@ def _format_duration(seconds: float) -> str:
     return f"{int(seconds // 60)}m {seconds % 60:.0f}s"
 
 
+def _run_is_active(path: Path) -> bool:
+    try:
+        session = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        pid = int(session["supervisor_pid"])
+        run_log = Path(session["run_log"]).expanduser().resolve()
+        os.kill(pid, 0)
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+        return False
+    return run_log == path.resolve()
+
+
 def _report(target: str | None) -> int:
     console = Console()
     try:
-        summary = summarize_run(resolve_run(target))
+        path = resolve_run(target)
+        summary = summarize_run(path, live=_run_is_active(path))
     except (OSError, ValueError) as error:
         console.print(f"[bold red]Cannot read run:[/bold red] {error}")
         return 2
@@ -71,13 +85,27 @@ def _report(target: str | None) -> int:
     table.add_column(style="cyan")
     table.add_column()
     table.add_row("Trace", str(summary["path"]))
-    table.add_row("State", "complete" if summary["complete"] else "incomplete / interrupted")
+    if summary["complete"]:
+        state = "complete"
+    elif summary["active"]:
+        state = "active"
+    else:
+        state = "incomplete / interrupted"
+    table.add_row("State", state)
     table.add_row("Duration", _format_duration(float(summary["duration_s"])))
-    table.add_row("Events", f"{summary['event_count']:,} ({summary['errors']} errors)")
+    table.add_row(
+        "Events",
+        f"{summary['event_count']:,} ({summary['errors']} runtime errors)",
+    )
+    active_label = (
+        f" · {summary['active_codex_sessions']} active"
+        if summary["active_codex_sessions"]
+        else ""
+    )
     table.add_row(
         "Activity",
         f"{summary['router_turns']} Codex responses · {summary['direct_turns']} direct turns · "
-        f"{summary['codex_sessions']} Codex launches",
+        f"{summary['codex_sessions']} Codex launches{active_label}",
     )
     usage = summary["usage"]
     if usage:
@@ -123,6 +151,15 @@ def _report(target: str | None) -> int:
         table.add_row("Codex tools", tools)
         if summary["avg_tool_duration_ms"] is not None:
             table.add_row("Average tool duration", f"{summary['avg_tool_duration_ms'] / 1000:.2f}s")
+    if summary["tool_failures"]:
+        failures = ", ".join(
+            f"{name} ×{count}"
+            for name, count in sorted(summary["failed_tools"].items())
+        )
+        table.add_row(
+            "Tool failures",
+            f"[bold red]{summary['tool_failures']}[/bold red] ({failures})",
+        )
     if summary["reasoning_efforts"]:
         efforts = ", ".join(
             f"{name} ×{count}" for name, count in sorted(summary["reasoning_efforts"].items())
@@ -156,7 +193,10 @@ def _compare(targets: list[str]) -> int:
         console.print("[bold red]Usage:[/bold red] marathon compare <run-a> <run-b>")
         return 2
     try:
-        left, right = (summarize_run(resolve_run(target)) for target in targets)
+        paths = [resolve_run(target) for target in targets]
+        left, right = (
+            summarize_run(path, live=_run_is_active(path)) for path in paths
+        )
     except (OSError, ValueError) as error:
         console.print(f"[bold red]Cannot compare runs:[/bold red] {error}")
         return 2
@@ -176,7 +216,8 @@ def _compare(targets: list[str]) -> int:
         ("Average GPU power/card", f"{left['avg_gpu_power_w'] or 0:.1f}W", f"{right['avg_gpu_power_w'] or 0:.1f}W"),
         ("Estimated GPU energy", f"{left['energy_wh']:.2f} Wh", f"{right['energy_wh']:.2f} Wh"),
         ("Peak GPU memory/card", f"{left['peak_gpu_memory_mib'] or 0:.0f} MiB", f"{right['peak_gpu_memory_mib'] or 0:.0f} MiB"),
-        ("Errors", left["errors"], right["errors"]),
+        ("Runtime errors", left["errors"], right["errors"]),
+        ("Tool failures", left["tool_failures"], right["tool_failures"]),
     )
     for metric, a, b in rows:
         table.add_row(str(metric), str(a), str(b))

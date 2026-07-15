@@ -109,6 +109,10 @@ DEFAULT_TOOL_OUTPUT_MAX_CHARS = 16_384
 DEFAULT_WEB_TOOL_CACHE_MAX_ENTRIES = 256
 DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 DEFAULT_STALLED_RESPONSE_RECOVERIES = 1
+DEFAULT_TOOL_PROTOCOL_RECOVERIES = 1
+DEFAULT_TOOL_ARGUMENT_MAX_CHARS = 24_576
+DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 90.0
+_BACKEND_ARGUMENTS_KEY = "_marathon_backend_arguments"
 
 StreamEventSink = Callable[[dict[str, Any]], Awaitable[bool]]
 
@@ -136,6 +140,10 @@ FOLLOWUP_WORK_ITEM_TYPES = {
 class SseEvent:
     name: str | None
     data: str
+
+
+class ToolProtocolError(RuntimeError):
+    """The backend stopped making valid, bounded tool-call progress."""
 
 
 @dataclass(frozen=True)
@@ -250,6 +258,16 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
     except ValueError:
         return default
 
@@ -370,6 +388,24 @@ def _stalled_recovery_message() -> dict[str, Any]:
                     "producing a message or tool call. Do not continue internal "
                     "analysis. Use one available tool now to make concrete progress; "
                     "split large edits into smaller tool calls."
+                ),
+            }
+        ],
+    }
+
+
+def _tool_protocol_recovery_message(reason: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    f"Marathon aborted the previous tool call because {reason}. "
+                    "Do not repeat or continue that output. Call one available tool "
+                    "now with valid, concise arguments. Split large file edits into "
+                    "several smaller apply_patch calls."
                 ),
             }
         ],
@@ -595,6 +631,12 @@ def _starts_followup_work(item: Any) -> bool:
     return str(item.get("type") or "") in FOLLOWUP_WORK_ITEM_TYPES
 
 
+def _completed_message_phase(items: list[dict[str, Any]]) -> str:
+    """Keep the working indicator alive when a response also requested work."""
+
+    return "commentary" if any(_starts_followup_work(item) for item in items) else "final_answer"
+
+
 def _set_assistant_message_phase(item: dict[str, Any], phase: str) -> None:
     if _is_assistant_message_item(item) and not item.get("phase"):
         item["phase"] = phase
@@ -750,26 +792,45 @@ def _apply_patch_function_tool() -> dict[str, Any]:
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": ["replace", "add", "delete"],
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "action": {"type": "string", "enum": ["add"]},
+                                    "path": {"type": "string"},
+                                    "content": {"type": "string"},
+                                },
+                                "required": ["action", "path", "content"],
+                                "additionalProperties": False,
                             },
-                            "path": {"type": "string"},
-                            "old_text": {"type": "string"},
-                            "new_text": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
-                        "required": ["action", "path"],
-                        "additionalProperties": False,
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "action": {"type": "string", "enum": ["replace"]},
+                                    "path": {"type": "string"},
+                                    "old_text": {"type": "string"},
+                                    "new_text": {"type": "string"},
+                                },
+                                "required": ["action", "path", "old_text", "new_text"],
+                                "additionalProperties": False,
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "action": {"type": "string", "enum": ["delete"]},
+                                    "path": {"type": "string"},
+                                },
+                                "required": ["action", "path"],
+                                "additionalProperties": False,
+                            },
+                        ],
                     },
                 }
             },
             "required": ["operations"],
             "additionalProperties": False,
         },
-        "strict": False,
+        "strict": True,
     }
 
 
@@ -788,6 +849,73 @@ def _patch_lines(value: str, prefix: str) -> list[str]:
     if not lines and value == "":
         return []
     return [prefix + line for line in lines]
+
+
+def _contains_patch_envelope(value: str) -> bool:
+    return any(
+        line.strip() in {"*** Begin Patch", "*** End Patch"}
+        for line in value.splitlines()
+    )
+
+
+def _tool_argument_max_chars() -> int:
+    return max(
+        1_024,
+        _env_int("MARATHON_TOOL_ARGUMENT_MAX_CHARS", DEFAULT_TOOL_ARGUMENT_MAX_CHARS),
+    )
+
+
+def _has_runaway_repetition(value: str) -> bool:
+    """Detect a long exact suffix loop without judging normal repeated syntax."""
+
+    if len(value) < 2_048:
+        return False
+    tail = value[-8_192:]
+    for width in range(1, 129):
+        repeats = max(32, (2_048 + width - 1) // width)
+        span = width * repeats
+        if span > len(tail):
+            continue
+        unit = tail[-width:]
+        if tail[-span:] == unit * repeats:
+            return True
+    return False
+
+
+def _partial_tool_argument_error(arguments: str, limit: int) -> str | None:
+    if len(arguments) > limit:
+        return f"tool arguments exceeded {limit:,} characters"
+    if _has_runaway_repetition(arguments):
+        return "tool arguments entered an exact repetition loop"
+    return None
+
+
+def _apply_patch_protocol_error(item: dict[str, Any], limit: int) -> str | None:
+    arguments = item.get("arguments")
+    if isinstance(arguments, str):
+        error = _partial_tool_argument_error(arguments, limit)
+        if error:
+            return error
+    elif not isinstance(arguments, dict):
+        return "apply_patch arguments were missing"
+    if not _apply_patch_input_from_arguments(arguments):
+        return "apply_patch arguments were not valid structured JSON"
+    return None
+
+
+def _response_tool_protocol_error(
+    response: dict[str, Any],
+    limit: int,
+) -> str | None:
+    output = response.get("output")
+    if not isinstance(output, list):
+        return None
+    for item in output:
+        if isinstance(item, dict) and _is_apply_patch_function_call(item):
+            error = _apply_patch_protocol_error(item, limit)
+            if error:
+                return error
+    return None
 
 
 def _structured_patch_to_input(operations: Any) -> str:
@@ -809,7 +937,7 @@ def _structured_patch_to_input(operations: Any) -> str:
         path = path.strip()
         if action == "add":
             content = operation.get("content")
-            if not isinstance(content, str):
+            if not isinstance(content, str) or _contains_patch_envelope(content):
                 return ""
             result.append(f"*** Add File: {path}")
             result.extend(_patch_lines(content, "+"))
@@ -818,7 +946,13 @@ def _structured_patch_to_input(operations: Any) -> str:
         elif action == "replace":
             old_text = operation.get("old_text")
             new_text = operation.get("new_text")
-            if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
+            if (
+                not isinstance(old_text, str)
+                or not old_text
+                or not isinstance(new_text, str)
+                or _contains_patch_envelope(old_text)
+                or _contains_patch_envelope(new_text)
+            ):
                 return ""
             result.extend([f"*** Update File: {path}", "@@"])
             result.extend(_patch_lines(old_text, "-"))
@@ -911,10 +1045,24 @@ def _backend_lineage_item(item: dict[str, Any]) -> dict[str, Any]:
     """Store llama.cpp-compatible items even when Codex saw a custom patch item."""
 
     if _is_apply_patch_custom_call(item):
-        return _apply_patch_custom_to_function_call(item)
+        converted = _apply_patch_custom_to_function_call(item)
+        backend_arguments = item.get(_BACKEND_ARGUMENTS_KEY)
+        original_input = item.get("input")
+        if (
+            isinstance(backend_arguments, str)
+            and backend_arguments
+            and isinstance(original_input, str)
+            and original_input
+            and _apply_patch_input_from_arguments(backend_arguments) == original_input
+        ):
+            converted["arguments"] = backend_arguments
+        converted.pop(_BACKEND_ARGUMENTS_KEY, None)
+        return converted
     if item.get("type") == "custom_tool_call_output":
         return _apply_patch_custom_output_to_function_output(item)
-    return copy.deepcopy(item)
+    converted = copy.deepcopy(item)
+    converted.pop(_BACKEND_ARGUMENTS_KEY, None)
+    return converted
 
 
 def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
@@ -1064,6 +1212,13 @@ class RouterState:
         self.slot_snapshots_enabled = _env_bool(
             "MARATHON_SLOT_SNAPSHOTS_ENABLED",
             DEFAULT_SLOT_SNAPSHOTS_ENABLED,
+        )
+        self.stream_idle_timeout_seconds = max(
+            5.0,
+            _env_float(
+                "MARATHON_STREAM_IDLE_TIMEOUT_SECONDS",
+                DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
+            ),
         )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -1461,6 +1616,9 @@ class RouterState:
         pending_message_text: dict[str, str] = {}
         forwarded_message_ids: set[str] = set()
         apply_patch_function_items: dict[str, str] = {}
+        apply_patch_argument_buffers: dict[str, str] = {}
+        pending_apply_patch_added: dict[str, dict[str, Any]] = {}
+        tool_argument_limit = _tool_argument_max_chars()
 
         async def send_event(event: dict[str, Any]) -> None:
             if event_sink is None:
@@ -1509,7 +1667,23 @@ class RouterState:
                 text = await response.text()
                 raise RuntimeError(f"backend POST /v1/responses failed: {response.status} {text}")
 
-            async for event in self._iter_sse_json(response):
+            events = self._iter_sse_json(response).__aiter__()
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        anext(events),
+                        timeout=getattr(
+                            self,
+                            "stream_idle_timeout_seconds",
+                            DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
+                        ),
+                    )
+                except StopAsyncIteration:
+                    break
+                except TimeoutError as error:
+                    raise ToolProtocolError(
+                        "the backend emitted no streaming progress before the idle timeout"
+                    ) from error
                 event_type = event.get("type")
                 if not isinstance(event_type, str):
                     continue
@@ -1543,7 +1717,8 @@ class RouterState:
                             apply_patch_function_items[key] = call_id
                         converted_event = copy.deepcopy(event)
                         converted_event["item"] = converted_item
-                        await send_event(converted_event)
+                        pending_apply_patch_added[call_id] = converted_event
+                        apply_patch_argument_buffers[call_id] = ""
                         continue
 
                     if isinstance(item, dict) and (
@@ -1568,19 +1743,39 @@ class RouterState:
                     continue
 
                 if event_type == "response.function_call_arguments.delta":
-                    if item_id and item_id in apply_patch_function_items:
-                        continue
                     event_call_id = event.get("call_id")
-                    if isinstance(event_call_id, str) and event_call_id in apply_patch_function_items:
+                    call_id = apply_patch_function_items.get(item_id, "")
+                    if not call_id and isinstance(event_call_id, str):
+                        call_id = apply_patch_function_items.get(event_call_id, "")
+                    if call_id:
+                        delta = event.get("delta")
+                        if isinstance(delta, str):
+                            buffered = apply_patch_argument_buffers.get(call_id, "") + delta
+                            apply_patch_argument_buffers[call_id] = buffered
+                            error = _partial_tool_argument_error(
+                                buffered,
+                                tool_argument_limit,
+                            )
+                            if error:
+                                raise ToolProtocolError(error)
                         continue
 
                 if event_type == "response.output_item.done":
                     if isinstance(item, dict):
                         if _is_apply_patch_function_call(item):
+                            protocol_error = _apply_patch_protocol_error(
+                                item,
+                                tool_argument_limit,
+                            )
+                            if protocol_error:
+                                raise ToolProtocolError(protocol_error)
                             converted_item = self.sanitize_output_item(
                                 _apply_patch_function_to_custom_call(item)
                             )
                             call_id = str(converted_item.get("call_id") or "")
+                            added_event = pending_apply_patch_added.pop(call_id, None)
+                            if added_event is not None:
+                                await send_event(added_event)
                             patch_input = converted_item.get("input")
                             if isinstance(patch_input, str) and patch_input:
                                 await send_event(
@@ -1591,12 +1786,17 @@ class RouterState:
                                         "delta": patch_input,
                                     }
                                 )
-                            output_items.append(converted_item)
+                            stored_item = copy.deepcopy(converted_item)
+                            backend_arguments = item.get("arguments")
+                            if isinstance(backend_arguments, str) and backend_arguments:
+                                stored_item[_BACKEND_ARGUMENTS_KEY] = backend_arguments
+                            output_items.append(stored_item)
                             converted_event = copy.deepcopy(event)
                             converted_event["item"] = converted_item
                             await send_event(converted_event)
                             for key in _stream_keys_for_item(item_id, converted_item):
                                 apply_patch_function_items.pop(key, None)
+                            apply_patch_argument_buffers.pop(call_id, None)
                             continue
 
                         sanitized = self.sanitize_output_item(item)
@@ -1620,7 +1820,7 @@ class RouterState:
                     continue
 
                 if event_type == "response.completed":
-                    await flush_pending_message("final_answer")
+                    await flush_pending_message(_completed_message_phase(output_items))
                     response_payload = event.get("response")
                     if isinstance(response_payload, dict):
                         completed_response = copy.deepcopy(response_payload)
@@ -2080,6 +2280,7 @@ class RouterState:
         last_response: dict[str, Any] = {}
         iterations = 0
         stalled_recoveries = 0
+        tool_protocol_recoveries = 0
         max_stalled_recoveries = max(
             0,
             _env_int(
@@ -2087,19 +2288,63 @@ class RouterState:
                 DEFAULT_STALLED_RESPONSE_RECOVERIES,
             ),
         )
-        output_limit = int(request.get("max_output_tokens") or _max_output_tokens(profile))
+        max_tool_protocol_recoveries = max(
+            0,
+            _env_int(
+                "MARATHON_TOOL_PROTOCOL_RECOVERIES",
+                DEFAULT_TOOL_PROTOCOL_RECOVERIES,
+            ),
+        )
 
-        for _attempt in range(max_iters + max_stalled_recoveries + 2):
-            if event_sink is None:
-                request = copy.deepcopy(request)
-                request["stream"] = False
-                response = await self._request_json(profile, "POST", "/v1/responses", request)
-            else:
-                response = await self._request_responses_stream(
-                    profile,
-                    request,
-                    event_sink=event_sink,
+        for _attempt in range(
+            max_iters + max_stalled_recoveries + max_tool_protocol_recoveries + 2
+        ):
+            attempt_output_limit = int(
+                request.get("max_output_tokens") or _max_output_tokens(profile)
+            )
+            try:
+                if event_sink is None:
+                    request = copy.deepcopy(request)
+                    request["stream"] = False
+                    response = await self._request_json(
+                        profile, "POST", "/v1/responses", request
+                    )
+                else:
+                    response = await self._request_responses_stream(
+                        profile,
+                        request,
+                        event_sink=event_sink,
+                    )
+                protocol_error = _response_tool_protocol_error(
+                    response,
+                    _tool_argument_max_chars(),
                 )
+                if protocol_error:
+                    raise ToolProtocolError(protocol_error)
+            except ToolProtocolError as error:
+                if (
+                    tool_protocol_recoveries >= max_tool_protocol_recoveries
+                    or not request.get("tools")
+                ):
+                    raise
+                tool_protocol_recoveries += 1
+                reason = str(error)
+                self.telemetry.emit(
+                    "router.response.tool_protocol_recovery",
+                    {
+                        "attempt": tool_protocol_recoveries,
+                        "reason": reason,
+                        "available_tools": len(request.get("tools") or []),
+                    },
+                    level="warning",
+                )
+                request = copy.deepcopy(request)
+                request["input"] = list(request.get("input") or []) + [
+                    _tool_protocol_recovery_message(reason)
+                ]
+                request["tool_choice"] = "required"
+                request["max_output_tokens"] = min(attempt_output_limit, 4_096)
+                continue
             last_response = response
             iter_items: list[dict[str, Any]] = []
             for item in response.get("output", []):
@@ -2115,7 +2360,11 @@ class RouterState:
             cumulative_items.extend(iter_items)
 
             if (
-                _response_stalled_at_output_limit(response, iter_items, output_limit)
+                _response_stalled_at_output_limit(
+                    response,
+                    iter_items,
+                    attempt_output_limit,
+                )
                 and stalled_recoveries < max_stalled_recoveries
                 and bool(request.get("tools"))
             ):
@@ -2124,7 +2373,7 @@ class RouterState:
                     "router.response.stalled_recovery",
                     {
                         "attempt": stalled_recoveries,
-                        "output_tokens": output_limit,
+                        "output_tokens": attempt_output_limit,
                         "available_tools": len(request.get("tools") or []),
                     },
                     level="warning",
@@ -2603,8 +2852,13 @@ class RouterState:
                     pass
 
         codex_output_items = (
-            externalize_for_codex(output_items) if web_search_enabled else output_items
+            externalize_for_codex(copy.deepcopy(output_items))
+            if web_search_enabled
+            else copy.deepcopy(output_items)
         )
+        for item in codex_output_items:
+            if isinstance(item, dict):
+                item.pop(_BACKEND_ARGUMENTS_KEY, None)
 
         return {
             "response_id": response_id,
