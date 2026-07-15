@@ -93,6 +93,25 @@ backend's reported `n_ctx` and propagates that exact runtime value to the router
 Codex model catalog, session status, compaction limit, and truncation policy.
 The same path therefore handles 64K, 128K, 256K, or another backend-supported
 window without a model-specific context constant in the application code.
+Marathon also reserves model-scaled headroom before automatic compaction: 12K
+minimum, one eighth of the loaded window through 256K, and a 32K ceiling. This
+keeps space for hidden chat-template overhead, tool results, and the next model
+generation. `MARATHON_CONTEXT_RESERVE_TOKENS` and
+`MARATHON_COMPACTION_GUARD_TOKENS` override the two dynamic margins when a
+measured profile needs different tuning.
+
+Router-normalized shell/function outputs are bounded to 16,384 characters per
+item with both the head and tail preserved. The truncation marker tells the
+model to rerun a narrower command. Set `MARATHON_TOOL_OUTPUT_MAX_CHARS` to tune
+that limit; this bounds model context, not what Codex displays to the user.
+Individual backend responses are also capped at one eighth of the context
+window, between 2,048 and 8,192 generated tokens. This prevents an unbounded
+reasoning or edit turn from monopolizing the GPUs; large edits should be split
+across tool calls. `MARATHON_MAX_OUTPUT_TOKENS` overrides the cap.
+If a capped agent response contains only unfinished reasoning, Marathon makes
+one bounded recovery request requiring a concrete tool action instead of
+reporting a false-successful Codex turn. Set
+`MARATHON_STALLED_RESPONSE_RECOVERIES=0` to disable that recovery.
 The Marathon Codex patch removes stock Codex's fixed 12K display normalization,
 so the visible percentage is the backend-reported active tokens divided by that
 loaded window. `marathon build-codex` performs a release build in a temporary
@@ -228,6 +247,7 @@ generates a fresh `MARATHON_SEARXNG_SECRET`, and binds the container to
 | `MARATHON_WEB_SEARCH_TIMEOUT` | `15` | Per-search timeout (seconds) |
 | `MARATHON_WEB_SEARCH_MAX_RESULTS` | `8` | Results returned to the model per call |
 | `MARATHON_WEB_SEARCH_MAX_ITERS` | `5` | Cap on managed tool-call rounds inside one Codex turn |
+| `MARATHON_WEB_TOOL_CACHE_MAX_ENTRIES` | `256` | In-memory exact-action replay cache; prevents a reconnect from executing the same search/fetch twice |
 | `MARATHON_WEB_SEARCH_MODE` | `cached` | Forwarded to Codex's `web_search` config: `disabled`, `cached`, or `live` |
 | `MARATHON_WEB_FETCH_TIMEOUT` | `25` | Per-fetch timeout (seconds) |
 | `MARATHON_WEB_FETCH_MAX_CHARS` | `20000` | Default cap on extracted-content chars per fetch |

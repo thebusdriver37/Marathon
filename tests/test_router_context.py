@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -101,6 +102,242 @@ class RouterContextTests(unittest.TestCase):
         self.assertEqual(response["usage"]["total_tokens"], 12_075)
         self.assertEqual(
             response["usage"]["input_tokens_details"]["cached_tokens"], 10_000
+        )
+
+    def test_tool_outputs_are_bounded_with_head_and_tail_preserved(self) -> None:
+        payload = {
+            "instructions": "base",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "HEAD" + "x" * 200 + "TAIL",
+                }
+            ],
+        }
+        with mock.patch.dict(
+            "os.environ", {"MARATHON_TOOL_OUTPUT_MAX_CHARS": "80"}, clear=False
+        ):
+            normalized = router_module.normalize_responses_request(payload)
+
+        output = normalized["input"][0]["output"]
+        self.assertLessEqual(len(output), 80)
+        self.assertTrue(output.startswith("HEAD"))
+        self.assertTrue(output.endswith("TAIL"))
+        self.assertIn("Marathon truncated", output)
+        self.assertEqual(normalized["_marathon_tool_output_truncations"], 1)
+
+    def test_patch_adapter_removes_unsupported_numeric_hunk_headers(self) -> None:
+        patch = """*** Begin Patch
+*** Update File: example.py
+-1,3 +1,4 @@
+-old
++new
+*** End Patch"""
+        arguments = json.dumps({"input": patch})
+
+        normalized = router_module._apply_patch_input_from_arguments(arguments)
+
+        self.assertIn("\n@@\n-old\n+new\n", normalized)
+        self.assertNotIn("-1,3 +1,4 @@", normalized)
+
+    def test_structured_patch_operations_compile_to_native_patch_grammar(self) -> None:
+        arguments = {
+            "operations": [
+                {
+                    "action": "replace",
+                    "path": "src/example.js",
+                    "old_text": "const oldValue = 1;\n",
+                    "new_text": "const newValue = 2;\n",
+                },
+                {"action": "add", "path": "notes.txt", "content": "one\ntwo\n"},
+                {"action": "delete", "path": "obsolete.txt"},
+            ]
+        }
+
+        compiled = router_module._apply_patch_input_from_arguments(arguments)
+
+        self.assertEqual(
+            compiled,
+            "*** Begin Patch\n"
+            "*** Update File: src/example.js\n"
+            "@@\n"
+            "-const oldValue = 1;\n"
+            "+const newValue = 2;\n"
+            "*** Add File: notes.txt\n"
+            "+one\n+two\n"
+            "*** Delete File: obsolete.txt\n"
+            "*** End Patch",
+        )
+
+    def test_patch_lineage_and_output_replay_stay_backend_native(self) -> None:
+        custom_call = {
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "call_id": "patch_1",
+            "input": "*** Begin Patch\n*** End Patch",
+        }
+        backend_call = router_module._backend_lineage_item(custom_call)
+        self.assertEqual(backend_call["type"], "function_call")
+        self.assertIn("input", json.loads(backend_call["arguments"]))
+
+        normalized = router_module.normalize_responses_request(
+            {
+                "input": [
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": "patch_1",
+                        "output": "Done!",
+                    }
+                ]
+            }
+        )
+        self.assertEqual(normalized["input"][0]["type"], "function_call_output")
+
+    def test_lifted_instructions_persist_until_base_instructions_change(self) -> None:
+        parent = router_module.ResponseSnapshot(
+            response_id="resp_1",
+            profile_slug="dynamic-model",
+            conversation_items=[],
+            snapshot_filename="",
+            instructions_text="base\n\ndeveloper policy",
+            base_instructions_hash="base-hash",
+            instructions_hash="effective-hash",
+            tools_hash="tools-hash",
+            prompt_cache_key="session",
+            created_at=0,
+        )
+
+        retained = router_module._effective_instructions_for_request(
+            parent, "base", "base-hash", 0
+        )
+        changed = router_module._effective_instructions_for_request(
+            parent, "new base", "new-base-hash", 0
+        )
+
+        self.assertEqual(retained, "base\n\ndeveloper policy")
+        self.assertEqual(changed, "new base")
+
+    def test_reconnect_root_reuses_only_same_live_prompt_cache_session(self) -> None:
+        self.assertTrue(
+            router_module._can_reuse_reconnect_root(
+                "model", "session-a", {"model": "resp"}, {"model": "session-a"}
+            )
+        )
+        self.assertFalse(
+            router_module._can_reuse_reconnect_root(
+                "model", "session-b", {"model": "resp"}, {"model": "session-a"}
+            )
+        )
+
+    def test_output_budget_scales_and_is_profile_overrideable(self) -> None:
+        self.assertEqual(router_module._max_output_tokens(fixture_profile(32_768)), 4_096)
+        self.assertEqual(router_module._max_output_tokens(fixture_profile(65_536)), 8_192)
+        self.assertEqual(router_module._max_output_tokens(fixture_profile(262_144)), 8_192)
+        with mock.patch.dict("os.environ", {"MARATHON_MAX_OUTPUT_TOKENS": "6000"}):
+            self.assertEqual(router_module._max_output_tokens(fixture_profile()), 6_000)
+
+    def test_output_budget_stall_requires_no_actionable_output(self) -> None:
+        stalled = {
+            "usage": {"output_tokens": 8192},
+            "output": [{"type": "reasoning"}],
+        }
+        self.assertTrue(
+            router_module._response_stalled_at_output_limit(
+                stalled, stalled["output"], 8192
+            )
+        )
+        self.assertFalse(
+            router_module._response_stalled_at_output_limit(
+                stalled,
+                [{"type": "function_call", "name": "exec_command"}],
+                8192,
+            )
+        )
+
+    def test_stalled_response_recovers_with_required_tool_action(self) -> None:
+        profile = fixture_profile(65_536)
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        stalled = {
+            "output": [{"type": "reasoning"}],
+            "usage": {"input_tokens": 10_000, "output_tokens": 8_192},
+        }
+        recovered = {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_1",
+                    "arguments": "{}",
+                }
+            ],
+            "usage": {"input_tokens": 10_500, "output_tokens": 80},
+        }
+        state._request_json = mock.AsyncMock(side_effect=[stalled, recovered])
+
+        response, items, _iterations = asyncio.run(
+            state._run_responses_loop(
+                profile=profile,
+                forward_request={
+                    "input": [],
+                    "tools": [{"type": "function", "name": "exec_command"}],
+                    "max_output_tokens": 8_192,
+                },
+                web_search_enabled=False,
+            )
+        )
+
+        self.assertEqual(response["output"], recovered["output"])
+        self.assertEqual(response["usage"]["output_tokens"], 80)
+        second_request = state._request_json.await_args_list[1].args[3]
+        self.assertEqual(second_request["tool_choice"], "required")
+        self.assertEqual(second_request["input"][-1]["role"], "user")
+        self.assertEqual(items[-1]["name"], "exec_command")
+        state.telemetry.emit.assert_called_once_with(
+            "router.response.stalled_recovery",
+            mock.ANY,
+            level="warning",
+        )
+
+    def test_web_actions_are_replayed_from_turn_cache_after_reconnect(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        state.web_tool_cache = router_module.OrderedDict()
+        state.web_tool_cache_max_entries = 10
+        state.telemetry = mock.Mock()
+        state._execute_managed_call = mock.AsyncMock(
+            return_value={
+                "type": "function_call_output",
+                "call_id": "first",
+                "output": "search result",
+            }
+        )
+        first = {
+            "type": "function_call",
+            "name": "web_search",
+            "call_id": "first",
+            "arguments": '{"query":"  Local   Inference "}',
+        }
+        retry = {
+            **first,
+            "call_id": "retry",
+            "arguments": '{"query":"local inference"}',
+        }
+
+        async def run_calls():
+            a = await state._execute_managed_call_cached(first, 0, "turn")
+            b = await state._execute_managed_call_cached(retry, 0, "turn")
+            return a, b
+
+        original, replayed = asyncio.run(run_calls())
+
+        state._execute_managed_call.assert_awaited_once()
+        self.assertEqual(original["output"], replayed["output"])
+        self.assertEqual(replayed["call_id"], "retry")
+        state.telemetry.emit.assert_any_call(
+            "router.web_tool.cache_hit",
+            mock.ANY,
         )
 
 

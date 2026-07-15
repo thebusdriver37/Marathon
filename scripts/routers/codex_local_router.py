@@ -27,6 +27,7 @@ import threading
 import time
 import urllib.request
 from collections import Counter
+from collections import OrderedDict
 from collections.abc import Awaitable
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -104,6 +105,10 @@ DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 16
 DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = True
 DEFAULT_SLOT_SNAPSHOTS_ENABLED = False
+DEFAULT_TOOL_OUTPUT_MAX_CHARS = 16_384
+DEFAULT_WEB_TOOL_CACHE_MAX_ENTRIES = 256
+DEFAULT_MAX_OUTPUT_TOKENS = 8_192
+DEFAULT_STALLED_RESPONSE_RECOVERIES = 1
 
 StreamEventSink = Callable[[dict[str, Any]], Awaitable[bool]]
 
@@ -164,9 +169,40 @@ class ResponseSnapshot:
     profile_slug: str
     conversation_items: list[dict[str, Any]]
     snapshot_filename: str
+    instructions_text: str
+    base_instructions_hash: str
     instructions_hash: str
     tools_hash: str
+    prompt_cache_key: str
     created_at: float
+
+
+def _effective_instructions_for_request(
+    parent: ResponseSnapshot | None,
+    current: str,
+    base_instructions_hash: str,
+    lifted_instruction_count: int,
+) -> str:
+    if (
+        parent is not None
+        and lifted_instruction_count == 0
+        and base_instructions_hash == parent.base_instructions_hash
+    ):
+        return parent.instructions_text
+    return current
+
+
+def _can_reuse_reconnect_root(
+    profile_slug: str,
+    prompt_cache_key: str,
+    live_slots: dict[str, str],
+    live_cache_keys: dict[str, str],
+) -> bool:
+    return (
+        bool(prompt_cache_key)
+        and live_cache_keys.get(profile_slug) == prompt_cache_key
+        and profile_slug in live_slots
+    )
 
 
 def _repo_root() -> Path:
@@ -216,6 +252,128 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _bounded_text(value: str, limit: int) -> tuple[str, bool]:
+    """Keep useful head and tail context while bounding one tool result."""
+
+    if limit <= 0 or len(value) <= limit:
+        return value, False
+    marker = f"\n… [Marathon truncated {len(value) - limit:,} chars; run a narrower command] …\n"
+    available = max(0, limit - len(marker))
+    head = available * 3 // 4
+    tail = available - head
+    suffix = value[-tail:] if tail else ""
+    return value[:head] + marker + suffix, True
+
+
+def _bound_tool_output_item(item: dict[str, Any], limit: int) -> tuple[dict[str, Any], bool]:
+    if item.get("type") not in {
+        "function_call_output",
+        "custom_tool_call_output",
+        "local_shell_call_output",
+    }:
+        return item, False
+    output = item.get("output")
+    if not isinstance(output, str):
+        return item, False
+    bounded, changed = _bounded_text(output, limit)
+    if not changed:
+        return item, False
+    result = copy.deepcopy(item)
+    result["output"] = bounded
+    return result, True
+
+
+_UNIFIED_RANGE_HEADER = re.compile(
+    r"^(?:@@\s*)?-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s*@@\s*$"
+)
+
+
+def _normalize_apply_patch_dialect(value: str) -> str:
+    """Translate unified-diff numeric hunks into Codex apply_patch hunks."""
+
+    if not value:
+        return value
+    lines = value.splitlines()
+    normalized = ["@@" if _UNIFIED_RANGE_HEADER.fullmatch(line.strip()) else line for line in lines]
+    suffix = "\n" if value.endswith("\n") else ""
+    return "\n".join(normalized) + suffix
+
+
+def _managed_call_name(item: dict[str, Any]) -> str:
+    name = item.get("name")
+    return str(name) if isinstance(name, str) else "unknown"
+
+
+def _managed_call_signature(item: dict[str, Any]) -> str:
+    name = _managed_call_name(item)
+    args = parse_function_call_arguments(item.get("arguments"))
+    normalized = copy.deepcopy(args)
+    if name == WEB_SEARCH_TOOL_NAME and isinstance(normalized.get("query"), str):
+        normalized["query"] = " ".join(normalized["query"].split()).casefold()
+    if name in {WEB_FETCH_TOOL_NAME, WEB_BROWSE_TOOL_NAME} and isinstance(
+        normalized.get("url"), str
+    ):
+        normalized["url"] = normalized["url"].strip()
+    return _sha256_text(f"{name}\n{_stable_json(normalized)}")
+
+
+def _web_turn_scope(profile: "ModelProfile", request: dict[str, Any]) -> str:
+    """Identify one user turn across Responses websocket reconnects."""
+
+    input_items = request.get("input")
+    items = input_items if isinstance(input_items, list) else []
+    last_user: Any = None
+    for item in reversed(items):
+        if isinstance(item, dict) and item.get("role") == "user":
+            last_user = item
+            break
+    seed = {
+        "model": profile.slug,
+        "prompt_cache_key": request.get("prompt_cache_key"),
+        "last_user": last_user,
+    }
+    return _sha256_text(_stable_json(seed))
+
+
+def _max_output_tokens(profile: "ModelProfile") -> int:
+    dynamic_default = max(
+        2_048,
+        min(DEFAULT_MAX_OUTPUT_TOKENS, profile.context_window // 8),
+    )
+    return max(256, _env_int("MARATHON_MAX_OUTPUT_TOKENS", dynamic_default))
+
+
+def _response_stalled_at_output_limit(
+    response: dict[str, Any],
+    items: list[dict[str, Any]],
+    output_limit: int,
+) -> bool:
+    usage = response.get("usage")
+    output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+    if not isinstance(output_tokens, int) or output_tokens < output_limit:
+        return False
+    actionable_types = {"message", "function_call", "custom_tool_call", "local_shell_call"}
+    return not any(item.get("type") in actionable_types for item in items)
+
+
+def _stalled_recovery_message() -> dict[str, Any]:
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "Your previous response reached the generation budget without "
+                    "producing a message or tool call. Do not continue internal "
+                    "analysis. Use one available tool now to make concrete progress; "
+                    "split large edits into smaller tool calls."
+                ),
+            }
+        ],
+    }
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -579,19 +737,36 @@ def _apply_patch_function_tool() -> dict[str, Any]:
         "type": "function",
         "name": APPLY_PATCH_TOOL_NAME,
         "description": (
-            "Use apply_patch to edit files. Put the complete patch envelope in "
-            "the input field, starting with *** Begin Patch and ending with "
-            "*** End Patch."
+            "Edit files with structured operations. For replace, old_text must "
+            "exactly match existing file text and new_text is its replacement. "
+            "Use several small replace operations for unrelated edits. Marathon "
+            "will compile these operations into Codex's native patch format; do "
+            "not write a raw diff or patch envelope."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "input": {
-                    "type": "string",
-                    "description": "The entire contents of the apply_patch command.",
+                "operations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["replace", "add", "delete"],
+                            },
+                            "path": {"type": "string"},
+                            "old_text": {"type": "string"},
+                            "new_text": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["action", "path"],
+                        "additionalProperties": False,
+                    },
                 }
             },
-            "required": ["input"],
+            "required": ["operations"],
             "additionalProperties": False,
         },
         "strict": False,
@@ -608,18 +783,73 @@ def _backend_tool_for_llama(tool: Any) -> dict[str, Any] | None:
     return None
 
 
+def _patch_lines(value: str, prefix: str) -> list[str]:
+    lines = value.splitlines()
+    if not lines and value == "":
+        return []
+    return [prefix + line for line in lines]
+
+
+def _structured_patch_to_input(operations: Any) -> str:
+    if not isinstance(operations, list) or not operations:
+        return ""
+    result = ["*** Begin Patch"]
+    for operation in operations:
+        if not isinstance(operation, dict):
+            return ""
+        action = operation.get("action")
+        path = operation.get("path")
+        if (
+            not isinstance(path, str)
+            or not path.strip()
+            or "\n" in path
+            or "\r" in path
+        ):
+            return ""
+        path = path.strip()
+        if action == "add":
+            content = operation.get("content")
+            if not isinstance(content, str):
+                return ""
+            result.append(f"*** Add File: {path}")
+            result.extend(_patch_lines(content, "+"))
+        elif action == "delete":
+            result.append(f"*** Delete File: {path}")
+        elif action == "replace":
+            old_text = operation.get("old_text")
+            new_text = operation.get("new_text")
+            if not isinstance(old_text, str) or not old_text or not isinstance(new_text, str):
+                return ""
+            result.extend([f"*** Update File: {path}", "@@"])
+            result.extend(_patch_lines(old_text, "-"))
+            result.extend(_patch_lines(new_text, "+"))
+        else:
+            return ""
+    result.append("*** End Patch")
+    return "\n".join(result)
+
+
 def _apply_patch_input_from_arguments(arguments: Any) -> str:
     if isinstance(arguments, dict):
+        structured = _structured_patch_to_input(arguments.get("operations"))
+        if structured:
+            return structured
         value = arguments.get("input")
-        return value if isinstance(value, str) else ""
+        return _normalize_apply_patch_dialect(value) if isinstance(value, str) else ""
     if not isinstance(arguments, str):
         return ""
     try:
         parsed = json.loads(arguments)
     except json.JSONDecodeError:
-        return arguments if arguments.startswith("*** Begin Patch") else ""
+        return (
+            _normalize_apply_patch_dialect(arguments)
+            if arguments.startswith("*** Begin Patch")
+            else ""
+        )
     if isinstance(parsed, dict) and isinstance(parsed.get("input"), str):
-        return parsed["input"]
+        return _normalize_apply_patch_dialect(parsed["input"])
+    if isinstance(parsed, dict):
+        return _structured_patch_to_input(parsed.get("operations"))
     return ""
 
 
@@ -677,7 +907,20 @@ def _apply_patch_custom_output_to_function_output(item: dict[str, Any]) -> dict[
     return converted
 
 
+def _backend_lineage_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Store llama.cpp-compatible items even when Codex saw a custom patch item."""
+
+    if _is_apply_patch_custom_call(item):
+        return _apply_patch_custom_to_function_call(item)
+    if item.get("type") == "custom_tool_call_output":
+        return _apply_patch_custom_output_to_function_output(item)
+    return copy.deepcopy(item)
+
+
 def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
+    original_instructions = data.get("instructions")
+    instruction_base = original_instructions if isinstance(original_instructions, str) else ""
+    data["_marathon_instruction_base_hash"] = _sha256_text(instruction_base)
     tools = data.get("tools")
     web_search_requested = request_has_web_search_tool(tools) if isinstance(tools, list) else False
     if isinstance(tools, list):
@@ -705,31 +948,34 @@ def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
 
     input_items = data.get("input")
     if not isinstance(input_items, list):
+        data["_marathon_lifted_instruction_count"] = 0
         return data
 
     lifted_messages: list[str] = []
     normalized_input: list[Any] = []
     input_changed = False
-    apply_patch_custom_call_ids = {
-        str(item.get("call_id"))
-        for item in input_items
-        if _is_apply_patch_custom_call(item) and item.get("call_id")
-    }
-
+    tool_output_truncations = 0
+    tool_output_limit = max(
+        1,
+        _env_int("MARATHON_TOOL_OUTPUT_MAX_CHARS", DEFAULT_TOOL_OUTPUT_MAX_CHARS),
+    )
     for item in input_items:
         if not isinstance(item, dict):
             normalized_input.append(item)
             continue
+
+        bounded_item, bounded = _bound_tool_output_item(item, tool_output_limit)
+        if bounded:
+            item = bounded_item
+            input_changed = True
+            tool_output_truncations += 1
 
         if _is_apply_patch_custom_call(item):
             normalized_input.append(_apply_patch_custom_to_function_call(item))
             input_changed = True
             continue
 
-        if (
-            item.get("type") == "custom_tool_call_output"
-            and item.get("call_id") in apply_patch_custom_call_ids
-        ):
+        if item.get("type") == "custom_tool_call_output":
             normalized_input.append(_apply_patch_custom_output_to_function_output(item))
             input_changed = True
             continue
@@ -754,6 +1000,8 @@ def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
         data["instructions"] = "\n\n".join(part for part in [instructions, *lifted_messages] if part)
     if input_changed:
         data["input"] = normalized_input
+    data["_marathon_lifted_instruction_count"] = len(lifted_messages)
+    data["_marathon_tool_output_truncations"] = tool_output_truncations
 
     return data
 
@@ -827,6 +1075,15 @@ class RouterState:
         self.lineage: dict[str, ResponseSnapshot] = {}
         self.last_response_by_model: dict[str, str] = {}
         self.live_slot_by_model: dict[str, str] = {}
+        self.live_prompt_cache_key_by_model: dict[str, str] = {}
+        self.web_tool_cache_max_entries = max(
+            1,
+            _env_int(
+                "MARATHON_WEB_TOOL_CACHE_MAX_ENTRIES",
+                DEFAULT_WEB_TOOL_CACHE_MAX_ENTRIES,
+            ),
+        )
+        self.web_tool_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
         self.http_client: ClientSession | None = None
         self.web_search_settings = WebSearchSettings.from_env()
         self.web_search: WebSearchExecutor | None = None
@@ -1745,6 +2002,62 @@ class RouterState:
             return await self._execute_web_fetch_call(item, fallback_index)
         return await self._execute_web_search_call(item, fallback_index)
 
+    async def _execute_managed_call_cached(
+        self,
+        item: dict[str, Any],
+        fallback_index: int,
+        scope: str,
+    ) -> dict[str, Any]:
+        """Execute each exact web action once per user turn, even after reconnect."""
+
+        signature = _managed_call_signature(item)
+        key = (scope, signature)
+        cache = getattr(self, "web_tool_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self.web_tool_cache = cache
+        cached = cache.get(key)
+        call_id = synthesize_call_id(item, fallback_index)
+        if cached is not None:
+            cache.move_to_end(key)
+            result = copy.deepcopy(cached)
+            result["call_id"] = call_id
+            telemetry = getattr(self, "telemetry", None)
+            if telemetry is not None:
+                telemetry.emit(
+                    "router.web_tool.cache_hit",
+                    {
+                        "tool": _managed_call_name(item),
+                        "scope": scope[:16],
+                        "signature": signature[:16],
+                    },
+                )
+            return result
+
+        result = await self._execute_managed_call(item, fallback_index)
+        stored = copy.deepcopy(result)
+        stored.pop("call_id", None)
+        cache[key] = stored
+        cache.move_to_end(key)
+        max_entries = max(
+            1,
+            int(getattr(self, "web_tool_cache_max_entries", DEFAULT_WEB_TOOL_CACHE_MAX_ENTRIES)),
+        )
+        while len(cache) > max_entries:
+            cache.popitem(last=False)
+        telemetry = getattr(self, "telemetry", None)
+        if telemetry is not None:
+            telemetry.emit(
+                "router.web_tool.executed",
+                {
+                    "tool": _managed_call_name(item),
+                    "scope": scope[:16],
+                    "signature": signature[:16],
+                },
+            )
+        result["call_id"] = call_id
+        return result
+
     async def _run_responses_loop(
         self,
         *,
@@ -1761,12 +2074,22 @@ class RouterState:
         """
 
         request = forward_request
+        web_scope = _web_turn_scope(profile, forward_request)
         max_iters = max(1, self.web_search_settings.max_iterations)
         cumulative_items: list[dict[str, Any]] = []
         last_response: dict[str, Any] = {}
         iterations = 0
+        stalled_recoveries = 0
+        max_stalled_recoveries = max(
+            0,
+            _env_int(
+                "MARATHON_STALLED_RESPONSE_RECOVERIES",
+                DEFAULT_STALLED_RESPONSE_RECOVERIES,
+            ),
+        )
+        output_limit = int(request.get("max_output_tokens") or _max_output_tokens(profile))
 
-        for iteration in range(max_iters + 1):
+        for _attempt in range(max_iters + max_stalled_recoveries + 2):
             if event_sink is None:
                 request = copy.deepcopy(request)
                 request["stream"] = False
@@ -1791,13 +2114,35 @@ class RouterState:
 
             cumulative_items.extend(iter_items)
 
+            if (
+                _response_stalled_at_output_limit(response, iter_items, output_limit)
+                and stalled_recoveries < max_stalled_recoveries
+                and bool(request.get("tools"))
+            ):
+                stalled_recoveries += 1
+                self.telemetry.emit(
+                    "router.response.stalled_recovery",
+                    {
+                        "attempt": stalled_recoveries,
+                        "output_tokens": output_limit,
+                        "available_tools": len(request.get("tools") or []),
+                    },
+                    level="warning",
+                )
+                request = copy.deepcopy(request)
+                request["input"] = list(request.get("input") or []) + [
+                    _stalled_recovery_message()
+                ]
+                request["tool_choice"] = "required"
+                continue
+
             if not web_search_enabled:
                 break
 
             if not pending_calls:
                 break
 
-            if iteration >= max_iters:
+            if iterations >= max_iters:
                 # Safety cap: drop the managed tools so the model must finalize.
                 tool_outputs = [
                     make_function_call_output(
@@ -1835,7 +2180,9 @@ class RouterState:
 
             tool_outputs = []
             for idx, call in enumerate(pending_calls):
-                tool_outputs.append(await self._execute_managed_call(call, idx))
+                tool_outputs.append(
+                    await self._execute_managed_call_cached(call, idx, web_scope)
+                )
             cumulative_items.extend(tool_outputs)
             if event_sink is not None:
                 for item in externalize_for_codex(copy.deepcopy(pending_calls)):
@@ -1886,6 +2233,43 @@ class RouterState:
         request = normalize_responses_request(request)
         request["model"] = profile.alias
 
+        base_instructions_hash = str(
+            request.pop("_marathon_instruction_base_hash", "") or ""
+        )
+        lifted_instruction_count = int(
+            request.pop("_marathon_lifted_instruction_count", 0) or 0
+        )
+        tool_output_truncations = int(
+            request.pop("_marathon_tool_output_truncations", 0) or 0
+        )
+        current_instructions = request.get("instructions")
+        current_instructions_text = (
+            current_instructions if isinstance(current_instructions, str) else ""
+        )
+        # Responses instructions are turn-scoped upstream. Locally, retain
+        # developer/system messages lifted on an earlier delta so the effective
+        # scaffold does not disappear on the next continuation.
+        request["instructions"] = _effective_instructions_for_request(
+            parent_snapshot,
+            current_instructions_text,
+            base_instructions_hash,
+            lifted_instruction_count,
+        )
+        if tool_output_truncations:
+            self.telemetry.emit(
+                "router.tool_output.truncated",
+                {
+                    "count": tool_output_truncations,
+                    "limit_chars": max(
+                        1,
+                        _env_int(
+                            "MARATHON_TOOL_OUTPUT_MAX_CHARS",
+                            DEFAULT_TOOL_OUTPUT_MAX_CHARS,
+                        ),
+                    ),
+                },
+            )
+
         delta_input = request.get("input")
         if not isinstance(delta_input, list):
             raise RuntimeError("response.create requires list input")
@@ -1898,6 +2282,7 @@ class RouterState:
         instructions_text = instructions if isinstance(instructions, str) else ""
         instructions_hash = _sha256_text(instructions_text)
         tools_hash = _sha256_text(_stable_json(tools))
+        prompt_cache_key = str(request.get("prompt_cache_key") or "")
 
         relation = "root"
         full_input: list[dict[str, Any]]
@@ -1928,6 +2313,11 @@ class RouterState:
         forward_request["id_slot"] = self.slot_id
         forward_request["cache_prompt"] = True
         forward_request["stream"] = False
+        output_limit = _max_output_tokens(profile)
+        requested_output_limit = forward_request.get("max_output_tokens")
+        if isinstance(requested_output_limit, int) and requested_output_limit > 0:
+            output_limit = min(output_limit, requested_output_limit)
+        forward_request["max_output_tokens"] = output_limit
 
         self.trace_request(
             requested_model=requested_model,
@@ -1955,8 +2345,11 @@ class RouterState:
                     profile_slug=profile.slug,
                     conversation_items=copy.deepcopy(full_input),
                     snapshot_filename="",
+                    instructions_text=instructions_text,
+                    base_instructions_hash=base_instructions_hash,
                     instructions_hash=instructions_hash,
                     tools_hash=tools_hash,
+                    prompt_cache_key=prompt_cache_key,
                     created_at=time.time(),
                 )
                 self.last_response_by_model[profile.slug] = response_id
@@ -2027,9 +2420,25 @@ class RouterState:
                 and previous_response_id is not None
                 and self.live_slot_by_model.get(profile.slug) == previous_response_id
             )
-            if parent_snapshot is None:
+            live_reconnect_root = (
+                parent_snapshot is None
+                and _can_reuse_reconnect_root(
+                    profile.slug,
+                    prompt_cache_key,
+                    self.live_slot_by_model,
+                    self.live_prompt_cache_key_by_model,
+                )
+            )
+            if live_reconnect_root:
+                slot_prepare_mode = "reuse-live-reconnect-root"
+                restore_result = {
+                    "status": "skipped",
+                    "reason": "same prompt cache key; llama.cpp will prefix-match full prompt",
+                }
+            elif parent_snapshot is None:
                 erase_result = await self.erase_slot(profile)
                 self.live_slot_by_model.pop(profile.slug, None)
+                self.live_prompt_cache_key_by_model.pop(profile.slug, None)
             elif not scaffold_matches:
                 slot_prepare_mode = "erase-scaffold-mismatch"
                 erase_result = await self.erase_slot(profile)
@@ -2099,20 +2508,29 @@ class RouterState:
                     protected_filename=snapshot_filename if snapshot_saved else None,
                 )
             self.live_slot_by_model[profile.slug] = response_id
+            if prompt_cache_key:
+                self.live_prompt_cache_key_by_model[profile.slug] = prompt_cache_key
 
         output_items = all_output_items
 
         usage_payload = self.usage_payload(backend_response.get("usage"))
 
-        conversation_items = full_input + copy.deepcopy(output_items)
+        conversation_items = full_input + [
+            _backend_lineage_item(item)
+            for item in output_items
+            if isinstance(item, dict)
+        ]
         async with self.lineage_lock:
             self.lineage[response_id] = ResponseSnapshot(
                 response_id=response_id,
                 profile_slug=profile.slug,
                 conversation_items=conversation_items,
                 snapshot_filename=snapshot_filename if snapshot_saved else "",
+                instructions_text=instructions_text,
+                base_instructions_hash=base_instructions_hash,
                 instructions_hash=instructions_hash,
                 tools_hash=tools_hash,
+                prompt_cache_key=prompt_cache_key,
                 created_at=time.time(),
             )
             self.last_response_by_model[profile.slug] = response_id
@@ -2292,6 +2710,26 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
                 # leaking router-private fields or unmanaged web functions to
                 # llama.cpp.
                 data["tools"] = _strip_managed_web_tools(data.get("tools"))
+            data.pop("_marathon_instruction_base_hash", None)
+            data.pop("_marathon_lifted_instruction_count", None)
+            tool_output_truncations = int(
+                data.pop("_marathon_tool_output_truncations", 0) or 0
+            )
+            if tool_output_truncations:
+                state.telemetry.emit(
+                    "router.tool_output.truncated",
+                    {
+                        "count": tool_output_truncations,
+                        "limit_chars": max(
+                            1,
+                            _env_int(
+                                "MARATHON_TOOL_OUTPUT_MAX_CHARS",
+                                DEFAULT_TOOL_OUTPUT_MAX_CHARS,
+                            ),
+                        ),
+                        "transport": "http",
+                    },
+                )
             state.trace_request(
                 requested_model=requested_model,
                 profile=profile,

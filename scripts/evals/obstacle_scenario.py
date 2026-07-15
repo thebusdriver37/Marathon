@@ -77,7 +77,11 @@ def main() -> int:
     if args.resume:
         command = [
             base_command[0], "exec", "resume", "--last", *config_args,
-            *base_command[1:], "--json", "-o", str(last_message), prompt,
+            *base_command[1:],
+            "-c", 'approval_policy="never"',
+            "-c", 'sandbox_mode="workspace-write"',
+            "-c", "sandbox_workspace_write.network_access=false",
+            "--json", "-o", str(last_message), prompt,
         ]
     else:
         command = [

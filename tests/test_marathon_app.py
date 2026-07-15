@@ -136,8 +136,29 @@ class RuntimeTests(unittest.TestCase):
         runtime._context_window = 131_072
 
         self.assertEqual(runtime.context_window, 131_072)
-        self.assertEqual(runtime.auto_compact_token_limit, 117_964)
-        self.assertEqual(runtime.truncation_limit, 111_411)
+        self.assertEqual(runtime.context_reserve_tokens, 16_384)
+        self.assertEqual(runtime.auto_compact_token_limit, 114_688)
+        self.assertEqual(runtime.truncation_limit, 108_135)
+
+    def test_context_headroom_scales_without_model_specific_constants(self) -> None:
+        model = fixture_model()
+        runtime = Runtime(model, catalog.find_profile(model, None))
+        expected = {
+            65_536: (12_288, 53_248, 49_972),
+            131_072: (16_384, 114_688, 108_135),
+            262_144: (32_768, 229_376, 221_184),
+        }
+        for context, limits in expected.items():
+            with self.subTest(context=context):
+                runtime._context_window = context
+                self.assertEqual(
+                    (
+                        runtime.context_reserve_tokens,
+                        runtime.auto_compact_token_limit,
+                        runtime.truncation_limit,
+                    ),
+                    limits,
+                )
 
     def test_cleanup_terminates_owned_process_group(self) -> None:
         model = fixture_model()
@@ -219,7 +240,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("marathon-local", joined)
         self.assertIn("model_catalog_json", joined)
         self.assertIn("model_context_window=262144", command)
-        self.assertIn("model_auto_compact_token_limit=235929", command)
+        self.assertIn("model_auto_compact_token_limit=229376", command)
         self.assertNotIn("--ignore-user-config", command)
 
     def test_direct_chat_sends_no_tools_or_agent_instructions(self) -> None:

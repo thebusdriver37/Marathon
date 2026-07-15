@@ -279,12 +279,34 @@ class Runtime:
         return self._context_window
 
     @property
+    def context_reserve_tokens(self) -> int:
+        """Leave model-scaled room for tool results and the next generation."""
+
+        configured = os.environ.get("MARATHON_CONTEXT_RESERVE_TOKENS")
+        if configured:
+            try:
+                return min(self.context_window // 2, max(1, int(configured)))
+            except ValueError:
+                pass
+        reserve = max(12_288, min(32_768, self.context_window // 8))
+        return min(self.context_window // 2, reserve)
+
+    @property
     def auto_compact_token_limit(self) -> int:
-        return max(1, self.context_window * 9 // 10)
+        return max(1, self.context_window - self.context_reserve_tokens)
 
     @property
     def truncation_limit(self) -> int:
-        return max(1, self.context_window * 85 // 100)
+        configured = os.environ.get("MARATHON_COMPACTION_GUARD_TOKENS")
+        guard: int | None = None
+        if configured:
+            try:
+                guard = max(1, int(configured))
+            except ValueError:
+                pass
+        if guard is None:
+            guard = max(2_048, min(8_192, self.context_window // 20))
+        return max(1, self.auto_compact_token_limit - guard)
 
     def acquire(self) -> None:
         ensure_dirs()
