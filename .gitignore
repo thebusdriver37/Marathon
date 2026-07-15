@@ -5,3 +5,7 @@
 *.log
 __pycache__/
 *.pyc
+/.lavish/
+/llama-lab/
+/docker/searxng/for ngl in 999; do.sh
+/install-nvidia-250w-power-limit.sh

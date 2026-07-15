@@ -4,8 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROUTER_HOST="${MARATHON_PROXY_HOST:-127.0.0.1}"
 ROUTER_PORT="${MARATHON_PROXY_PORT:-18111}"
+LLAMA_PORT="${MARATHON_LLAMA_PORT:-8082}"
 SEARXNG_URL="${MARATHON_SEARXNG_URL:-http://127.0.0.1:18093}"
-MODELS_DIR="${MARATHON_MODELS_DIR:-$HOME/models}"
+AI_ROOT="${MARATHON_AI_ROOT:-$HOME/AI}"
+MODELS_DIR="${MARATHON_MODELS_DIR:-$AI_ROOT/models/gguf}"
+LLAMACPP_BIN="${LLAMACPP_BIN:-$AI_ROOT/backends/llama.cpp-current/build/bin/llama-server}"
+SLOT_DIR="${MARATHON_SLOT_SAVE_ROOT:-$AI_ROOT/cache/marathon/slots}"
+ROUTER_STATE_DIR="$AI_ROOT/cache/marathon/router"
 
 failures=0
 warnings=0
@@ -76,13 +81,32 @@ print(value)
 PY
 }
 
-model_exists() {
-  local env_name="$1"
-  local relative="$2"
-  local path="${!env_name:-}"
-  [[ -n "$path" ]] || path="$MODELS_DIR/$relative"
-  [[ -f "$path" ]]
-}
+# Ask the application for its effective paths so catalog edits and environment
+# overrides are interpreted exactly as they are by the runtime. The shell
+# defaults above keep Doctor useful enough to report a missing Python install.
+if have python3; then
+  resolved_paths="$(PYTHONPATH="$ROOT_DIR" python3 - <<'PY' 2>/dev/null || true
+from marathon_app.catalog import backends, settings
+from marathon_app.runtime import AI_ROOT, ROUTER_STATE_DIR, SLOT_ROOT
+
+print(AI_ROOT)
+print(settings().model_root)
+print(backends()["upstream"].server)
+print(SLOT_ROOT)
+print(ROUTER_STATE_DIR)
+PY
+)"
+  if [[ -n "$resolved_paths" ]]; then
+    mapfile -t resolved <<<"$resolved_paths"
+    if (( ${#resolved[@]} == 5 )); then
+      AI_ROOT="${resolved[0]}"
+      MODELS_DIR="${resolved[1]}"
+      LLAMACPP_BIN="${resolved[2]}"
+      SLOT_DIR="${resolved[3]}"
+      ROUTER_STATE_DIR="${resolved[4]}"
+    fi
+  fi
+fi
 
 printf 'Marathon doctor\n'
 printf 'root: %s\n\n' "$ROOT_DIR"
@@ -93,22 +117,26 @@ else
   fail "launcher missing or not executable"
 fi
 
-if [[ -x "$ROOT_DIR/.marathon/codex-target/debug/codex" ]]; then
-  pass "patched Codex binary exists"
+if have codex; then
+  pass "stock Codex available: $(codex --version 2>&1)"
 else
-  warn "patched Codex binary missing; run: marathon build-codex"
+  fail "stock Codex is not installed or not on PATH"
 fi
 
-if [[ -x "$ROOT_DIR/.marathon/llama.cpp-build/bin/llama-server" ]]; then
-  pass "llama-server exists"
+if [[ -x "$LLAMACPP_BIN" ]]; then
+  pass "central llama-server exists: $LLAMACPP_BIN"
 else
-  warn "llama-server missing; run: marathon setup-llama or marathon build-llama"
+  fail "central llama-server missing: $LLAMACPP_BIN"
 fi
 
 if [[ -x "$ROOT_DIR/.marathon/venv/bin/python3" ]]; then
-  pass "router Python venv exists"
+  if PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" -c 'import aiohttp, prompt_toolkit, rich, marathon_app' 2>/dev/null; then
+    pass "private router/UI Python environment is ready"
+  else
+    fail "private Python environment is incomplete; run: marathon setup-deps"
+  fi
 else
-  warn "router Python venv missing; run: marathon setup-deps"
+  fail "private Python environment missing; run: marathon setup-deps"
 fi
 
 if have python3; then
@@ -137,28 +165,11 @@ else
   warn "nvidia-smi not found; GPU health cannot be checked"
 fi
 
-if model_exists QWEN36_27B_GGUF "Qwen3.6-27B-GGUF/qwen3.6-27b-q4_k_m.gguf"; then
-  pass "Qwen 3.6 27B model found"
+model_count="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" -c 'from marathon_app.catalog import discover_models; print(len(discover_models()))' 2>/dev/null || printf 0)"
+if [[ "$model_count" =~ ^[0-9]+$ ]] && (( model_count > 0 )); then
+  pass "$model_count centralized GGUF model(s) found under $MODELS_DIR"
 else
-  warn "Qwen 3.6 27B model not found under $MODELS_DIR"
-fi
-
-if model_exists QWEN36_35B_A3B_GGUF "Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"; then
-  pass "Qwen 3.6 35B A3B model found"
-else
-  info "Qwen 3.6 35B A3B model not found; optional"
-fi
-
-if model_exists QWOPUS36_35B_A3B_GGUF "Qwopus3.6-35B-A3B-v1-GGUF/Qwopus3.6-35B-A3B-v1-Q4_K_M.gguf"; then
-  pass "Qwopus 35B A3B model found"
-else
-  info "Qwopus 35B A3B model not found; optional"
-fi
-
-if model_exists GEMMA4_26B_A4B_GGUF "gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf"; then
-  pass "Gemma 4 26B A4B model found"
-else
-  info "Gemma 4 26B A4B model not found; optional"
+  fail "no GGUF models discovered under $MODELS_DIR"
 fi
 
 router_url="http://$ROUTER_HOST:$ROUTER_PORT"
@@ -169,6 +180,8 @@ if [[ -n "$health_json" ]]; then
   pass "router reachable: $router_url"
   if [[ "$backend_status" == "ok" ]]; then
     pass "backend healthy: ${current_model:-unknown}"
+  elif curl -fsS --max-time 2 "http://127.0.0.1:$LLAMA_PORT/v1/models" >/dev/null 2>&1; then
+    pass "llama.cpp backend is ready and awaiting its first routed request"
   else
     fail "backend status is ${backend_status:-unknown}; run: marathon backend logs"
   fi
@@ -177,7 +190,7 @@ else
   if [[ -n "$owner" ]]; then
     fail "router not healthy, but port $ROUTER_PORT is occupied by $owner"
   else
-    warn "backend not running; run: marathon backend start 128k-single"
+    info "foreground backend is stopped (normal when Marathon is not open)"
   fi
 fi
 
@@ -187,12 +200,11 @@ else
   warn "SearXNG not reachable; run: marathon search up or set MARATHON_WEB_SEARCH_MODE=disabled"
 fi
 
-slot_dir="$ROOT_DIR/.marathon/llama-slots"
-log_dir="$ROOT_DIR/logs"
-state_dir="$ROOT_DIR/.marathon/state"
-info "slot snapshots: $(bytes_human "$slot_dir") at $slot_dir"
+log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/marathon/logs"
+info "AI root: $AI_ROOT"
+info "slot snapshots: $(bytes_human "$SLOT_DIR") at $SLOT_DIR"
 info "logs: $(bytes_human "$log_dir") at $log_dir"
-info "router state: $(bytes_human "$state_dir") at $state_dir"
+info "router state: $(bytes_human "$ROUTER_STATE_DIR") at $ROUTER_STATE_DIR"
 
 printf '\n'
 if (( failures > 0 )); then

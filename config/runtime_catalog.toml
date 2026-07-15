@@ -1,0 +1,169 @@
+[settings]
+ai_root = "~/AI"
+model_root = "models/gguf"
+llama_host = "127.0.0.1"
+llama_port = 8082
+router_host = "127.0.0.1"
+router_port = 18111
+health_timeout = 360
+stop_timeout = 20
+
+[[backends]]
+id = "upstream"
+display_name = "Current upstream llama.cpp (Ampere CUDA build)"
+server = "backends/llama.cpp-current/build/bin/llama-server"
+
+[[backends]]
+id = "deepseek-v4"
+display_name = "DeepSeek V4 llama.cpp fork"
+server = "backends/llama.cpp-deepseek-v4/build/bin/llama-server"
+
+[[families]]
+id = "deepseek-v4-flash"
+display_name = "DeepSeek V4 Flash"
+patterns = ["deepseek-v4-flash", "deepseek_v4_flash"]
+backend = "deepseek-v4"
+default_profile = "long-64k"
+
+[[families.profiles]]
+id = "safe"
+display_name = "Safe 8K"
+description = "Conservative experimental-backend baseline for direct chat."
+context = 8192
+batch = 512
+ubatch = 128
+parallel = 1
+split_mode = "layer"
+tensor_split = "1,1,1,1"
+cache_k = "f16"
+cache_v = "f16"
+extra_args = ["--ctx-checkpoints", "0"]
+confidence = "benchmarked"
+frontends = ["direct"]
+
+[[families.profiles]]
+id = "long-64k"
+display_name = "Long 64K"
+description = "Four-GPU long-context profile; requires stability validation."
+context = 65536
+batch = 512
+ubatch = 128
+parallel = 1
+split_mode = "layer"
+tensor_split = "1,1,1,1"
+cache_k = "q8_0"
+cache_v = "q8_0"
+extra_args = ["--ctx-checkpoints", "0"]
+confidence = "experimental"
+frontends = ["codex", "direct"]
+
+[[families]]
+id = "qwen3.6-27b"
+display_name = "Qwen 3.6 27B Dense"
+patterns = ["qwen3.6-27b", "qwen3_6-27b"]
+backend = "upstream"
+default_profile = "balanced"
+
+[[families.profiles]]
+id = "balanced"
+display_name = "Balanced 64K"
+description = "Known-good four-GPU interactive profile."
+context = 65536
+batch = 2048
+ubatch = 512
+parallel = 1
+split_mode = "layer"
+tensor_split = "1,1,1,1"
+cache_k = "q8_0"
+cache_v = "q8_0"
+confidence = "verified"
+frontends = ["codex", "direct"]
+
+[[families.profiles]]
+id = "quick"
+display_name = "Quick 16K"
+description = "Lower-KV-cache profile for lightweight direct conversations."
+context = 16384
+batch = 2048
+ubatch = 512
+parallel = 1
+split_mode = "layer"
+tensor_split = "1,1,1,1"
+cache_k = "q8_0"
+cache_v = "q8_0"
+confidence = "baseline"
+frontends = ["direct"]
+
+[[families]]
+id = "llama-3.3-70b"
+display_name = "Llama 3.3 70B"
+patterns = ["llama-3.3-70b", "llama_3.3_70b"]
+backend = "upstream"
+default_profile = "balanced"
+
+[[families.profiles]]
+id = "balanced"
+display_name = "Balanced 64K"
+description = "Known-good four-GPU long-context profile."
+context = 65536
+batch = 2048
+ubatch = 512
+parallel = 1
+split_mode = "layer"
+tensor_split = "1,1,1,1"
+cache_k = "f16"
+cache_v = "f16"
+confidence = "verified"
+frontends = ["codex", "direct"]
+
+[[families.profiles]]
+id = "quick"
+display_name = "Quick 16K"
+description = "Smaller KV cache for direct conversation."
+context = 16384
+batch = 2048
+ubatch = 512
+parallel = 1
+split_mode = "layer"
+tensor_split = "1,1,1,1"
+cache_k = "f16"
+cache_v = "f16"
+confidence = "baseline"
+frontends = ["direct"]
+
+[[families]]
+id = "generic"
+display_name = "Other GGUF"
+patterns = []
+backend = "upstream"
+default_profile = "balanced"
+
+[[families.profiles]]
+id = "balanced"
+display_name = "Balanced 64K"
+description = "Generic four-GPU long-context baseline."
+context = 65536
+batch = 1024
+ubatch = 256
+parallel = 1
+split_mode = "layer"
+tensor_split = "1,1,1,1"
+cache_k = "q8_0"
+cache_v = "q8_0"
+confidence = "baseline"
+frontends = ["codex", "direct"]
+
+[[families.profiles]]
+id = "quick"
+display_name = "Quick 16K"
+description = "Conservative direct-chat profile for an unclassified model."
+context = 16384
+batch = 1024
+ubatch = 256
+parallel = 1
+split_mode = "layer"
+tensor_split = "1,1,1,1"
+cache_k = "f16"
+cache_v = "f16"
+confidence = "baseline"
+frontends = ["direct"]

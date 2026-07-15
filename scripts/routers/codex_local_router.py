@@ -191,7 +191,12 @@ def _model_candidates(env_var: str, relative_paths: tuple[str, ...]) -> tuple[st
     if configured:
         return (configured,)
 
-    models_dir = Path(os.getenv("MARATHON_MODELS_DIR") or os.getenv("MODELS_DIR") or Path.home() / "models")
+    ai_root = Path(os.getenv("MARATHON_AI_ROOT") or Path.home() / "AI").expanduser()
+    models_dir = Path(
+        os.getenv("MARATHON_MODELS_DIR")
+        or os.getenv("MODELS_DIR")
+        or ai_root / "models" / "gguf"
+    ).expanduser()
     return tuple(str(models_dir / relative_path) for relative_path in relative_paths)
 
 

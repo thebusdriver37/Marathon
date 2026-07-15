@@ -9,3 +9,9 @@ trafilatura>=2.0,<3.0
 
 # HTTP server/client used by the local router and web tools.
 aiohttp>=3.9,<4.0
+
+# Colorful, SSH-friendly terminal dashboard without a browser or global install.
+rich>=13,<15
+
+# Full-screen arrow-key menus with correct SSH resize and cursor handling.
+prompt-toolkit>=3.0,<4.0

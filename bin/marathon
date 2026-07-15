@@ -14,7 +14,13 @@ usage() {
 Usage: marathon [command] [codex args...]
 
 Commands:
-  chat            Launch the default local Codex TUI (default)
+  dashboard       Select a model and run Marathon (default)
+  codex           Start Marathon and open Codex
+  direct          Start Marathon and open clean direct chat
+  models          List centrally installed GGUF models
+  status          Show whether the foreground runtime is active
+  stop            Ask an active runtime to stop and free the GPUs
+  chat            Alias for dashboard (backward compatible)
   backend <sub>   Manage the local router and llama.cpp backend
   doctor          Check local setup, backend health, models, ports, GPU, and cache usage
   eval coding     Run a temporary Codex-style coding gauntlet against the active backend
@@ -32,8 +38,9 @@ Commands:
   update-codex    Fetch latest Codex, rebase patches, rebuild
 
 Environment:
-  MARATHON_MODELS_DIR       Base directory for GGUF files (default: ~/models)
-  MARATHON_MODEL_PATH       Custom GGUF path for `marathon backend start custom`
+  MARATHON_AI_ROOT          Models, backends, and cache root (default: ~/AI)
+  MARATHON_MODELS_DIR       GGUF model directory (default: ~/AI/models/gguf)
+  MARATHON_MODEL_PATH       Custom GGUF path for the legacy custom backend command
   MARATHON_MODEL_SLUG       Custom model slug/alias (default: custom)
   MARATHON_MODEL_CONTEXT    Custom model context window (default: 32768)
   QWEN36_27B_GGUF           Exact Qwen3.6 27B GGUF path
@@ -44,14 +51,27 @@ Environment:
 USAGE
 }
 
-cmd="${1:-chat}"
+run_app() {
+  local python="$ROOT_DIR/.marathon/venv/bin/python3"
+  if [[ ! -x "$python" ]]; then
+    echo "Marathon's Python environment is missing." >&2
+    echo "Run: $ROOT_DIR/bin/marathon setup-deps" >&2
+    exit 1
+  fi
+  PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" exec "$python" -m marathon_app "$@"
+}
+
+cmd="${1:-dashboard}"
 if [[ $# -gt 0 ]]; then
   shift
 fi
 
 case "$cmd" in
-  chat)
-    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" "$@"
+  dashboard|chat)
+    run_app dashboard "$@"
+    ;;
+  codex|direct|models|status|stop)
+    run_app "$cmd" "$@"
     ;;
   backend)
     exec "$ROOT_DIR/scripts/ops/backend.sh" "$@"
