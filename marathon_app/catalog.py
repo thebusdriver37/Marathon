@@ -44,6 +44,7 @@ class Profile:
     batch: int
     ubatch: int
     parallel: int
+    gpu_layers: str
     split_mode: str
     tensor_split: str
     main_gpu: int
@@ -140,6 +141,7 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                 batch=int(item.get("batch", 2048)),
                 ubatch=int(item.get("ubatch", 512)),
                 parallel=int(item.get("parallel", 1)),
+                gpu_layers=str(item.get("gpu_layers", "999")),
                 split_mode=item.get("split_mode", "layer"),
                 tensor_split=item.get("tensor_split", ""),
                 main_gpu=int(item.get("main_gpu", 0)),
@@ -276,7 +278,7 @@ def server_command(model: Model, profile: Profile, backend: Backend | None = Non
         str(selected.server), "--model", str(model.path), "--alias", model.alias,
         "--host", cfg.llama_host, "--port", str(cfg.llama_port),
         "--ctx-size", str(profile.context), "--parallel", str(profile.parallel),
-        "--n-gpu-layers", "999", "--split-mode", profile.split_mode,
+        "--n-gpu-layers", profile.gpu_layers, "--split-mode", profile.split_mode,
         "--batch-size", str(profile.batch), "--ubatch-size", str(profile.ubatch),
         "--cache-type-k", profile.cache_k, "--cache-type-v", profile.cache_v,
         "--flash-attn", "on", "--jinja", "--metrics",

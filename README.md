@@ -58,6 +58,13 @@ LLAMACPP_BIN=/opt/llama.cpp/llama-server marathon
 Specific overrides take precedence over `MARATHON_AI_ROOT`; relative paths in
 the runtime catalog are resolved beneath the effective AI root.
 
+Profiles may set `gpu_layers = "auto"` and omit `tensor_split` to let modern
+llama.cpp builds balance tensors against the VRAM available at launch. DeepSeek
+V4 Flash uses this adaptive placement so a fitting quant can remain fully on
+the GPUs while a temporarily constrained system can still fail gracefully or
+fall back to hybrid placement. Models with established fixed layouts retain
+explicit tensor splits.
+
 ## Commands
 
 ```bash

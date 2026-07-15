@@ -69,8 +69,19 @@ class CatalogTests(unittest.TestCase):
         backend = catalog.Backend("test", "Test backend", Path("/bin/true"))
         command = catalog.server_command(model, profile, backend)
         self.assertEqual(command[command.index("--ctx-size") + 1], "65536")
+        self.assertEqual(command[command.index("--n-gpu-layers") + 1], "999")
         self.assertEqual(command[command.index("--tensor-split") + 1], "1,1,1,1")
         self.assertIn("--flash-attn", command)
+
+    def test_deepseek_profiles_allow_backend_auto_fit(self) -> None:
+        model = fixture_model("deepseek-v4-flash")
+        profile = catalog.find_profile(model, "safe", "direct")
+        backend = catalog.Backend("test", "Test backend", Path("/bin/true"))
+
+        command = catalog.server_command(model, profile, backend)
+
+        self.assertEqual(command[command.index("--n-gpu-layers") + 1], "auto")
+        self.assertNotIn("--tensor-split", command)
 
     def test_portable_ai_root_resolves_catalog_paths(self) -> None:
         loaded = catalog.load_catalog()
