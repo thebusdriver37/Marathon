@@ -17,6 +17,7 @@ Commands:
   dashboard       Select a model and run Marathon (default)
   codex           Start Marathon and open Codex
   direct          Start Marathon and open clean direct chat
+  tune            Open the Dyno machine-specific profile tuner
   models          List centrally installed GGUF models
   status          Show whether the foreground runtime is active
   stop            Ask an active runtime to stop and free the GPUs
@@ -76,7 +77,7 @@ case "$cmd" in
   dashboard|chat)
     run_app dashboard "$@"
     ;;
-  codex|direct|models|status|stop|report|compare)
+  codex|direct|tune|models|status|stop|report|compare)
     run_app "$cmd" "$@"
     ;;
   backend)

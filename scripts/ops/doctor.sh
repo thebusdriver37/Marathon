@@ -121,6 +121,9 @@ fi
 
 if [[ -x "$PATCHED_CODEX_BIN" ]]; then
   pass "Marathon Codex available: $($PATCHED_CODEX_BIN --version 2>&1)"
+  if [[ -f "$PATCHED_CODEX_BIN.source" ]]; then
+    info "Marathon Codex source: $(cat "$PATCHED_CODEX_BIN.source")"
+  fi
 elif have codex; then
   warn "using stock Codex; run 'marathon build-codex' for the raw context meter"
 else

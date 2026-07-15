@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CODEX_DIR="${MARATHON_CODEX_DIR:-$ROOT_DIR/codex}"
 PATCHES_DIR="${MARATHON_PATCH_DIR:-$ROOT_DIR/patches/codex}"
 UPSTREAM_BRANCH="${MARATHON_CODEX_UPSTREAM:-origin/main}"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+INSTALL_BIN="${MARATHON_PATCHED_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
 
 if ! git -C "$CODEX_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: Codex submodule is missing at $CODEX_DIR" >&2
@@ -29,11 +31,16 @@ LOCAL_SHA="$(git -C "$CODEX_DIR" rev-parse HEAD)"
 UPSTREAM_SHA="$(git -C "$CODEX_DIR" rev-parse "$UPSTREAM_BRANCH")"
 
 if [[ "$LOCAL_SHA" == "$UPSTREAM_SHA" ]]; then
-  echo "Codex already at ${UPSTREAM_SHA:0:8}; nothing to do."
-  exit 0
+  installed_sha="$(cat "$INSTALL_BIN.source" 2>/dev/null || true)"
+  if [[ -x "$INSTALL_BIN" && "$installed_sha" == "$UPSTREAM_SHA" \
+    && "${MARATHON_FORCE_CODEX_REBUILD:-0}" != "1" ]]; then
+    echo "Codex is current and verified at ${UPSTREAM_SHA:0:8}."
+    exit 0
+  fi
+  echo "Codex source is at ${UPSTREAM_SHA:0:8}; rebuilding and validating patches."
+else
+  echo "-> Codex ${LOCAL_SHA:0:8} -> ${UPSTREAM_SHA:0:8}"
 fi
-
-echo "-> Codex ${LOCAL_SHA:0:8} -> ${UPSTREAM_SHA:0:8}"
 
 shopt -s nullglob
 patches=("$PATCHES_DIR"/*.patch)
@@ -62,19 +69,22 @@ if (( ${#patches[@]} > 0 )); then
       echo "  resolve by rebasing the patch against current upstream." >&2
       exit 1
     fi
+    git -C "$PREFLIGHT_DIR" apply "$patch"
   done
 
   cleanup_preflight
   trap - EXIT
 fi
 
-echo "-> Resetting Codex submodule to ${UPSTREAM_SHA:0:8}..."
-git -C "$CODEX_DIR" reset --hard "$UPSTREAM_SHA"
+if [[ "$LOCAL_SHA" != "$UPSTREAM_SHA" ]]; then
+  echo "-> Fast-forwarding Codex submodule to ${UPSTREAM_SHA:0:8}..."
+  git -C "$CODEX_DIR" merge --ff-only "$UPSTREAM_SHA"
+fi
 
 echo "-> Building patched Codex..."
 bash "$ROOT_DIR/scripts/build_codex.sh"
 
 echo
-echo "Codex synced to ${UPSTREAM_SHA:0:8} with ${#patches[@]} patch(es) applied to the build worktree."
+echo "Codex synced and tested at ${UPSTREAM_SHA:0:8} with ${#patches[@]} Marathon patch(es)."
 echo "Commit the submodule bump in the parent repo:"
 echo "  git -C '$ROOT_DIR' add codex && git -C '$ROOT_DIR' commit -m 'codex: sync to ${UPSTREAM_SHA:0:8}'"

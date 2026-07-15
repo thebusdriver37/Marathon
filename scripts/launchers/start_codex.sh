@@ -88,17 +88,15 @@ fi
 
 export CODEX_OSS_BASE_URL="$router_v1"
 
-if [[ -z "${CODEX_EXTRA_MODELS_PATH:-}" ]]; then
-  runtime_models_file="${MARATHON_RUNTIME_MODELS_FILE:-$STATE_DIR/codex_models.json}"
-  model_catalog="$(curl -fsS --max-time 3 "$router_v1/models" 2>/dev/null || true)"
-  if [[ -n "$model_catalog" ]]; then
-    tmp_models_file="$(mktemp "$STATE_DIR/codex_models.XXXXXX")"
-    printf '%s\n' "$model_catalog" >"$tmp_models_file"
-    mv "$tmp_models_file" "$runtime_models_file"
-    export CODEX_EXTRA_MODELS_PATH="$runtime_models_file"
-  else
-    export CODEX_EXTRA_MODELS_PATH="$LOCAL_MODELS_FILE"
-  fi
+runtime_models_file="${MARATHON_RUNTIME_MODELS_FILE:-$STATE_DIR/codex_models.json}"
+model_catalog="$(curl -fsS --max-time 3 "$router_v1/models" 2>/dev/null || true)"
+if [[ -n "$model_catalog" ]]; then
+  tmp_models_file="$(mktemp "$STATE_DIR/codex_models.XXXXXX")"
+  printf '%s\n' "$model_catalog" >"$tmp_models_file"
+  mv "$tmp_models_file" "$runtime_models_file"
+  MODEL_CATALOG_FILE="$runtime_models_file"
+else
+  MODEL_CATALOG_FILE="$LOCAL_MODELS_FILE"
 fi
 
 if [[ -z "${CODEX_CLI_NAME:-}" ]]; then
@@ -150,6 +148,7 @@ MODEL_PROVIDER_CONFIG="model_providers.$MODEL_PROVIDER_ID={ name = \"$MODEL_PROV
 COMMON_ARGS=(
   -c "$MODEL_PROVIDER_CONFIG"
   -c "model_provider=\"$MODEL_PROVIDER_ID\""
+  -c "model_catalog_json=\"$MODEL_CATALOG_FILE\""
   -m "$active_model"
   -c "web_search=\"$WEB_SEARCH_MODE\""
   --disable image_generation

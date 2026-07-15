@@ -229,6 +229,23 @@ def discover_models(model_root: Path | None = None) -> list[Model]:
     return sorted(result, key=lambda model: (model.family.id, model.display_name.lower()))
 
 
+def profiles_for_model(model: Model) -> tuple[Profile, ...]:
+    """Return shipped profiles followed by valid machine-local Dyno profiles."""
+
+    # Keep the catalog independent from the optional tuning runner at import
+    # time. dyno imports these dataclasses, so a local import avoids a cycle.
+    try:
+        from .dyno import load_tuned_profiles
+
+        tuned = load_tuned_profiles(model)
+    except (KeyError, OSError, ValueError, TypeError):
+        tuned = ()
+    shipped_ids = {profile.id for profile in model.family.profiles}
+    return model.family.profiles + tuple(
+        profile for profile in tuned if profile.id not in shipped_ids
+    )
+
+
 def find_model(query: str, models: list[Model] | None = None) -> Model:
     available = models if models is not None else discover_models()
     exact = [model for model in available if model.id == query]
@@ -248,17 +265,18 @@ def find_model(query: str, models: list[Model] | None = None) -> Model:
 
 def find_profile(model: Model, profile_id: str | None, frontend: str | None = None) -> Profile:
     profile_id = profile_id or model.family.default_profile
-    for profile in model.family.profiles:
+    available = profiles_for_model(model)
+    for profile in available:
         if profile.id == profile_id:
             if frontend and not profile.supports(frontend):
                 raise ValueError(
                     f"profile '{profile.id}' is not compatible with {frontend}; "
-                    f"choose one of: {', '.join(p.id for p in model.family.profiles if p.supports(frontend))}"
+                    f"choose one of: {', '.join(p.id for p in available if p.supports(frontend))}"
                 )
             return profile
     raise ValueError(
         f"unknown profile '{profile_id}' for {model.id}; "
-        f"choose: {', '.join(profile.id for profile in model.family.profiles)}"
+        f"choose: {', '.join(profile.id for profile in available)}"
     )
 
 

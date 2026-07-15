@@ -14,6 +14,7 @@ from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
+from rich.table import Table
 
 from .catalog import (
     Model,
@@ -22,8 +23,10 @@ from .catalog import (
     find_model,
     find_profile,
     format_size,
+    profiles_for_model,
     settings,
 )
+from .dyno import OBJECTIVES, candidate_profiles, run_tuning
 from .frontends import direct_chat, run_codex
 from .runtime import Runtime, load_selection, save_selection
 
@@ -176,7 +179,7 @@ def _model_items(models: list[Model]) -> list[MenuItem]:
     return [
         MenuItem(
             model.display_name,
-            f"Central GGUF · {len(model.family.profiles)} runtime profiles",
+            f"Central GGUF · {len(profiles_for_model(model))} runtime profiles",
             model.id,
             format_size(model.size_bytes),
         )
@@ -192,7 +195,7 @@ def _profile_items(model: Model) -> list[MenuItem]:
             profile.id,
             f"{profile.context // 1024}K · {profile.confidence}",
         )
-        for profile in model.family.profiles
+        for profile in profiles_for_model(model)
     ]
 
 
@@ -215,7 +218,7 @@ def _choose_model_profile(
             return None
         model = models[chosen_model]
         model_index = chosen_model
-        profiles = list(model.family.profiles)
+        profiles = list(profiles_for_model(model))
         profile_index = next(
             (
                 index
@@ -259,6 +262,96 @@ def _confirm_experimental(console: Console, profile: Profile) -> bool:
     return choice == 1
 
 
+def _dyno_items() -> list[MenuItem]:
+    badges = {
+        "balanced": "recommended",
+        "speed": "latency",
+        "context": "context",
+        "quality": "precision",
+        "efficiency": "power",
+    }
+    return [
+        MenuItem(label, description, objective, badges[objective])
+        for objective, (label, description) in OBJECTIVES.items()
+    ]
+
+
+def _show_dyno_results(console: Console, summary) -> None:
+    console.clear()
+    winner = summary.winner
+    console.print(
+        Panel(
+            f"[bold green]{winner.candidate.label}[/bold green]\n"
+            f"{winner.prompt_tps:.1f} prompt tok/s · {winner.decode_tps:.1f} decode tok/s · "
+            f"{winner.loaded_context:,} tokens\n\n"
+            f"Saved as [cyan]Dyno · {OBJECTIVES[summary.objective][0]}[/cyan]",
+            title="Dyno found a winner",
+            border_style="green",
+        )
+    )
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Trial")
+    table.add_column("Prompt", justify="right")
+    table.add_column("Decode", justify="right")
+    table.add_column("Context", justify="right")
+    table.add_column("Power", justify="right")
+    table.add_column("Result")
+    for result in summary.results:
+        table.add_row(
+            result.candidate.label,
+            f"{result.prompt_tps:.1f}" if result.success else "—",
+            f"{result.decode_tps:.1f}" if result.success else "—",
+            f"{result.loaded_context // 1024}K" if result.loaded_context else "—",
+            f"{result.average_power_w:.0f}W" if result.average_power_w else "—",
+            "[green]pass[/green]" if result.success else f"[red]{result.error[:38]}[/red]",
+        )
+    console.print(table)
+    console.print(f"[dim]Full results: {summary.result_dir}[/dim]")
+    Prompt.ask("Press Enter to continue", default="")
+
+
+def _run_dyno_flow(console: Console, selection: Selection) -> Selection | None:
+    # Tune from the shipped family default, not from a previous local winner or
+    # a deliberately constrained quick-chat profile.
+    baseline = find_profile(selection.model, selection.model.family.default_profile)
+    chosen = _arrow_menu(
+        console,
+        "What should Dyno optimize?",
+        "Choose one priority. Every trial must pass the same safety gates.",
+        _dyno_items(),
+        0,
+        context=(selection.model.display_name, f"Baseline · {baseline.display_name}"),
+    )
+    if chosen is None:
+        return None
+    objective = list(OBJECTIVES)[chosen]
+    candidates = candidate_profiles(selection.model, baseline, objective)
+    confirmation = _arrow_menu(
+        console,
+        f"Tune for {OBJECTIVES[objective][0]}",
+        "Candidates run in the foreground; GPUs are freed between trials.",
+        [
+            MenuItem("Start tuning", f"Run {len(candidates)} deterministic trials and save the winner.", "start", f"{len(candidates)} trials"),
+            MenuItem("Go back", "Do not change the current setup.", "back"),
+        ],
+        0,
+        context=(selection.model.display_name, "Known-good profiles are never overwritten"),
+    )
+    if confirmation != 0:
+        return None
+    with console.status("[bold magenta]Dyno is preparing the first trial…[/bold magenta]", spinner="dots") as status:
+        summary = run_tuning(
+            selection.model,
+            baseline,
+            objective,
+            lambda message: status.update(f"[magenta]{message}[/magenta]"),
+        )
+    _show_dyno_results(console, summary)
+    tuned = find_profile(selection.model, f"dyno-{objective}")
+    frontend = selection.frontend if tuned.supports(selection.frontend) else tuned.frontends[0]
+    return Selection(selection.model, tuned, frontend)
+
+
 def _home_items(selection: Selection, *, warm: bool) -> list[MenuItem]:
     suffix = "Model is already loaded." if warm else "Load the model and open Codex."
     items: list[MenuItem] = []
@@ -278,6 +371,15 @@ def _home_items(selection: Selection, *, warm: bool) -> list[MenuItem]:
             "change",
         )
     )
+    if not warm:
+        items.append(
+            MenuItem(
+                "Tune / benchmark",
+                "Let Dyno find a machine-specific profile for this model.",
+                "tune",
+                "advanced",
+            )
+        )
     items.append(
         MenuItem(
             "Quit" if not warm else "Stop backend and quit",
@@ -396,6 +498,18 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
         preferred = None
         if action == "quit":
             return 0
+        if action == "tune":
+            try:
+                tuned = _run_dyno_flow(console, selection)
+                if tuned:
+                    selection = tuned
+                    save_selection(selection.model, selection.profile, selection.frontend)
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Dyno stopped. GPUs are being freed.[/yellow]")
+            except Exception as error:
+                console.print(Panel(str(error), title="Dyno could not finish", border_style="red"))
+                Prompt.ask("Press Enter to return", default="")
+            continue
         save_selection(selection.model, selection.profile, action)
         runtime = Runtime(selection.model, selection.profile)
         try:
@@ -426,3 +540,25 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
         if action == "quit":
             console.print("[green]Backend stopped. GPUs are free.[/green]")
             return 0
+
+
+def run_dyno_dashboard() -> int:
+    """Open Dyno directly without adding complexity to the normal launcher."""
+
+    console = Console()
+    models = discover_models()
+    if not models:
+        console.print("[bold red]No GGUF models found.[/bold red]")
+        return 2
+    selection = _initial_selection(models)
+    try:
+        tuned = _run_dyno_flow(console, selection)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Dyno stopped. GPUs are free.[/yellow]")
+        return 130
+    except Exception as error:
+        console.print(Panel(str(error), title="Dyno could not finish", border_style="red"))
+        return 2
+    if tuned:
+        save_selection(tuned.model, tuned.profile, tuned.frontend)
+    return 0

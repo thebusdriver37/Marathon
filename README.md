@@ -4,6 +4,9 @@ Marathon is a one-command, terminal-first local AI runtime. It discovers GGUF
 models in the centralized AI directory, starts llama.cpp and Marathon's local
 API router in the foreground, then opens either Codex or a clean Direct Chat.
 
+Planned work that is intentionally not current behavior is tracked in
+[`docs/FUTURE_UPDATES.md`](docs/FUTURE_UPDATES.md).
+
 The process showing the Marathon dashboard owns the backend. Exiting Marathon
 stops its router and llama.cpp process groups and frees the GPUs. This lifecycle
 works through an ordinary SSH shell; no exposed daemon or web UI is required.
@@ -71,6 +74,7 @@ explicit tensor splits.
 marathon                  # dashboard; Enter starts remembered Codex setup
 marathon codex            # dashboard with Codex selected
 marathon direct           # dashboard with clean Direct Chat selected
+marathon tune             # open Dyno directly
 marathon models           # list installed centralized GGUF models
 marathon status           # inspect an active foreground runtime
 marathon stop             # emergency stop request from another SSH shell
@@ -83,6 +87,38 @@ marathon search up        # optional local SearXNG for Codex web tools
 
 The old `marathon backend ...` commands remain temporarily for compatibility,
 but the dashboard does not use their detached-process lifecycle.
+
+## Dyno machine tuning
+
+Choose **Tune / benchmark** from the cold dashboard, or run `marathon tune`.
+Dyno asks for one priority: Balanced, Fastest responses, Longest context,
+Quality / reliability, or Lowest power. It then runs three or four bounded
+candidate profiles against the selected model's shipped default and saves the
+Pareto-optimal passing result.
+
+Dyno is deterministic infrastructure rather than an LLM judge. Every candidate
+must load its requested context and complete two fixed-seed server requests.
+The runner measures prompt and decode throughput, latency, GPU power,
+utilization, peak VRAM, temperature, and energy. Quality mode uses higher-precision
+KV cache and a deterministic response gate; it does not claim to improve or
+measure the underlying quantized weights. Context mode verifies allocation and
+executes an 8K-token workload, rather than pretending one short request proves
+perfect recall across the entire window.
+
+The servers are children of the foreground Dyno process and are stopped between
+trials or on interruption. Shipped profiles are never overwritten. Winners are
+stored as machine-local profiles and automatically invalidated when the GPU
+identity, model file, or llama.cpp backend changes:
+
+```text
+~/.config/marathon/dyno/profiles/<model>.json
+~/.local/state/marathon/dyno/<run>/summary.json
+~/.local/state/marathon/dyno/<run>/<trial>.log
+```
+
+The generated `Dyno · …` profile appears under its model in Marathon's normal
+profile drill-down and can be launched like any shipped profile. This keeps the
+daily workflow simple while retaining complete trial evidence for later review.
 
 ## Codex behavior
 
@@ -129,6 +165,11 @@ The Marathon Codex patch removes stock Codex's fixed 12K display normalization,
 so the visible percentage is the backend-reported active tokens divided by that
 loaded window. `marathon build-codex` performs a release build in a temporary
 target directory, installs only the resulting binary, and removes build output.
+`marathon update-codex` explicitly fetches current upstream, preflights the
+patches in a throwaway worktree, runs the focused Codex and complete Marathon
+test suites, smoke-checks the CLI, and then atomically promotes the release
+binary. The previous binary remains beside it as `codex.previous`. Ordinary
+Marathon startup does not fetch, compile, or replace Codex.
 
 ## Direct Chat
 
@@ -142,6 +183,8 @@ skills, memory, or Hermes harness. Use `/new` to clear the conversation and
 - Models and backends: `~/AI/`
 - Slot cache and router state: `~/AI/cache/marathon/`
 - Remembered selection: `~/.config/marathon/selection.json`
+- Dyno tuned profiles: `~/.config/marathon/dyno/profiles/`
+- Dyno benchmark evidence: `~/.local/state/marathon/dyno/`
 - Per-run telemetry: `~/.local/state/marathon/runs/*.jsonl`
 - Compatibility process logs: `~/.local/state/marathon/logs/`
 - Live lock and PID metadata: `$XDG_RUNTIME_DIR/marathon/`
@@ -275,20 +318,18 @@ generates a fresh `MARATHON_SEARXNG_SECRET`, and binds the container to
 | `MARATHON_WEB_BROWSE_ENABLE` | `1` | Set to `0` to hide the optional Crawl4AI-backed `web_browse` tool path |
 | `MARATHON_ROUTER_PYTHON` | `.marathon/venv/bin/python3` | Python interpreter the launcher uses for the router |
 
-## Experimental Codex fork
+## Updating Codex
 
-Ordinary Marathon use prefers the installed stock Codex binary. The submodule
-and patch workflow remain available for experiments that demonstrate a real
-upstream gap; they are not required to start Marathon.
-
-To update that experimental fork:
+Ordinary Marathon use prefers the tested patched binary and falls back to stock
+Codex only when that binary is absent. To fetch current upstream, preflight the
+small Marathon patch set, run the regression gates, and atomically install the
+result:
 
 ```bash
-git -C codex fetch origin
-git -C codex checkout main
-git -C codex pull --ff-only
-./scripts/apply_codex_patches.sh
-./scripts/build_codex.sh
+marathon update-codex
 ```
 
-If a patch fails, Codex changed in the touched area. Rebase the patch intentionally instead of editing Codex ad hoc.
+If a patch fails, Codex changed in the touched area. Rebase or retire that patch
+intentionally rather than editing Codex ad hoc. Set
+`MARATHON_FORCE_CODEX_REBUILD=1` only when the recorded current commit must be
+rebuilt from scratch.

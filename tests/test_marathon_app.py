@@ -19,7 +19,7 @@ from marathon_app.runtime import (
     _model_is_loaded,
     _props_context_window,
 )
-from marathon_app.ui import Selection, _home
+from marathon_app.ui import Selection, _home, _home_items
 from marathon_app.telemetry import EventWriter, read_events, summarize_run
 
 
@@ -505,13 +505,23 @@ class UiTests(unittest.TestCase):
         console = mock.Mock()
 
         with (
-            mock.patch("marathon_app.ui._arrow_menu", side_effect=[2, 2]),
+            mock.patch("marathon_app.ui._arrow_menu", side_effect=[2, 3]),
             mock.patch("marathon_app.ui._choose_model_profile", return_value=changed),
         ):
             action, result = _home(console, models, current, warm=False)
 
         self.assertEqual(action, "quit")
         self.assertEqual(result.profile.id, "quick")
+
+    def test_dyno_is_one_cold_menu_entry_and_not_shown_while_warm(self) -> None:
+        model = fixture_model()
+        selection = Selection(model, catalog.find_profile(model, "balanced"), "codex")
+
+        cold = [item.value for item in _home_items(selection, warm=False)]
+        warm = [item.value for item in _home_items(selection, warm=True)]
+
+        self.assertEqual(cold.count("tune"), 1)
+        self.assertNotIn("tune", warm)
 
 
 if __name__ == "__main__":
