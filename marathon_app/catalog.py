@@ -55,6 +55,7 @@ class Profile:
     confidence: str
     frontends: tuple[str, ...]
     tool_thinking_budget: int | None = None
+    parallel_tool_calls: bool = False
 
     def supports(self, frontend: str) -> bool:
         return frontend in self.frontends
@@ -158,6 +159,7 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                     if "tool_thinking_budget" in item
                     else None
                 ),
+                parallel_tool_calls=bool(item.get("parallel_tool_calls", False)),
             )
             for item in raw.get("profiles", [])
         )

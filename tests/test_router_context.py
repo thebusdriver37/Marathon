@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -43,8 +44,20 @@ class RouterContextTests(unittest.TestCase):
 
         self.assertEqual(model["context_window"], 262_144)
         self.assertEqual(model["max_context_window"], 262_144)
+        self.assertFalse(model["supports_parallel_tool_calls"])
         self.assertEqual(model["auto_compact_token_limit"], 235_929)
         self.assertEqual(model["effective_context_window_percent"], 100)
+
+    def test_catalog_advertises_profile_parallel_tool_capability(self) -> None:
+        profile = replace(fixture_profile(), supports_parallel_tool_calls=True)
+        state = object.__new__(router_module.RouterState)
+        state.available_profiles = {profile.slug: profile}
+        state._refresh_profiles = lambda: state.available_profiles
+
+        with mock.patch.object(router_module, "_base_instructions", return_value="prompt"):
+            model = state.model_catalog()["models"][0]
+
+        self.assertTrue(model["supports_parallel_tool_calls"])
 
     def test_managed_tool_loop_reports_final_context_not_cumulative_usage(self) -> None:
         profile = fixture_profile(131_072)

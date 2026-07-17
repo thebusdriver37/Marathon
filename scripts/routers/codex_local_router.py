@@ -158,6 +158,7 @@ class ModelProfile:
     context_window: int
     auto_compact_token_limit: int
     truncation_limit: int
+    supports_parallel_tool_calls: bool = False
 
     @property
     def port(self) -> int:
@@ -489,6 +490,9 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         context_window=context_window,
         auto_compact_token_limit=auto_compact_limit,
         truncation_limit=truncation_limit,
+        supports_parallel_tool_calls=_env_bool(
+            "MARATHON_MODEL_PARALLEL_TOOL_CALLS", False
+        ),
     )
 
 
@@ -1324,7 +1328,7 @@ class RouterState:
                     "apply_patch_tool_type": "freeform",
                     "web_search_tool_type": "text",
                     "truncation_policy": {"mode": "tokens", "limit": profile.truncation_limit},
-                    "supports_parallel_tool_calls": False,
+                    "supports_parallel_tool_calls": profile.supports_parallel_tool_calls,
                     "supports_image_detail_original": False,
                     "context_window": profile.context_window,
                     "max_context_window": profile.context_window,

@@ -455,6 +455,7 @@ class Runtime:
                     "cache_v": self.profile.cache_v,
                     "flash_attention": self.profile.flash_attention,
                     "tool_thinking_budget": self.profile.tool_thinking_budget,
+                    "parallel_tool_calls": self.profile.parallel_tool_calls,
                     "confidence": self.profile.confidence,
                 },
                 "llama_command": llama_command,
@@ -528,6 +529,9 @@ class Runtime:
                 "MARATHON_MODEL_TRUNCATION_LIMIT": str(self.truncation_limit),
                 "MARATHON_MODEL_PORT": str(self.config.llama_port),
                 "MARATHON_MODEL_TARGET": self.llama_url,
+                "MARATHON_MODEL_PARALLEL_TOOL_CALLS": (
+                    "1" if self.profile.parallel_tool_calls else "0"
+                ),
                 "MARATHON_SLOT_SAVE_ROOT": str(SLOT_ROOT),
                 "MARATHON_RUN_ID": str(self.run_id or ""),
                 "MARATHON_RUN_LOG": str(self.run_log or ""),
