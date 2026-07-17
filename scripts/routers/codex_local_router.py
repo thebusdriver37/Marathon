@@ -363,6 +363,34 @@ def _max_output_tokens(profile: "ModelProfile") -> int:
     return max(256, _env_int("MARATHON_MAX_OUTPUT_TOKENS", dynamic_default))
 
 
+def _tool_thinking_budget_for_turn(
+    request: dict[str, Any],
+    delta_input: list[dict[str, Any]],
+) -> int | None:
+    """Return a native backend thinking cap only for post-tool continuations."""
+
+    configured = os.environ.get("MARATHON_MODEL_TOOL_THINKING_BUDGET_TOKENS")
+    if configured is None or not _env_bool("MARATHON_ADAPTIVE_THINKING_BUDGET", True):
+        return None
+    tools = request.get("tools")
+    has_tools = isinstance(tools, list) and bool(tools)
+    follows_tool = any(
+        isinstance(item, dict)
+        and item.get("type") in {
+            "function_call_output",
+            "custom_tool_call_output",
+            "local_shell_call_output",
+        }
+        for item in delta_input
+    )
+    if not has_tools or not follows_tool:
+        return None
+    try:
+        return max(0, int(configured))
+    except ValueError:
+        return None
+
+
 def _response_stalled_at_output_limit(
     response: dict[str, Any],
     items: list[dict[str, Any]],
@@ -2440,6 +2468,9 @@ class RouterState:
 
             request = copy.deepcopy(request)
             request["input"] = list(request.get("input") or []) + copy.deepcopy(iter_items) + tool_outputs
+            thinking_budget = _tool_thinking_budget_for_turn(request, tool_outputs)
+            if thinking_budget is not None:
+                request["thinking_budget_tokens"] = thinking_budget
             iterations += 1
 
         last_response = copy.deepcopy(last_response)
@@ -2567,6 +2598,9 @@ class RouterState:
         if isinstance(requested_output_limit, int) and requested_output_limit > 0:
             output_limit = min(output_limit, requested_output_limit)
         forward_request["max_output_tokens"] = output_limit
+        thinking_budget = _tool_thinking_budget_for_turn(forward_request, delta_input)
+        if thinking_budget is not None:
+            forward_request["thinking_budget_tokens"] = thinking_budget
 
         self.trace_request(
             requested_model=requested_model,
@@ -2583,6 +2617,16 @@ class RouterState:
                 "resolved_profile_slug": profile.slug,
                 "scaffold_matches": scaffold_matches,
                 "delta_only_restore": delta_only_restore,
+                "tool_thinking_budget_tokens": thinking_budget,
+            },
+        )
+        self.telemetry.emit(
+            "router.thinking_budget.selected",
+            {
+                "mode": "native-cap" if thinking_budget is not None else "unrestricted",
+                "thinking_budget_tokens": thinking_budget,
+                "max_output_tokens": output_limit,
+                "delta_input_items": len(delta_input),
             },
         )
 

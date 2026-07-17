@@ -55,6 +55,7 @@ split_mode = "layer"
 cache_k = "f16"
 cache_v = "f16"
 flash_attention = "off"
+tool_thinking_budget = 1024
 extra_args = []
 confidence = "experimental"
 frontends = ["codex", "direct"]

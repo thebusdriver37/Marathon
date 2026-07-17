@@ -57,6 +57,7 @@ class CandidateTests(unittest.TestCase):
                 add_args=("--ctx-checkpoints", "0", "--poll", "0"),
             ).profile,
             flash_attention="on",
+            tool_thinking_budget=None,
         )
 
         sanitized = dyno._sanitize_tuned_profile(model, stale)
@@ -66,6 +67,7 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(sanitized.cache_k, "f16")
         self.assertEqual(sanitized.cache_v, "f16")
         self.assertEqual(sanitized.flash_attention, "off")
+        self.assertEqual(sanitized.tool_thinking_budget, 1_024)
         self.assertIn("--poll", sanitized.extra_args)
 
     def test_context_objective_scales_context_without_unbounded_search(self) -> None:

@@ -103,6 +103,9 @@ class CatalogTests(unittest.TestCase):
                     command[command.index("--flash-attn") + 1], "off"
                 )
 
+        long_profile = catalog.find_profile(model, "long-64k", "codex")
+        self.assertEqual(long_profile.tool_thinking_budget, 1_024)
+
     def test_portable_ai_root_resolves_catalog_paths(self) -> None:
         loaded = catalog.load_catalog()
         with mock.patch.dict(os.environ, {"HOME": "/tmp/marathon-home"}, clear=True):

@@ -54,6 +54,7 @@ class Profile:
     extra_args: tuple[str, ...]
     confidence: str
     frontends: tuple[str, ...]
+    tool_thinking_budget: int | None = None
 
     def supports(self, frontend: str) -> bool:
         return frontend in self.frontends
@@ -152,6 +153,11 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                 extra_args=tuple(str(arg) for arg in item.get("extra_args", [])),
                 confidence=item.get("confidence", "baseline"),
                 frontends=tuple(item.get("frontends", ["direct"])),
+                tool_thinking_budget=(
+                    max(0, int(item["tool_thinking_budget"]))
+                    if "tool_thinking_budget" in item
+                    else None
+                ),
             )
             for item in raw.get("profiles", [])
         )

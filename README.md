@@ -154,6 +154,13 @@ Individual backend responses are also capped at one eighth of the context
 window, between 2,048 and 8,192 generated tokens. This prevents an unbounded
 reasoning or edit turn from monopolizing the GPUs; large edits should be split
 across tool calls. `MARATHON_MAX_OUTPUT_TOKENS` overrides the cap.
+Profiles whose backend supports a native thinking budget can set
+`tool_thinking_budget`. Marathon applies it only after Codex returns a tool
+result; initial user turns remain unrestricted. The DeepSeek 64K profile uses a
+1,024-token thinking cap so the backend cleanly ends a long thinking section
+and lets the model issue its next tool call instead of truncating the whole
+response. Set `MARATHON_ADAPTIVE_THINKING_BUDGET=0` to disable this behavior for
+an A/B test.
 If a capped agent response contains only unfinished reasoning, Marathon makes
 one bounded recovery request requiring a concrete tool action instead of
 reporting a false-successful Codex turn. Set

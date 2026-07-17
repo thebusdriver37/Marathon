@@ -210,6 +210,11 @@ def _profile_from_dict(raw: dict[str, object]) -> Profile:
         extra_args=tuple(str(item) for item in raw.get("extra_args", [])),
         confidence=str(raw.get("confidence", "tuned")),
         frontends=tuple(str(item) for item in raw.get("frontends", ["direct"])),
+        tool_thinking_budget=(
+            max(0, int(raw["tool_thinking_budget"]))
+            if raw.get("tool_thinking_budget") is not None
+            else None
+        ),
     )
 
 
@@ -236,11 +241,23 @@ def _sanitize_tuned_profile(model: Model, profile: Profile) -> Profile:
             continue
         sanitized.append(value)
         index += 1
+    default_profile = next(
+        (
+            candidate
+            for candidate in model.family.profiles
+            if candidate.id == model.family.default_profile
+        ),
+        None,
+    )
+    tool_thinking_budget = profile.tool_thinking_budget
+    if tool_thinking_budget is None and default_profile is not None:
+        tool_thinking_budget = default_profile.tool_thinking_budget
     return replace(
         profile,
         cache_k="f16",
         cache_v="f16",
         flash_attention="off",
+        tool_thinking_budget=tool_thinking_budget,
         extra_args=tuple(sanitized),
     )
 

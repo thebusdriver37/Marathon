@@ -454,6 +454,7 @@ class Runtime:
                     "cache_k": self.profile.cache_k,
                     "cache_v": self.profile.cache_v,
                     "flash_attention": self.profile.flash_attention,
+                    "tool_thinking_budget": self.profile.tool_thinking_budget,
                     "confidence": self.profile.confidence,
                 },
                 "llama_command": llama_command,
@@ -532,6 +533,10 @@ class Runtime:
                 "MARATHON_RUN_LOG": str(self.run_log or ""),
             }
         )
+        if self.profile.tool_thinking_budget is not None:
+            router_env["MARATHON_MODEL_TOOL_THINKING_BUDGET_TOKENS"] = str(
+                self.profile.tool_thinking_budget
+            )
         configured_python = os.environ.get("MARATHON_ROUTER_PYTHON")
         python = (
             Path(configured_python).expanduser()

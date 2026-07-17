@@ -331,6 +331,35 @@ class RouterContextTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"MARATHON_MAX_OUTPUT_TOKENS": "6000"}):
             self.assertEqual(router_module._max_output_tokens(fixture_profile()), 6_000)
 
+    def test_native_thinking_budget_only_applies_after_tool_output(self) -> None:
+        request = {
+            "tools": [{"type": "function", "name": "exec_command"}],
+            "max_output_tokens": 8_192,
+        }
+        tool_output = [
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "tests failed",
+            }
+        ]
+
+        with mock.patch.dict(
+            "os.environ",
+            {"MARATHON_MODEL_TOOL_THINKING_BUDGET_TOKENS": "1024"},
+            clear=False,
+        ):
+            self.assertEqual(
+                router_module._tool_thinking_budget_for_turn(request, tool_output),
+                1_024,
+            )
+            self.assertIsNone(
+                router_module._tool_thinking_budget_for_turn(
+                    request,
+                    [{"type": "message", "role": "user", "content": []}],
+                )
+            )
+
     def test_output_budget_stall_requires_no_actionable_output(self) -> None:
         stalled = {
             "usage": {"output_tokens": 8192},
