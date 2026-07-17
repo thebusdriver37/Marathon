@@ -25,14 +25,10 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 PY_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
-case "$PY_VERSION" in
-  3.10|3.11|3.12|3.13)
-    ;;
-  *)
-    echo "error: python3 $PY_VERSION is not supported. Install python3.10+ before retrying." >&2
-    exit 1
-    ;;
-esac
+if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'; then
+  echo "error: Python 3.10 or newer is required; found python3 $PY_VERSION." >&2
+  exit 1
+fi
 
 if [[ "$force" == "1" && -d "$VENV_DIR" ]]; then
   echo "removing existing venv at $VENV_DIR" >&2
