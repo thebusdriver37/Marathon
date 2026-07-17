@@ -50,6 +50,7 @@ class Profile:
     main_gpu: int
     cache_k: str
     cache_v: str
+    flash_attention: str
     extra_args: tuple[str, ...]
     confidence: str
     frontends: tuple[str, ...]
@@ -147,6 +148,7 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                 main_gpu=int(item.get("main_gpu", 0)),
                 cache_k=item.get("cache_k", "f16"),
                 cache_v=item.get("cache_v", "f16"),
+                flash_attention=item.get("flash_attention", "on"),
                 extra_args=tuple(str(arg) for arg in item.get("extra_args", [])),
                 confidence=item.get("confidence", "baseline"),
                 frontends=tuple(item.get("frontends", ["direct"])),
@@ -299,7 +301,7 @@ def server_command(model: Model, profile: Profile, backend: Backend | None = Non
         "--n-gpu-layers", profile.gpu_layers, "--split-mode", profile.split_mode,
         "--batch-size", str(profile.batch), "--ubatch-size", str(profile.ubatch),
         "--cache-type-k", profile.cache_k, "--cache-type-v", profile.cache_v,
-        "--flash-attn", "on", "--jinja", "--metrics",
+        "--flash-attn", profile.flash_attention, "--jinja", "--metrics",
     ]
     if profile.split_mode == "none":
         command.extend(["--main-gpu", str(profile.main_gpu)])

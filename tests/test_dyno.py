@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -48,12 +49,15 @@ class CandidateTests(unittest.TestCase):
     def test_old_deepseek_tuned_profile_cannot_disable_context_checkpoints(self) -> None:
         model = fixture_model()
         base = catalog.find_profile(model, "long-64k")
-        stale = dyno._variant(
-            base,
-            "stale",
-            "Stale",
-            add_args=("--ctx-checkpoints", "0", "--poll", "0"),
-        ).profile
+        stale = replace(
+            dyno._variant(
+                base,
+                "stale",
+                "Stale",
+                add_args=("--ctx-checkpoints", "0", "--poll", "0"),
+            ).profile,
+            flash_attention="on",
+        )
 
         sanitized = dyno._sanitize_tuned_profile(model, stale)
 
@@ -61,6 +65,7 @@ class CandidateTests(unittest.TestCase):
         self.assertNotIn("--swa-full", sanitized.extra_args)
         self.assertEqual(sanitized.cache_k, "f16")
         self.assertEqual(sanitized.cache_v, "f16")
+        self.assertEqual(sanitized.flash_attention, "off")
         self.assertIn("--poll", sanitized.extra_args)
 
     def test_context_objective_scales_context_without_unbounded_search(self) -> None:

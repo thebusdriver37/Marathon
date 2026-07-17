@@ -32,7 +32,8 @@ _LLAMA_PROMPT_TIMING = re.compile(
     r"prompt eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens"
 )
 _LLAMA_DECODE_TIMING = re.compile(
-    r"\|\s*eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens"
+    r"(?:^|\|)\s*eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens",
+    re.MULTILINE,
 )
 
 
@@ -273,7 +274,6 @@ def summarize_run(path: Path, *, live: bool = False) -> dict[str, Any]:
             if prompt_match:
                 process_prompt_ms += float(prompt_match.group(1))
                 process_prompt_tokens += int(prompt_match.group(2))
-                continue
             decode_match = _LLAMA_DECODE_TIMING.search(message)
             if decode_match:
                 process_generated_ms += float(decode_match.group(1))

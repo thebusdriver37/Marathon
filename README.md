@@ -66,7 +66,10 @@ llama.cpp builds balance tensors against the VRAM available at launch. DeepSeek
 V4 Flash uses this adaptive placement so a fitting quant can remain fully on
 the GPUs while a temporarily constrained system can still fail gracefully or
 fall back to hybrid placement. Models with established fixed layouts retain
-explicit tensor splits.
+explicit tensor splits. Profiles can also set `flash_attention = "on"`, `"off"`,
+or `"auto"`; omitted values retain the compatible `"on"` default. DeepSeek V4
+uses `"off"` because that kernel path is substantially faster on the tested
+four-Ampere-GPU system.
 
 ## Commands
 

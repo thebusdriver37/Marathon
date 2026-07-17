@@ -71,7 +71,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(command[command.index("--ctx-size") + 1], "65536")
         self.assertEqual(command[command.index("--n-gpu-layers") + 1], "999")
         self.assertEqual(command[command.index("--tensor-split") + 1], "1,1,1,1")
-        self.assertIn("--flash-attn", command)
+        self.assertEqual(command[command.index("--flash-attn") + 1], "on")
 
     def test_deepseek_profiles_allow_backend_auto_fit(self) -> None:
         model = fixture_model("deepseek-v4-flash")
@@ -98,6 +98,9 @@ class CatalogTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     command[command.index("--cache-type-v") + 1], "f16"
+                )
+                self.assertEqual(
+                    command[command.index("--flash-attn") + 1], "off"
                 )
 
     def test_portable_ai_root_resolves_catalog_paths(self) -> None:
@@ -368,7 +371,7 @@ class TelemetryTests(unittest.TestCase):
                 "process.output",
                 {
                     "process": "llama",
-                    "message": "I slot print_timing: id 0 | eval time = 1000.00 ms / 40 tokens",
+                    "message": "       eval time = 1000.00 ms / 40 tokens (25.00 ms per token)",
                 },
             )
             summary = summarize_run(path)

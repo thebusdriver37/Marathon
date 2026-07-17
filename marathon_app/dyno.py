@@ -206,6 +206,7 @@ def _profile_from_dict(raw: dict[str, object]) -> Profile:
         main_gpu=int(raw.get("main_gpu", 0)),
         cache_k=str(raw.get("cache_k", "f16")),
         cache_v=str(raw.get("cache_v", "f16")),
+        flash_attention=str(raw.get("flash_attention", "on")),
         extra_args=tuple(str(item) for item in raw.get("extra_args", [])),
         confidence=str(raw.get("confidence", "tuned")),
         frontends=tuple(str(item) for item in raw.get("frontends", ["direct"])),
@@ -239,6 +240,7 @@ def _sanitize_tuned_profile(model: Model, profile: Profile) -> Profile:
         profile,
         cache_k="f16",
         cache_v="f16",
+        flash_attention="off",
         extra_args=tuple(sanitized),
     )
 

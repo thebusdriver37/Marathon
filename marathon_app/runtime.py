@@ -453,6 +453,7 @@ class Runtime:
                     "tensor_split": self.profile.tensor_split,
                     "cache_k": self.profile.cache_k,
                     "cache_v": self.profile.cache_v,
+                    "flash_attention": self.profile.flash_attention,
                     "confidence": self.profile.confidence,
                 },
                 "llama_command": llama_command,
