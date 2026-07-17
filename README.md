@@ -220,7 +220,9 @@ session is still running. It reads on demand; it does not add a monitor process.
 No telemetry daemon or database runs in the background, and Marathon does not
 automatically delete traces. Set `MARATHON_RUNS_DIR` to place them on another
 disk. Sampling defaults to two seconds; `MARATHON_TELEMETRY_INTERVAL=5` reduces
-sampling overhead. Set `MARATHON_TELEMETRY_PROCESS_OUTPUT=0` to omit mirrored
+sampling overhead. Backend `/metrics` polling is disabled by default because it
+can queue behind long inference requests; opt in with
+`MARATHON_BACKEND_METRICS_ENABLED=1`. Set `MARATHON_TELEMETRY_PROCESS_OUTPUT=0` to omit mirrored
 llama.cpp/router operational lines. Set `MARATHON_ELECTRICITY_RATE_USD_KWH` to
 include an estimated GPU-energy cost in reports; this excludes CPU and PSU
 conversion losses and is therefore not a wall-power measurement.

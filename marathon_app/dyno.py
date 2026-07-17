@@ -212,6 +212,37 @@ def _profile_from_dict(raw: dict[str, object]) -> Profile:
     )
 
 
+def _sanitize_tuned_profile(model: Model, profile: Profile) -> Profile:
+    """Drop obsolete DeepSeek settings copied from older tuned profiles."""
+
+    if model.family.id != "deepseek-v4-flash":
+        return profile
+    checkpoint_flags = {"-ctxcp", "--ctx-checkpoints", "--swa-checkpoints"}
+    values = list(profile.extra_args)
+    sanitized: list[str] = []
+    index = 0
+    while index < len(values):
+        value = values[index]
+        if value == "--swa-full":
+            index += 1
+            continue
+        if (
+            value in checkpoint_flags
+            and index + 1 < len(values)
+            and values[index + 1] == "0"
+        ):
+            index += 2
+            continue
+        sanitized.append(value)
+        index += 1
+    return replace(
+        profile,
+        cache_k="f16",
+        cache_v="f16",
+        extra_args=tuple(sanitized),
+    )
+
+
 def load_tuned_profiles(model: Model) -> tuple[Profile, ...]:
     path = profile_path(model)
     try:
@@ -231,7 +262,9 @@ def load_tuned_profiles(model: Model) -> tuple[Profile, ...]:
         if not isinstance(item, dict) or not isinstance(item.get("profile"), dict):
             continue
         try:
-            loaded.append(_profile_from_dict(item["profile"]))
+            loaded.append(
+                _sanitize_tuned_profile(model, _profile_from_dict(item["profile"]))
+            )
         except (KeyError, TypeError, ValueError):
             continue
     return tuple(loaded)

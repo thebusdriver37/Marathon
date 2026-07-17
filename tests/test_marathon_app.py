@@ -83,6 +83,23 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(command[command.index("--n-gpu-layers") + 1], "auto")
         self.assertNotIn("--tensor-split", command)
 
+    def test_deepseek_profiles_use_fast_checkpointed_context_cache(self) -> None:
+        model = fixture_model("deepseek-v4-flash")
+        backend = catalog.Backend("test", "Test backend", Path("/bin/true"))
+
+        for profile_id, frontend in (("safe", "direct"), ("long-64k", "codex")):
+            with self.subTest(profile=profile_id):
+                profile = catalog.find_profile(model, profile_id, frontend)
+                command = catalog.server_command(model, profile, backend)
+                self.assertNotIn("--ctx-checkpoints", command)
+                self.assertNotIn("--swa-full", command)
+                self.assertEqual(
+                    command[command.index("--cache-type-k") + 1], "f16"
+                )
+                self.assertEqual(
+                    command[command.index("--cache-type-v") + 1], "f16"
+                )
+
     def test_portable_ai_root_resolves_catalog_paths(self) -> None:
         loaded = catalog.load_catalog()
         with mock.patch.dict(os.environ, {"HOME": "/tmp/marathon-home"}, clear=True):

@@ -37,7 +37,7 @@ gpu_layers = "auto"
 split_mode = "layer"
 cache_k = "f16"
 cache_v = "f16"
-extra_args = ["--ctx-checkpoints", "0"]
+extra_args = []
 confidence = "benchmarked"
 frontends = ["direct"]
 
@@ -51,9 +51,9 @@ ubatch = 128
 parallel = 1
 gpu_layers = "auto"
 split_mode = "layer"
-cache_k = "q8_0"
-cache_v = "q8_0"
-extra_args = ["--ctx-checkpoints", "0"]
+cache_k = "f16"
+cache_v = "f16"
+extra_args = []
 confidence = "experimental"
 frontends = ["codex", "direct"]
 

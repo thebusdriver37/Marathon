@@ -728,11 +728,15 @@ class Runtime:
             interval = max(0.5, float(os.environ.get("MARATHON_TELEMETRY_INTERVAL", "2")))
         except ValueError:
             interval = 2.0
+        sample_backend = os.environ.get(
+            "MARATHON_BACKEND_METRICS_ENABLED", "0"
+        ).lower() in {"1", "true", "yes", "on"}
         while not self._sample_stop.is_set():
             started = time.monotonic()
             self._sample_gpus()
             self._sample_host()
-            self._sample_backend_metrics()
+            if sample_backend:
+                self._sample_backend_metrics()
             self._sample_kernel_events()
             elapsed = time.monotonic() - started
             self._sample_stop.wait(max(0.1, interval - elapsed))

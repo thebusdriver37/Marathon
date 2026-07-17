@@ -48,6 +48,7 @@ Environment:
   MARATHON_MODEL_CONTEXT    Custom model context window (default: 32768)
   MARATHON_RUNS_DIR         Per-run JSONL trace directory (default: ~/.local/state/marathon/runs)
   MARATHON_TELEMETRY_INTERVAL  GPU/metrics sample interval in seconds (default: 2)
+  MARATHON_BACKEND_METRICS_ENABLED  Poll llama.cpp /metrics during runs (default: 0)
   MARATHON_TELEMETRY_PROCESS_OUTPUT  Mirror backend/router operational lines (default: 1)
   MARATHON_ELECTRICITY_RATE_USD_KWH  Optional rate for estimated GPU energy cost
   QWEN36_27B_GGUF           Exact Qwen3.6 27B GGUF path
