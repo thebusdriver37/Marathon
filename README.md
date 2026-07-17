@@ -163,8 +163,9 @@ response. Set `MARATHON_ADAPTIVE_THINKING_BUDGET=0` to disable this behavior for
 an A/B test.
 Profiles can separately advertise `parallel_tool_calls` after that capability
 has been verified for the model and chat template. It remains off by default;
-the DeepSeek 64K profile enables it so independent Codex tool calls can share
-one model turn instead of serially replaying the conversation.
+DeepSeek's raw API can emit concurrent calls to distinct tools, but a real
+Codex obstacle run did not batch repeated `exec_command` calls and regressed
+completion quality, so the DeepSeek 64K profile deliberately leaves it off.
 If a capped agent response contains only unfinished reasoning, Marathon makes
 one bounded recovery request requiring a concrete tool action instead of
 reporting a false-successful Codex turn. Set

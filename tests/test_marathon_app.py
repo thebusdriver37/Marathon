@@ -105,7 +105,7 @@ class CatalogTests(unittest.TestCase):
 
         long_profile = catalog.find_profile(model, "long-64k", "codex")
         self.assertEqual(long_profile.tool_thinking_budget, 1_024)
-        self.assertTrue(long_profile.parallel_tool_calls)
+        self.assertFalse(long_profile.parallel_tool_calls)
 
     def test_portable_ai_root_resolves_catalog_paths(self) -> None:
         loaded = catalog.load_catalog()
