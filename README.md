@@ -10,6 +10,8 @@ Planned work that is intentionally not current behavior is tracked in
 The process showing the Marathon dashboard owns the backend. Exiting Marathon
 stops its router and llama.cpp process groups and frees the GPUs. This lifecycle
 works through an ordinary SSH shell; no exposed daemon or web UI is required.
+Marathon also has a native remote-client mode: Codex and its tools run on a
+client machine while inference runs on a Linux GPU host through an SSH tunnel.
 
 ## Quick Start
 
@@ -40,6 +42,49 @@ marathon  →  Enter  →  model loads  →  Codex
                                       ↓ exit
                          Marathon dashboard
                      Codex · Direct Chat · switch · quit
+```
+
+## Native Mac client with Linux GPUs
+
+Install the same Marathon checkout on the Mac and Linux GPU host. The Linux
+host needs the models, llama.cpp, and Marathon's normal backend setup. The Mac
+needs Marathon's Python environment, Codex, and key-based SSH access, but it
+does not need local models or llama.cpp.
+
+From the Mac, enter the project that Codex should edit and name the SSH host:
+
+```bash
+cd ~/Documents/my-mac-project
+marathon remote deforest@gpu-rig
+```
+
+The normal arrow-key model/profile dashboard is populated from the Linux host.
+After selection, Marathon starts the Linux runtime in the foreground, creates a
+loopback-only SSH tunnel, and launches Codex on the Mac. Consequently:
+
+- Codex tools read and edit the Mac project, not the Linux filesystem.
+- Mac-global skills, plugins, configuration, and local/repository `AGENTS.md`
+  discovery work normally because the Codex process is local.
+- llama.cpp, the router, GPU telemetry, and models remain on Linux.
+- Exiting Codex returns to the Mac dashboard with the remote model warm.
+- Quitting Marathon, losing SSH, or closing the client connection stops the
+  Linux supervisor and frees its GPUs.
+
+The inference API remains bound to `127.0.0.1` on both ends; no unauthenticated
+port is exposed to the LAN or internet. `BatchMode=yes` prevents Marathon from
+hanging on an SSH password prompt, so first ensure this succeeds from the Mac:
+
+```bash
+ssh -o BatchMode=yes deforest@gpu-rig true
+```
+
+Use an entry in `~/.ssh/config` if the host needs a custom port or identity key.
+If `marathon` is not on the Linux host's non-interactive SSH `PATH`, point the
+Mac client at its absolute remote launcher:
+
+```bash
+MARATHON_REMOTE_BIN=/home/deforest/.local/bin/marathon \
+  marathon remote deforest@gpu-rig
 ```
 
 By default Marathon recursively discovers models under:
@@ -77,6 +122,7 @@ four-Ampere-GPU system.
 marathon                  # dashboard; Enter starts remembered Codex setup
 marathon codex            # dashboard with Codex selected
 marathon direct           # dashboard with clean Direct Chat selected
+marathon remote HOST      # local Codex, remote Linux GPUs over secure SSH
 marathon tune             # open Dyno directly
 marathon models           # list installed centralized GGUF models
 marathon status           # inspect an active foreground runtime

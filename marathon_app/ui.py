@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from typing import Callable
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.formatted_text import StyleAndTextTuples
@@ -28,6 +29,12 @@ from .catalog import (
 )
 from .dyno import OBJECTIVES, candidate_profiles, run_tuning
 from .frontends import direct_chat, run_codex
+from .remote import (
+    RemoteRuntime,
+    fetch_remote_catalog,
+    load_remote_selection,
+    save_remote_selection,
+)
 from .runtime import Runtime, load_selection, save_selection
 
 
@@ -200,7 +207,11 @@ def _profile_items(model: Model) -> list[MenuItem]:
 
 
 def _choose_model_profile(
-    console: Console, models: list[Model], selection: Selection
+    console: Console,
+    models: list[Model],
+    selection: Selection,
+    *,
+    library_context: tuple[str, str] | None = None,
 ) -> Selection | None:
     model_index = next(
         (index for index, model in enumerate(models) if model.id == selection.model.id), 0
@@ -212,7 +223,7 @@ def _choose_model_profile(
             "Enter drills into that model's runtime profiles.",
             _model_items(models),
             model_index,
-            context=("Central model library", str(settings().model_root)),
+            context=library_context or ("Central model library", str(settings().model_root)),
         )
         if chosen_model is None:
             return None
@@ -352,7 +363,9 @@ def _run_dyno_flow(console: Console, selection: Selection) -> Selection | None:
     return Selection(selection.model, tuned, frontend)
 
 
-def _home_items(selection: Selection, *, warm: bool) -> list[MenuItem]:
+def _home_items(
+    selection: Selection, *, warm: bool, allow_tune: bool = True
+) -> list[MenuItem]:
     suffix = "Model is already loaded." if warm else "Load the model and open Codex."
     items: list[MenuItem] = []
     if selection.profile.supports("codex"):
@@ -371,7 +384,7 @@ def _home_items(selection: Selection, *, warm: bool) -> list[MenuItem]:
             "change",
         )
     )
-    if not warm:
+    if not warm and allow_tune:
         items.append(
             MenuItem(
                 "Tune / benchmark",
@@ -397,9 +410,12 @@ def _home(
     *,
     warm: bool,
     preferred_frontend: str | None = None,
+    allow_tune: bool = True,
+    location: str | None = None,
+    library_context: tuple[str, str] | None = None,
 ) -> tuple[str, Selection]:
     while True:
-        items = _home_items(selection, warm=warm)
+        items = _home_items(selection, warm=warm, allow_tune=allow_tune)
         selected = next(
             (
                 index
@@ -417,6 +433,7 @@ def _home(
             allow_back=False,
             context=(
                 ("● Backend ready" if warm else "Current setup"),
+                *((location,) if location else ()),
                 selection.model.display_name,
                 f"{selection.profile.display_name} · {selection.profile.context:,} tokens · "
                 f"{FRONTEND_NAMES[selection.frontend]}",
@@ -427,7 +444,12 @@ def _home(
         preferred_frontend = None
         if action == "change":
             previous = (selection.model.id, selection.profile.id)
-            changed = _choose_model_profile(console, models, selection)
+            changed = _choose_model_profile(
+                console,
+                models,
+                selection,
+                library_context=library_context,
+            )
             if changed:
                 selection = changed
                 current = (selection.model.id, selection.profile.id)
@@ -441,8 +463,10 @@ def _home(
         return action, selection
 
 
-def _initial_selection(models: list[Model]) -> Selection:
-    remembered = load_selection()
+def _initial_selection(
+    models: list[Model], remembered: dict[str, str] | None = None
+) -> Selection:
+    remembered = load_selection() if remembered is None else remembered
     try:
         model = find_model(remembered.get("model", ""), models)
     except ValueError:
@@ -457,7 +481,9 @@ def _initial_selection(models: list[Model]) -> Selection:
     return Selection(model, profile, frontend)
 
 
-def _launch_frontend(console: Console, runtime: Runtime, frontend: str) -> None:
+def _launch_frontend(
+    console: Console, runtime: Runtime | RemoteRuntime, frontend: str
+) -> None:
     console.clear()
     if frontend == "direct":
         direct_chat(runtime, console)
@@ -467,21 +493,34 @@ def _launch_frontend(console: Console, runtime: Runtime, frontend: str) -> None:
         console.print(f"[yellow]Codex exited with status {code}.[/yellow]")
 
 
-def run_dashboard(initial_frontend: str | None = None) -> int:
-    console = Console()
-    models = discover_models()
-    if not models:
-        console.print("[bold red]No GGUF models found.[/bold red]")
-        console.print(f"Expected models under {settings().model_root}")
-        return 2
-    selection = _initial_selection(models)
+def _apply_initial_frontend(
+    selection: Selection, initial_frontend: str | None
+) -> Selection:
     if initial_frontend:
         try:
             selection.profile = find_profile(selection.model, selection.profile.id, initial_frontend)
         except ValueError:
             selection.profile = find_profile(selection.model, None, initial_frontend)
         selection.frontend = initial_frontend
+    return selection
 
+
+def _run_runtime_dashboard(
+    console: Console,
+    models: list[Model],
+    selection: Selection,
+    *,
+    initial_frontend: str | None,
+    runtime_factory: Callable[[Selection], Runtime | RemoteRuntime],
+    remember: Callable[[Model, Profile, str], None],
+    allow_tune: bool,
+    location: str | None,
+    library_context: tuple[str, str] | None,
+    preparing_message: str,
+    stopping_message: str,
+    stopped_message: str,
+    error_title: str,
+) -> int:
     preferred = initial_frontend
     while True:
         try:
@@ -491,6 +530,9 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
                 selection,
                 warm=False,
                 preferred_frontend=preferred,
+                allow_tune=allow_tune,
+                location=location,
+                library_context=library_context,
             )
         except KeyboardInterrupt:
             console.print()
@@ -503,43 +545,123 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
                 tuned = _run_dyno_flow(console, selection)
                 if tuned:
                     selection = tuned
-                    save_selection(selection.model, selection.profile, selection.frontend)
+                    remember(selection.model, selection.profile, selection.frontend)
             except KeyboardInterrupt:
                 console.print("\n[yellow]Dyno stopped. GPUs are being freed.[/yellow]")
             except Exception as error:
                 console.print(Panel(str(error), title="Dyno could not finish", border_style="red"))
                 Prompt.ask("Press Enter to return", default="")
             continue
-        save_selection(selection.model, selection.profile, action)
-        runtime = Runtime(selection.model, selection.profile)
+        remember(selection.model, selection.profile, action)
+        runtime = runtime_factory(selection)
         try:
-            with console.status("[bold magenta]Preparing GPUs…[/bold magenta]", spinner="dots") as status:
+            with console.status(preparing_message, spinner="dots") as status:
                 runtime.start(lambda message: status.update(f"[magenta]{message}[/magenta]"))
             _launch_frontend(console, runtime, action)
             while True:
-                warm_action, selection = _home(console, models, selection, warm=True)
+                warm_action, selection = _home(
+                    console,
+                    models,
+                    selection,
+                    warm=True,
+                    allow_tune=allow_tune,
+                    location=location,
+                    library_context=library_context,
+                )
                 if warm_action == "quit":
                     action = "quit"
                     break
                 if warm_action == "change":
                     action = "switch"
                     break
-                save_selection(selection.model, selection.profile, warm_action)
+                remember(selection.model, selection.profile, warm_action)
                 _launch_frontend(console, runtime, warm_action)
         except KeyboardInterrupt:
             runtime.record("runtime.interrupted", {}, level="error")
             action = "quit"
         except Exception as error:
             runtime.record("runtime.error", {"error": str(error)}, level="error")
-            console.print(Panel(str(error), title="Marathon could not start", border_style="red"))
+            console.print(Panel(str(error), title=error_title, border_style="red"))
             Prompt.ask("Press Enter to return", default="")
             action = "switch"
         finally:
-            with console.status("[yellow]Stopping backend and freeing GPUs…[/yellow]", spinner="dots"):
+            with console.status(stopping_message, spinner="dots"):
                 runtime.cleanup()
         if action == "quit":
-            console.print("[green]Backend stopped. GPUs are free.[/green]")
+            console.print(stopped_message)
             return 0
+
+
+def run_dashboard(initial_frontend: str | None = None) -> int:
+    console = Console()
+    models = discover_models()
+    if not models:
+        console.print("[bold red]No GGUF models found.[/bold red]")
+        console.print(f"Expected models under {settings().model_root}")
+        return 2
+    selection = _apply_initial_frontend(
+        _initial_selection(models), initial_frontend
+    )
+    return _run_runtime_dashboard(
+        console,
+        models,
+        selection,
+        initial_frontend=initial_frontend,
+        runtime_factory=lambda current: Runtime(current.model, current.profile),
+        remember=save_selection,
+        allow_tune=True,
+        location=None,
+        library_context=None,
+        preparing_message="[bold magenta]Preparing GPUs…[/bold magenta]",
+        stopping_message="[yellow]Stopping backend and freeing GPUs…[/yellow]",
+        stopped_message="[green]Backend stopped. GPUs are free.[/green]",
+        error_title="Marathon could not start",
+    )
+
+
+def run_remote_dashboard(host: str, initial_frontend: str | None = None) -> int:
+    """Run Codex on this machine against a foreground GPU host over SSH."""
+
+    console = Console()
+    try:
+        with console.status(
+            f"[bold magenta]Reading models from {host}…[/bold magenta]",
+            spinner="dots",
+        ):
+            remote = fetch_remote_catalog(host)
+    except Exception as error:
+        console.print(Panel(str(error), title="Remote Marathon unavailable", border_style="red"))
+        return 2
+    models = remote.models
+    if not models:
+        console.print(f"[bold red]No GGUF models found on {host}.[/bold red]")
+        return 2
+    selection = _apply_initial_frontend(
+        _initial_selection(models, load_remote_selection(host)), initial_frontend
+    )
+    return _run_runtime_dashboard(
+        console,
+        models,
+        selection,
+        initial_frontend=initial_frontend,
+        runtime_factory=lambda current: RemoteRuntime(
+            host, remote.router_port, current.model, current.profile
+        ),
+        remember=lambda model, profile, frontend: save_remote_selection(
+            host, model, profile, frontend
+        ),
+        allow_tune=False,
+        location=f"Remote GPU host · {host}",
+        library_context=("Remote model library", host),
+        preparing_message=(
+            f"[bold magenta]Connecting to {host} and preparing GPUs…[/bold magenta]"
+        ),
+        stopping_message=(
+            f"[yellow]Stopping backend on {host} and freeing GPUs…[/yellow]"
+        ),
+        stopped_message=f"[green]Backend on {host} stopped. GPUs are free.[/green]",
+        error_title="Remote Marathon could not start",
+    )
 
 
 def run_dyno_dashboard() -> int:

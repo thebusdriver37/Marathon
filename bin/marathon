@@ -17,6 +17,7 @@ Commands:
   dashboard       Select a model and run Marathon (default)
   codex           Start Marathon and open Codex
   direct          Start Marathon and open clean direct chat
+  remote HOST     Run Codex locally against HOST's GPUs over SSH
   tune            Open the Dyno machine-specific profile tuner
   models          List centrally installed GGUF models
   status          Show whether the foreground runtime is active
@@ -51,6 +52,8 @@ Environment:
   MARATHON_BACKEND_METRICS_ENABLED  Poll llama.cpp /metrics during runs (default: 0)
   MARATHON_TELEMETRY_PROCESS_OUTPUT  Mirror backend/router operational lines (default: 1)
   MARATHON_ELECTRICITY_RATE_USD_KWH  Optional rate for estimated GPU energy cost
+  MARATHON_REMOTE_BIN       Marathon executable on the SSH host (default: PATH or ~/.local/bin/marathon)
+  MARATHON_SSH_BIN          OpenSSH client executable (default: ssh on PATH)
   QWEN36_27B_GGUF           Exact Qwen3.6 27B GGUF path
   QWEN36_35B_A3B_GGUF       Exact Qwen3.6 35B A3B GGUF path
   QWOPUS36_35B_A3B_GGUF     Exact Qwopus3.6 35B A3B v1 GGUF path
@@ -78,7 +81,7 @@ case "$cmd" in
   dashboard|chat)
     run_app dashboard "$@"
     ;;
-  codex|direct|tune|models|status|stop|report|compare)
+  codex|direct|remote|remote-host|tune|models|status|stop|report|compare)
     run_app "$cmd" "$@"
     ;;
   backend)

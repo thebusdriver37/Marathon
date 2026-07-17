@@ -547,6 +547,17 @@ class UiTests(unittest.TestCase):
         self.assertEqual(cold.count("tune"), 1)
         self.assertNotIn("tune", warm)
 
+    def test_remote_dashboard_does_not_offer_local_gpu_tuning(self) -> None:
+        model = fixture_model()
+        selection = Selection(model, catalog.find_profile(model, "balanced"), "codex")
+
+        remote_items = [
+            item.value
+            for item in _home_items(selection, warm=False, allow_tune=False)
+        ]
+
+        self.assertNotIn("tune", remote_items)
+
 
 if __name__ == "__main__":
     unittest.main()

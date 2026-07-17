@@ -16,7 +16,8 @@ from . import __version__
 from .catalog import discover_models, format_size, settings
 from .runtime import SESSION_FILE, request_stop
 from .telemetry import resolve_run, summarize_run
-from .ui import run_dashboard, run_dyno_dashboard
+from .remote import run_remote_host_command
+from .ui import run_dashboard, run_dyno_dashboard, run_remote_dashboard
 
 
 def _models() -> int:
@@ -229,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="marathon", description="One-command local AI runtime")
     parser.add_argument("--version", action="version", version=f"Marathon {__version__}")
     parser.add_argument(
-        "command", nargs="?", choices=("dashboard", "codex", "direct", "tune", "models", "status", "stop", "report", "compare"),
+        "command", nargs="?", choices=("dashboard", "codex", "direct", "remote", "remote-host", "tune", "models", "status", "stop", "report", "compare"),
         default="dashboard",
     )
     parser.add_argument("targets", nargs="*")
@@ -250,6 +251,13 @@ def main(argv: list[str] | None = None) -> int:
         return _report(args.targets[0] if args.targets else None)
     if args.command == "compare":
         return _compare(args.targets)
+    if args.command == "remote-host":
+        return run_remote_host_command(args.targets)
+    if args.command == "remote":
+        if len(args.targets) != 1:
+            Console().print("[bold red]Usage:[/bold red] marathon remote <ssh-host>")
+            return 2
+        return run_remote_dashboard(args.targets[0])
     if args.command == "tune":
         return run_dyno_dashboard()
     return run_dashboard(args.command if args.command in {"codex", "direct"} else None)
