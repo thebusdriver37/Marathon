@@ -16,10 +16,11 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, TextIO
 
-from .catalog import Model, Profile, ROOT_DIR, server_command, settings
+from .catalog import Backend, Model, Profile, ROOT_DIR, backend_for, server_command, settings
 from .telemetry import EventWriter, create_run_writer, redact_text, runs_dir
 
 
@@ -41,6 +42,15 @@ SLOT_ROOT = Path(
 SELECTION_FILE = CONFIG_DIR / "selection.json"
 SESSION_FILE = RUNTIME_DIR / "session.json"
 LOCK_FILE = RUNTIME_DIR / "runtime.lock"
+
+
+@dataclass(frozen=True)
+class BackendProcessSpec:
+    """One process owned by a foreground Marathon backend."""
+
+    name: str
+    command: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...] = ()
 
 
 def ensure_dirs() -> None:
@@ -91,6 +101,14 @@ def _loaded_model_context(payload: dict[str, object], model_alias: str) -> int |
             meta = item.get("meta")
             if isinstance(meta, dict):
                 context = meta.get("n_ctx")
+                if isinstance(context, int) and context > 0:
+                    return context
+            context = item.get("context_length")
+            if isinstance(context, int) and context > 0:
+                return context
+            provider = item.get("top_provider")
+            if isinstance(provider, dict):
+                context = provider.get("context_length")
                 if isinstance(context, int) and context > 0:
                     return context
     return None
@@ -228,6 +246,8 @@ class Runtime:
         self._context_window = profile.context
         self.llama: subprocess.Popen[str] | None = None
         self.router: subprocess.Popen[str] | None = None
+        self._backend: Backend | None = None
+        self._backend_processes: list[tuple[str, subprocess.Popen[str]]] = []
         self._logs: list[TextIO] = []
         self._log_threads: list[threading.Thread] = []
         self._recent_model_lines: deque[str] = deque(maxlen=120)
@@ -365,6 +385,102 @@ class Runtime:
             )
             raise RuntimeError(f"GPU compute processes are already active: {detail}")
 
+    def _backend_specs(self, backend: Backend, slot_path: Path) -> list[BackendProcessSpec]:
+        """Build the complete foreground process set for the selected backend."""
+
+        if backend.kind == "llama_cpp":
+            command = server_command(self.model, self.profile, backend)
+            command.extend(["--slot-save-path", str(slot_path)])
+            return [BackendProcessSpec("llama", tuple(command))]
+
+        if backend.kind != "ds4_distributed":
+            raise ValueError(f"unsupported backend kind: {backend.kind}")
+        if backend.worker is None:
+            raise ValueError(f"backend '{backend.id}' has no worker executable")
+
+        slices = backend.layer_slices
+        gpu_ids = backend.gpu_ids
+        configured_gpus = os.environ.get("MARATHON_DS4_GPUS")
+        if configured_gpus:
+            try:
+                gpu_ids = tuple(int(value.strip()) for value in configured_gpus.split(","))
+            except ValueError as error:
+                raise ValueError("MARATHON_DS4_GPUS must be a comma-separated list of GPU indexes") from error
+        if len(slices) < 2 or len(slices) != len(gpu_ids):
+            raise ValueError(
+                f"backend '{backend.id}' requires one GPU per layer slice; "
+                f"configured {len(gpu_ids)} GPUs and {len(slices)} slices"
+            )
+
+        configured_port = os.environ.get("MARATHON_DS4_CONTROL_PORT")
+        try:
+            control_port = (
+                int(configured_port)
+                if configured_port
+                else 20_000 + (os.getpid() % 10_000) * 4
+            )
+        except ValueError as error:
+            raise ValueError("MARATHON_DS4_CONTROL_PORT must be an integer") from error
+        if not 1 <= control_port <= 65_531:
+            raise ValueError("MARATHON_DS4_CONTROL_PORT must leave room for four consecutive ports")
+
+        common = ["--cuda", "--model", str(self.model.path), "--ctx", str(self.profile.context)]
+        defaults = {
+            key: os.environ.get(key, value)
+            for key, value in backend.environment
+        }
+        specs: list[BackendProcessSpec] = []
+        for index in range(1, len(slices)):
+            process_environment = {
+                **defaults,
+                "CUDA_VISIBLE_DEVICES": str(gpu_ids[index]),
+                "DS4_LOCK_FILE": str(RUNTIME_DIR / f"ds4-worker-{index}.lock"),
+            }
+            command = [
+                str(backend.worker),
+                *common,
+                "--role", "worker",
+                "--layers", slices[index],
+                "--listen", "127.0.0.1", str(control_port + index),
+                "--coordinator", "127.0.0.1", str(control_port),
+            ]
+            specs.append(
+                BackendProcessSpec(
+                    f"ds4-worker-{index}",
+                    tuple(command),
+                    tuple(process_environment.items()),
+                )
+            )
+
+        default_tokens = min(
+            self.profile.context,
+            max(1, int(os.environ.get("MARATHON_DS4_DEFAULT_TOKENS", "8192"))),
+        )
+        coordinator_environment = {
+            **defaults,
+            "CUDA_VISIBLE_DEVICES": str(gpu_ids[0]),
+            "DS4_LOCK_FILE": str(RUNTIME_DIR / "ds4-coordinator.lock"),
+        }
+        coordinator = [
+            str(backend.server),
+            *common,
+            "--tokens", str(default_tokens),
+            "--host", self.config.llama_host,
+            "--port", str(self.config.llama_port),
+            "--role", "coordinator",
+            "--layers", slices[0],
+            "--listen", "127.0.0.1", str(control_port),
+            *self.profile.extra_args,
+        ]
+        specs.append(
+            BackendProcessSpec(
+                "ds4-coordinator",
+                tuple(coordinator),
+                tuple(coordinator_environment.items()),
+            )
+        )
+        return specs
+
     def _open_log(self, path: Path) -> TextIO:
         handle = path.open("w", encoding="utf-8")
         self._logs.append(handle)
@@ -383,7 +499,7 @@ class Runtime:
                 legacy_log.write(line)
                 legacy_log.flush()
                 message = line.rstrip("\r\n")
-                if source == "llama" and message:
+                if source != "router" and message:
                     self._recent_model_lines.append(message)
                 if capture and message:
                     level = "error" if any(word in message.lower() for word in ("error", "failed", "xid")) else "info"
@@ -427,9 +543,11 @@ class Runtime:
         self._install_handlers()
         self.telemetry = create_run_writer(self.model.id)
         self._run_started_mono = time.monotonic()
-        llama_command = server_command(self.model, self.profile)
+        self._backend = backend_for(self.model)
         slot_path = SLOT_ROOT / self.model.alias
-        llama_command.extend(["--slot-save-path", str(slot_path)])
+        backend_specs = self._backend_specs(self._backend, slot_path)
+        backend_commands = [list(spec.command) for spec in backend_specs]
+        primary_command = backend_commands[-1]
         self.record(
             "run.started",
             {
@@ -458,17 +576,25 @@ class Runtime:
                     "parallel_tool_calls": self.profile.parallel_tool_calls,
                     "confidence": self.profile.confidence,
                 },
-                "llama_command": llama_command,
+                "backend": {
+                    "id": self._backend.id,
+                    "display_name": self._backend.display_name,
+                    "kind": self._backend.kind,
+                    "supports_slots": self._backend.supports_slots,
+                },
+                "backend_commands": backend_commands,
+                # Kept for compatibility with existing run-log readers.
+                "llama_command": primary_command,
                 "cwd": str(Path.cwd()),
                 "python": sys.version.split()[0],
                 "platform": sys.platform,
                 "kernel": os.uname().release if hasattr(os, "uname") else None,
                 "backend_binary": {
-                    "path": llama_command[0],
-                    "size_bytes": Path(llama_command[0]).stat().st_size
-                    if Path(llama_command[0]).exists() else None,
-                    "mtime_ns": Path(llama_command[0]).stat().st_mtime_ns
-                    if Path(llama_command[0]).exists() else None,
+                    "path": primary_command[0],
+                    "size_bytes": Path(primary_command[0]).stat().st_size
+                    if Path(primary_command[0]).exists() else None,
+                    "mtime_ns": Path(primary_command[0]).stat().st_mtime_ns
+                    if Path(primary_command[0]).exists() else None,
                 },
                 "trace_disk": {
                     "free_bytes": shutil.disk_usage(runs_dir()).free,
@@ -495,12 +621,18 @@ class Runtime:
         environment.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         environment.setdefault("CUDA_SCALE_LAUNCH_QUEUES", "4x")
         if progress:
-            progress("Starting llama.cpp")
+            progress(f"Starting {self._backend.display_name}")
         slot_path.mkdir(parents=True, exist_ok=True)
         load_started = time.monotonic()
-        self.llama = self._spawn(
-            llama_command, self._open_log(self.model_log), environment, "llama"
-        )
+        model_log = self._open_log(self.model_log)
+        for spec in backend_specs:
+            process_environment = environment.copy()
+            process_environment.update(dict(spec.environment))
+            process = self._spawn(
+                list(spec.command), model_log, process_environment, spec.name
+            )
+            self._backend_processes.append((spec.name, process))
+            self.llama = process
         self._write_session()
         self._wait_for_model(progress)
         self.record(
@@ -529,6 +661,13 @@ class Runtime:
                 "MARATHON_MODEL_TRUNCATION_LIMIT": str(self.truncation_limit),
                 "MARATHON_MODEL_PORT": str(self.config.llama_port),
                 "MARATHON_MODEL_TARGET": self.llama_url,
+                "MARATHON_BACKEND_MODEL_ID": (
+                    self._backend.model_alias or self.model.alias
+                ),
+                "MARATHON_BACKEND_SLOT_API": (
+                    "1" if self._backend.supports_slots else "0"
+                ),
+                "MARATHON_MODEL_SUPERVISED": "1",
                 "MARATHON_MODEL_PARALLEL_TOOL_CALLS": (
                     "1" if self.profile.parallel_tool_calls else "0"
                 ),
@@ -573,6 +712,11 @@ class Runtime:
             {
                 "startup_ms": (time.monotonic() - (self._run_started_mono or time.monotonic())) * 1000.0,
                 "context": self.context_window,
+                "backend": self._backend.id,
+                "backend_kind": self._backend.kind,
+                "backend_pids": {
+                    name: process.pid for name, process in self._backend_processes
+                },
                 "llama_pid": self.llama.pid if self.llama else None,
                 "router_pid": self.router.pid if self.router else None,
             },
@@ -763,13 +907,23 @@ class Runtime:
 
     def _wait_for_model(self, progress: Callable[[str], None] | None) -> None:
         deadline = time.monotonic() + self.config.health_timeout
+        expected_alias = (
+            self._backend.model_alias
+            if self._backend and self._backend.model_alias
+            else self.model.alias
+        )
         while time.monotonic() < deadline:
-            if self.llama and self.llama.poll() is not None:
-                raise RuntimeError(f"llama-server exited while loading; see {self.model_log}")
+            for name, process in self._backend_processes:
+                if process.poll() is not None:
+                    raise RuntimeError(
+                        f"{name} exited while loading; see {self.model_log}"
+                    )
+            if not self._backend_processes and self.llama and self.llama.poll() is not None:
+                raise RuntimeError(f"backend exited while loading; see {self.model_log}")
             try:
                 payload = _http_json(f"{self.llama_url}/v1/models")
-                loaded_context = _loaded_model_context(payload, self.model.alias)
-                if _model_is_loaded(payload, self.model.alias):
+                loaded_context = _loaded_model_context(payload, expected_alias)
+                if _model_is_loaded(payload, expected_alias):
                     if loaded_context is None:
                         try:
                             loaded_context = _props_context_window(
@@ -809,7 +963,12 @@ class Runtime:
     def latest_model_status(self) -> str:
         interesting = [
             line.strip() for line in list(self._recent_model_lines)[-80:]
-            if any(token in line.lower() for token in ("load", "cuda", "buffer", "graph", "slot"))
+            if any(
+                token in line.lower()
+                for token in (
+                    "load", "cuda", "buffer", "graph", "slot", "prepar", "connect", "listen"
+                )
+            )
         ]
         return interesting[-1][-120:] if interesting else "Loading model weights"
 
@@ -824,6 +983,10 @@ class Runtime:
         payload = {
             "schema": 1,
             "supervisor_pid": os.getpid(),
+            "backend": self._backend.id if self._backend else None,
+            "backend_pids": {
+                name: process.pid for name, process in self._backend_processes
+            },
             "llama_pid": self.llama.pid if self.llama else None,
             "router_pid": self.router.pid if self.router else None,
             "model": self.model.id,
@@ -845,6 +1008,12 @@ class Runtime:
             "profile_id": self.profile.id,
             "context": self.context_window,
             "router_url": f"{self.router_url}/v1",
+            "backend": self._backend.id if self._backend else None,
+            "backend_pids": {
+                name: process.pid
+                for name, process in self._backend_processes
+                if process.poll() is None
+            },
             "llama_pid": self.llama.pid if self.llama and self.llama.poll() is None else None,
             "router_pid": self.router.pid if self.router and self.router.poll() is None else None,
             "run_id": self.run_id,
@@ -867,8 +1036,13 @@ class Runtime:
         self._sample_stop.set()
         if self._sampler is not None:
             self._sampler.join(timeout=5)
-        for process in (self.router, self.llama):
-            self._terminate(process)
+        self._terminate(self.router, "router")
+        stopped: set[int] = set()
+        for name, process in reversed(self._backend_processes):
+            self._terminate(process, name)
+            stopped.add(id(process))
+        if self.llama is not None and id(self.llama) not in stopped:
+            self._terminate(self.llama, "llama")
         for thread in self._log_threads:
             thread.join(timeout=3)
         for handle in self._logs:
@@ -885,6 +1059,9 @@ class Runtime:
                 "duration_s": duration,
                 "router_returncode": self.router.poll() if self.router else None,
                 "llama_returncode": self.llama.poll() if self.llama else None,
+                "backend_returncodes": {
+                    name: process.poll() for name, process in self._backend_processes
+                },
                 "dropped_events": self.telemetry.dropped_events if self.telemetry else 0,
             },
         )
@@ -902,10 +1079,9 @@ class Runtime:
             self._lock = None
             self._owns_lock = False
 
-    def _terminate(self, process: subprocess.Popen[str] | None) -> None:
+    def _terminate(self, process: subprocess.Popen[str] | None, name: str) -> None:
         if process is None or process.poll() is not None:
             return
-        name = "router" if process is self.router else "llama"
         started = time.monotonic()
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)

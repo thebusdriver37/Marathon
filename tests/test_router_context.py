@@ -33,6 +33,24 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_custom_supervised_backend_can_use_native_alias_without_slots(self) -> None:
+        environment = {
+            "MARATHON_MODEL_PATH": "/tmp/model.gguf",
+            "MARATHON_MODEL_SLUG": "public-model-id",
+            "MARATHON_BACKEND_MODEL_ID": "deepseek-v4-flash",
+            "MARATHON_BACKEND_SLOT_API": "0",
+            "MARATHON_MODEL_SUPERVISED": "1",
+        }
+        with mock.patch.dict(router_module.os.environ, environment, clear=True):
+            profile = router_module._custom_model_profile(ROOT_DIR)
+
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertEqual(profile.slug, "public-model-id")
+        self.assertEqual(profile.alias, "deepseek-v4-flash")
+        self.assertFalse(profile.supports_slots)
+        self.assertTrue(profile.supervised)
+
     def test_catalog_advertises_full_dynamic_context_window(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)

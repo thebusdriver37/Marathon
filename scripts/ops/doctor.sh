@@ -130,12 +130,6 @@ else
   fail "Codex is not installed; run: marathon build-codex"
 fi
 
-if [[ -x "$LLAMACPP_BIN" ]]; then
-  pass "central llama-server exists: $LLAMACPP_BIN"
-else
-  fail "central llama-server missing: $LLAMACPP_BIN"
-fi
-
 if [[ -x "$ROOT_DIR/.marathon/venv/bin/python3" ]]; then
   if PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" -c 'import aiohttp, prompt_toolkit, rich, marathon_app' 2>/dev/null; then
     pass "private router/UI Python environment is ready"
@@ -179,6 +173,34 @@ else
   fail "no GGUF models discovered under $MODELS_DIR"
 fi
 
+backend_inventory="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" - <<'PY' 2>/dev/null || true
+from marathon_app.catalog import backends, discover_models
+
+configured = backends()
+for backend_id in sorted({model.family.backend for model in discover_models()}):
+    backend = configured.get(backend_id)
+    if backend is None:
+        print(f"{backend_id}||")
+    else:
+        print(f"{backend_id}|{backend.server}|{backend.worker or ''}")
+PY
+)"
+while IFS='|' read -r backend_id server worker; do
+  [[ -z "$backend_id" ]] && continue
+  if [[ -x "$server" ]]; then
+    pass "$backend_id server exists: $server"
+  else
+    fail "$backend_id server missing or not executable: ${server:-not configured}"
+  fi
+  if [[ -n "$worker" ]]; then
+    if [[ -x "$worker" ]]; then
+      pass "$backend_id worker exists: $worker"
+    else
+      fail "$backend_id worker missing or not executable: $worker"
+    fi
+  fi
+done <<<"$backend_inventory"
+
 router_url="http://$ROUTER_HOST:$ROUTER_PORT"
 health_json="$(curl -fsS --max-time 2 "$router_url/health" 2>/dev/null || true)"
 if [[ -n "$health_json" ]]; then
@@ -188,7 +210,7 @@ if [[ -n "$health_json" ]]; then
   if [[ "$backend_status" == "ok" ]]; then
     pass "backend healthy: ${current_model:-unknown}"
   elif curl -fsS --max-time 2 "http://127.0.0.1:$LLAMA_PORT/v1/models" >/dev/null 2>&1; then
-    pass "llama.cpp backend is ready and awaiting its first routed request"
+    pass "inference backend is ready and awaiting its first routed request"
   else
     fail "backend status is ${backend_status:-unknown}; run: marathon backend logs"
   fi

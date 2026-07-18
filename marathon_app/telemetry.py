@@ -35,6 +35,12 @@ _LLAMA_DECODE_TIMING = re.compile(
     r"(?:^|\|)\s*eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens",
     re.MULTILINE,
 )
+_DS4_PROMPT_TIMING = re.compile(
+    r"chat ctx=\d+\.\.\d+:(\d+).*prompt done\s+([\d.]+)s"
+)
+_DS4_FINISH_TIMING = re.compile(
+    r"chat ctx=\d+\.\.\d+:\d+\s+gen=(\d+).*finish=\S+\s+([\d.]+)s"
+)
 
 
 def _xdg_state_home() -> Path:
@@ -261,23 +267,38 @@ def summarize_run(path: Path, *, live: bool = False) -> dict[str, Any]:
         process_prompt_ms = 0.0
         process_generated_tokens = 0.0
         process_generated_ms = 0.0
+        ds4_prompt_seconds: float | None = None
         for event in events:
             if event.get("event") != "process.output":
                 continue
             data = event.get("data") or {}
-            if data.get("process") != "llama":
-                continue
+            process = data.get("process")
             message = data.get("message")
             if not isinstance(message, str):
                 continue
-            prompt_match = _LLAMA_PROMPT_TIMING.search(message)
-            if prompt_match:
-                process_prompt_ms += float(prompt_match.group(1))
-                process_prompt_tokens += int(prompt_match.group(2))
-            decode_match = _LLAMA_DECODE_TIMING.search(message)
-            if decode_match:
-                process_generated_ms += float(decode_match.group(1))
-                process_generated_tokens += int(decode_match.group(2))
+            if process == "llama":
+                prompt_match = _LLAMA_PROMPT_TIMING.search(message)
+                if prompt_match:
+                    process_prompt_ms += float(prompt_match.group(1))
+                    process_prompt_tokens += int(prompt_match.group(2))
+                decode_match = _LLAMA_DECODE_TIMING.search(message)
+                if decode_match:
+                    process_generated_ms += float(decode_match.group(1))
+                    process_generated_tokens += int(decode_match.group(2))
+            elif process == "ds4-coordinator":
+                prompt_match = _DS4_PROMPT_TIMING.search(message)
+                if prompt_match:
+                    ds4_prompt_seconds = float(prompt_match.group(2))
+                    process_prompt_tokens += int(prompt_match.group(1))
+                    process_prompt_ms += ds4_prompt_seconds * 1000.0
+                    continue
+                finish_match = _DS4_FINISH_TIMING.search(message)
+                if finish_match:
+                    total_seconds = float(finish_match.group(2))
+                    decode_seconds = max(0.0, total_seconds - (ds4_prompt_seconds or 0.0))
+                    process_generated_tokens += int(finish_match.group(1))
+                    process_generated_ms += decode_seconds * 1000.0
+                    ds4_prompt_seconds = None
         if prompt_ms == 0:
             prompt_ms, prompt_tokens = process_prompt_ms, process_prompt_tokens
         if generated_ms == 0:

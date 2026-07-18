@@ -1,14 +1,16 @@
 # Marathon
 
 Marathon is a one-command, terminal-first local AI runtime. It discovers GGUF
-models in the centralized AI directory, starts llama.cpp and Marathon's local
-API router in the foreground, then opens either Codex or a clean Direct Chat.
+models in the centralized AI directory, starts the model's configured local
+backend and Marathon's API router in the foreground, then opens either Codex or
+a clean Direct Chat. Shipped backends currently include llama.cpp and the
+four-GPU DwarfStar pipeline used by DeepSeek V4 Flash.
 
 Planned work that is intentionally not current behavior is tracked in
 [`docs/FUTURE_UPDATES.md`](docs/FUTURE_UPDATES.md).
 
 The process showing the Marathon dashboard owns the backend. Exiting Marathon
-stops its router and llama.cpp process groups and frees the GPUs. This lifecycle
+stops its router and every backend process group and frees the GPUs. This lifecycle
 works through an ordinary SSH shell; no exposed daemon or web UI is required.
 Marathon also has a native remote-client mode: Codex and its tools run on a
 client machine while inference runs on a Linux GPU host through an SSH tunnel.
@@ -47,7 +49,7 @@ marathon  →  Enter  →  model loads  →  Codex
 ## Native Mac client with Linux GPUs
 
 Install the same Marathon checkout on the Mac and Linux GPU host. The Linux
-host needs the models, llama.cpp, and Marathon's normal backend setup. The Mac
+host needs the models and Marathon's configured inference backends. The Mac
 needs Marathon's Python environment, Codex, and key-based SSH access, but it
 does not need local models or llama.cpp.
 
@@ -65,7 +67,7 @@ loopback-only SSH tunnel, and launches Codex on the Mac. Consequently:
 - Codex tools read and edit the Mac project, not the Linux filesystem.
 - Mac-global skills, plugins, configuration, and local/repository `AGENTS.md`
   discovery work normally because the Codex process is local.
-- llama.cpp, the router, GPU telemetry, and models remain on Linux.
+- Inference workers, the router, GPU telemetry, and models remain on Linux.
 - Exiting Codex returns to the Mac dashboard with the remote model warm.
 - Quitting Marathon, losing SSH, or closing the client connection stops the
   Linux supervisor and frees its GPUs.
@@ -101,20 +103,23 @@ selectable profiles are defined in `config/runtime_catalog.toml`.
 MARATHON_AI_ROOT=/mnt/local-ai marathon       # move the complete hierarchy
 MARATHON_MODELS_DIR=/mnt/models marathon      # override only GGUF discovery
 LLAMACPP_BIN=/opt/llama.cpp/llama-server marathon
+MARATHON_BACKEND_DS4_DISTRIBUTED=/opt/ds4/ds4-server \
+MARATHON_BACKEND_DS4_DISTRIBUTED_WORKER=/opt/ds4/ds4 marathon
 ```
 
 Specific overrides take precedence over `MARATHON_AI_ROOT`; relative paths in
 the runtime catalog are resolved beneath the effective AI root.
 
-Profiles may set `gpu_layers = "auto"` and omit `tensor_split` to let modern
-llama.cpp builds balance tensors against the VRAM available at launch. DeepSeek
-V4 Flash uses this adaptive placement so a fitting quant can remain fully on
-the GPUs while a temporarily constrained system can still fail gracefully or
-fall back to hybrid placement. Models with established fixed layouts retain
-explicit tensor splits. Profiles can also set `flash_attention = "on"`, `"off"`,
-or `"auto"`; omitted values retain the compatible `"on"` default. DeepSeek V4
-uses `"off"` because that kernel path is substantially faster on the tested
-four-Ampere-GPU system.
+llama.cpp profiles may use automatic placement or explicit tensor splits.
+DeepSeek V4 Flash instead uses DwarfStar's distributed pipeline: one contiguous
+layer slice per GPU, three workers, and one HTTP coordinator. The verified 64K
+profile pipelines 1,024-token prefill chunks with a four-chunk window. Marathon
+supervises all four processes as one foreground backend and stops them together.
+The final worker returns its hidden state so the faster coordinator GPU can run
+the output head without keeping a duplicate output-head copy on the last GPU.
+`MARATHON_DS4_GPUS` overrides the catalog's `0,1,2,3` GPU mapping; the layer
+slices remain catalog data rather than model-name conditionals in application
+code.
 
 ## Commands
 
@@ -144,6 +149,10 @@ Dyno asks for one priority: Balanced, Fastest responses, Longest context,
 Quality / reliability, or Lowest power. It then runs three or four bounded
 candidate profiles against the selected model's shipped default and saves the
 Pareto-optimal passing result.
+
+Dyno currently tunes llama.cpp profiles only. Architecture-specific distributed
+backends such as DS4 use their verified shipped profile and do not show the Tune
+menu until backend-aware candidate generation is implemented.
 
 Dyno is deterministic infrastructure rather than an LLM judge. Every candidate
 must load its requested context and complete two fixed-seed server requests.
@@ -179,9 +188,10 @@ installed skills, plugins, session history, and normal global/repository/nested
 per-invocation overrides for its local provider, selected model, context window,
 and generated model catalog.
 
-The selected profile requests llama.cpp's context allocation, but Marathon does
-not assume that request became the loaded size. After startup it reads the
-backend's reported `n_ctx` and propagates that exact runtime value to the router,
+The selected profile requests the backend's context allocation, but Marathon
+does not assume that request became the loaded size. After startup it reads the
+backend's reported `n_ctx` or `context_length` and propagates that exact runtime
+value to the router,
 Codex model catalog, session status, compaction limit, and truncation policy.
 The same path therefore handles 64K, 128K, 256K, or another backend-supported
 window without a model-specific context constant in the application code.
@@ -202,11 +212,11 @@ reasoning or edit turn from monopolizing the GPUs; large edits should be split
 across tool calls. `MARATHON_MAX_OUTPUT_TOKENS` overrides the cap.
 Profiles whose backend supports a native thinking budget can set
 `tool_thinking_budget`. Marathon applies it only after Codex returns a tool
-result; initial user turns remain unrestricted. The DeepSeek 64K profile uses a
-1,024-token thinking cap so the backend cleanly ends a long thinking section
-and lets the model issue its next tool call instead of truncating the whole
-response. Set `MARATHON_ADAPTIVE_THINKING_BUDGET=0` to disable this behavior for
-an A/B test.
+result; initial user turns remain unrestricted. Set
+`MARATHON_ADAPTIVE_THINKING_BUDGET=0` to disable this behavior for an A/B test.
+The DS4 backend exposes high or disabled thinking rather than a fixed native
+token budget, so its shipped profile relies on the model-agnostic response cap
+and stalled-response recovery instead of advertising a budget it cannot honor.
 Profiles can separately advertise `parallel_tool_calls` after that capability
 has been verified for the model and chat template. It remains off by default;
 DeepSeek's raw API can emit concurrent calls to distinct tools, but a real
@@ -253,9 +263,9 @@ skills, memory, or Hermes harness. Use `/new` to clear the conversation and
 ## Per-run observability
 
 Every foreground backend launch creates one append-only JSONL flight recorder.
-The supervisor, router, Codex importer, Direct Chat, llama.cpp output capture,
-GPU sampler, host sampler, and llama.cpp `/metrics` sampler all append correlated
-events to that same file. A trace remains readable when Marathon or the machine
+The supervisor, router, Codex importer, Direct Chat, backend output capture,
+GPU sampler, host sampler, and optional backend `/metrics` sampler all append
+correlated events to that same file. A trace remains readable when Marathon or the machine
 stops unexpectedly; a missing `run.completed` event marks an interrupted run.
 
 The default trace is metadata-oriented. It records model/profile arguments,
@@ -275,7 +285,7 @@ marathon compare a82f31 b4c901  # side-by-side throughput/resource comparison
 ```
 
 `marathon report` also reads an open Codex rollout, so token usage, tool calls,
-tool failures, and llama.cpp throughput remain visible while the foreground
+tool failures, and backend throughput remain visible while the foreground
 session is still running. It reads on demand; it does not add a monitor process.
 
 No telemetry daemon or database runs in the background, and Marathon does not
@@ -283,8 +293,9 @@ automatically delete traces. Set `MARATHON_RUNS_DIR` to place them on another
 disk. Sampling defaults to two seconds; `MARATHON_TELEMETRY_INTERVAL=5` reduces
 sampling overhead. Backend `/metrics` polling is disabled by default because it
 can queue behind long inference requests; opt in with
-`MARATHON_BACKEND_METRICS_ENABLED=1`. Set `MARATHON_TELEMETRY_PROCESS_OUTPUT=0` to omit mirrored
-llama.cpp/router operational lines. Set `MARATHON_ELECTRICITY_RATE_USD_KWH` to
+`MARATHON_BACKEND_METRICS_ENABLED=1`. Set
+`MARATHON_TELEMETRY_PROCESS_OUTPUT=0` to omit mirrored backend/router
+operational lines. Set `MARATHON_ELECTRICITY_RATE_USD_KWH` to
 include an estimated GPU-energy cost in reports; this excludes CPU and PSU
 conversion losses and is therefore not a wall-power measurement.
 
@@ -296,8 +307,8 @@ rather than inventing a quality score.
 ## Diagnostics and Model Checks
 
 Use `marathon doctor` when setting up a new machine or debugging a failed run.
-It checks stock Codex, the centralized llama.cpp backend and models, Marathon's
-private Python environment, GPU visibility, ports, and optional SearXNG.
+It checks Codex, the backends required by installed models, centralized models,
+Marathon's private Python environment, GPU visibility, ports, and optional SearXNG.
 
 ## Prompt Cache Snapshots
 
@@ -306,6 +317,10 @@ conversations do not write large prompt snapshots to disk. Optional disk
 snapshots can preserve recent in-process branches, but each snapshot can be
 hundreds of megabytes at long context and adds synchronous I/O after a turn.
 They are therefore disabled by default.
+
+Backends without llama.cpp's slot API, including DS4, receive Marathon's full
+response lineage and manage their own live prefix cache. The router never sends
+llama.cpp-only slot fields or attempts disk slot snapshots for those backends.
 
 At router startup Marathon deletes stale slot snapshots, because the in-memory
 response lineage needed to use them does not survive a router restart. During

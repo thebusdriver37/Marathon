@@ -49,7 +49,7 @@ Environment:
   MARATHON_MODEL_CONTEXT    Custom model context window (default: 32768)
   MARATHON_RUNS_DIR         Per-run JSONL trace directory (default: ~/.local/state/marathon/runs)
   MARATHON_TELEMETRY_INTERVAL  GPU/metrics sample interval in seconds (default: 2)
-  MARATHON_BACKEND_METRICS_ENABLED  Poll llama.cpp /metrics during runs (default: 0)
+  MARATHON_BACKEND_METRICS_ENABLED  Poll backend /metrics when supported (default: 0)
   MARATHON_TELEMETRY_PROCESS_OUTPUT  Mirror backend/router operational lines (default: 1)
   MARATHON_ELECTRICITY_RATE_USD_KWH  Optional rate for estimated GPU energy cost
   MARATHON_REMOTE_BIN       Marathon executable on the SSH host (default: PATH or ~/.local/bin/marathon)
@@ -59,6 +59,8 @@ Environment:
   QWOPUS36_35B_A3B_GGUF     Exact Qwopus3.6 35B A3B v1 GGUF path
   GEMMA4_26B_A4B_GGUF       Exact Gemma 4 26B A4B IT GGUF path
   LLAMACPP_BIN              Exact llama-server binary path
+  MARATHON_DS4_GPUS         DS4 pipeline GPU indexes (default: 0,1,2,3)
+  MARATHON_DS4_CONTROL_PORT Override DS4's loopback routing-key base
 USAGE
 }
 

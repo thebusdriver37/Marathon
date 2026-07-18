@@ -73,45 +73,29 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(command[command.index("--tensor-split") + 1], "1,1,1,1")
         self.assertEqual(command[command.index("--flash-attn") + 1], "on")
 
-    def test_deepseek_profiles_allow_backend_auto_fit(self) -> None:
+    def test_deepseek_profiles_use_ds4_pipeline_chunks(self) -> None:
         model = fixture_model("deepseek-v4-flash")
-        profile = catalog.find_profile(model, "safe", "direct")
-        backend = catalog.Backend("test", "Test backend", Path("/bin/true"))
-
-        command = catalog.server_command(model, profile, backend)
-
-        self.assertEqual(command[command.index("--n-gpu-layers") + 1], "auto")
-        self.assertNotIn("--tensor-split", command)
-
-    def test_deepseek_profiles_use_fast_checkpointed_context_cache(self) -> None:
-        model = fixture_model("deepseek-v4-flash")
-        backend = catalog.Backend("test", "Test backend", Path("/bin/true"))
-
-        for profile_id, frontend in (("safe", "direct"), ("long-64k", "codex")):
-            with self.subTest(profile=profile_id):
-                profile = catalog.find_profile(model, profile_id, frontend)
-                command = catalog.server_command(model, profile, backend)
-                self.assertNotIn("--ctx-checkpoints", command)
-                self.assertNotIn("--swa-full", command)
-                self.assertEqual(
-                    command[command.index("--cache-type-k") + 1], "f16"
-                )
-                self.assertEqual(
-                    command[command.index("--cache-type-v") + 1], "f16"
-                )
-                self.assertEqual(
-                    command[command.index("--flash-attn") + 1], "off"
-                )
-
+        self.assertEqual(model.family.backend, "ds4-distributed")
+        safe_profile = catalog.find_profile(model, "safe", "direct")
         long_profile = catalog.find_profile(model, "long-64k", "codex")
-        self.assertEqual(long_profile.tool_thinking_budget, 1_024)
+        self.assertEqual(
+            safe_profile.extra_args,
+            ("--dist-prefill-chunk", "512", "--dist-prefill-window", "4"),
+        )
+        self.assertEqual(
+            long_profile.extra_args,
+            ("--dist-prefill-chunk", "1024", "--dist-prefill-window", "4"),
+        )
+        self.assertIsNone(long_profile.tool_thinking_budget)
         self.assertFalse(long_profile.parallel_tool_calls)
 
     def test_portable_ai_root_resolves_catalog_paths(self) -> None:
         loaded = catalog.load_catalog()
         with mock.patch.dict(os.environ, {"HOME": "/tmp/marathon-home"}, clear=True):
             configured = catalog.settings(loaded)
-            upstream = catalog.backends(loaded)["upstream"]
+            resolved_backends = catalog.backends(loaded)
+            upstream = resolved_backends["upstream"]
+            ds4 = resolved_backends["ds4-distributed"]
 
         self.assertEqual(configured.ai_root, Path("/tmp/marathon-home/AI"))
         self.assertEqual(
@@ -120,6 +104,14 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(
             upstream.server,
             Path("/tmp/marathon-home/AI/backends/llama.cpp-current/build/bin/llama-server"),
+        )
+        self.assertEqual(
+            ds4.server,
+            Path("/tmp/marathon-home/AI/backends/ds4-tp/ds4-server"),
+        )
+        self.assertEqual(
+            ds4.worker,
+            Path("/tmp/marathon-home/AI/backends/ds4-tp/ds4"),
         )
 
     def test_ai_root_and_specific_model_override_precedence(self) -> None:
@@ -158,6 +150,50 @@ class RuntimeTests(unittest.TestCase):
         payload = {"default_generation_settings": {"n_ctx": 131_072}}
 
         self.assertEqual(_props_context_window(payload), 131_072)
+
+    def test_loaded_context_accepts_ds4_model_shape(self) -> None:
+        payload = {
+            "data": [
+                {"id": "deepseek-v4-flash", "context_length": 65_536}
+            ]
+        }
+
+        self.assertEqual(
+            _loaded_model_context(payload, "deepseek-v4-flash"), 65_536
+        )
+
+    def test_ds4_backend_builds_three_workers_and_one_coordinator(self) -> None:
+        model = fixture_model("deepseek-v4-flash")
+        profile = catalog.find_profile(model, "long-64k", "codex")
+        runtime = Runtime(model, profile)
+        backend = catalog.Backend(
+            "ds4",
+            "DS4",
+            Path("/bin/true"),
+            kind="ds4_distributed",
+            worker=Path("/bin/true"),
+            model_alias="deepseek-v4-flash",
+            layer_slices=("0:9", "10:20", "21:31", "32:output"),
+            gpu_ids=(0, 1, 2, 3),
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {"MARATHON_DS4_CONTROL_PORT": "19300"},
+            clear=False,
+        ):
+            specs = runtime._backend_specs(backend, Path("/tmp/slots"))
+
+        self.assertEqual(
+            [spec.name for spec in specs],
+            ["ds4-worker-1", "ds4-worker-2", "ds4-worker-3", "ds4-coordinator"],
+        )
+        self.assertEqual(
+            dict(specs[0].environment)["CUDA_VISIBLE_DEVICES"], "1"
+        )
+        coordinator = list(specs[-1].command)
+        self.assertIn("--dist-prefill-chunk", coordinator)
+        self.assertEqual(coordinator[coordinator.index("--listen") + 2], "19300")
 
     def test_model_readiness_accepts_llama_models_shape(self) -> None:
         payload = {"models": [{"name": "local-model"}]}
@@ -383,6 +419,33 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(summary["prompt_tps"], 200)
         self.assertEqual(summary["decode_tps"], 40)
 
+    def test_run_summary_reads_ds4_coordinator_timings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.jsonl"
+            writer = EventWriter(path, "run-test", "runtime")
+            writer.emit(
+                "run.started",
+                {"model": {"id": "deepseek"}, "profile": {"id": "long"}},
+            )
+            writer.emit(
+                "process.output",
+                {
+                    "process": "ds4-coordinator",
+                    "message": "ds4-server: chat ctx=0..1000:1000 prompt done 5.000s",
+                },
+            )
+            writer.emit(
+                "process.output",
+                {
+                    "process": "ds4-coordinator",
+                    "message": "ds4-server: chat ctx=0..1000:1000 gen=100 finish=stop 10.000s",
+                },
+            )
+            summary = summarize_run(path)
+
+        self.assertEqual(summary["prompt_tps"], 200)
+        self.assertEqual(summary["decode_tps"], 20)
+
     def test_active_codex_session_reports_tool_failures_before_exit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -546,6 +609,14 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(cold.count("tune"), 1)
         self.assertNotIn("tune", warm)
+
+    def test_dyno_is_hidden_for_architecture_specific_backend(self) -> None:
+        model = fixture_model("deepseek-v4-flash")
+        selection = Selection(model, catalog.find_profile(model, "long-64k"), "codex")
+
+        items = [item.value for item in _home_items(selection, warm=False)]
+
+        self.assertNotIn("tune", items)
 
     def test_remote_dashboard_does_not_offer_local_gpu_tuning(self) -> None:
         model = fixture_model()

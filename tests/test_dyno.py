@@ -67,7 +67,7 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(sanitized.cache_k, "f16")
         self.assertEqual(sanitized.cache_v, "f16")
         self.assertEqual(sanitized.flash_attention, "off")
-        self.assertEqual(sanitized.tool_thinking_budget, 1_024)
+        self.assertIsNone(sanitized.tool_thinking_budget)
         self.assertIn("--poll", sanitized.extra_args)
 
     def test_context_objective_scales_context_without_unbounded_search(self) -> None:

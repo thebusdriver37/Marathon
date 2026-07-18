@@ -857,6 +857,12 @@ def run_tuning(
 ) -> TuningSummary:
     if objective not in OBJECTIVES:
         raise ValueError(f"unknown Dyno objective: {objective}")
+    backend = backend_for(model)
+    if backend.kind != "llama_cpp":
+        raise ValueError(
+            f"Dyno does not tune {backend.display_name} yet; use the model's "
+            "verified Marathon profile"
+        )
     try:
         from .runtime import _gpu_processes
 

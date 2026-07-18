@@ -1,4 +1,4 @@
-"""Model discovery and llama.cpp launch-profile construction."""
+"""Model discovery and local-backend launch-profile construction."""
 
 from __future__ import annotations
 
@@ -33,6 +33,13 @@ class Backend:
     id: str
     display_name: str
     server: Path
+    kind: str = "llama_cpp"
+    worker: Path | None = None
+    model_alias: str = ""
+    layer_slices: tuple[str, ...] = ()
+    gpu_ids: tuple[int, ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
+    supports_slots: bool = True
 
 
 @dataclass(frozen=True)
@@ -128,7 +135,28 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
         if raw["id"] == "upstream":
             configured = os.environ.get("LLAMACPP_BIN", configured)
         server = _resolve_ai_path(configured or raw["server"], ai_root)
-        result[raw["id"]] = Backend(raw["id"], raw["display_name"], server)
+        worker_value = raw.get("worker")
+        worker_env = os.environ.get(f"{env_name}_WORKER")
+        worker = (
+            _resolve_ai_path(worker_env or worker_value, ai_root)
+            if worker_env or worker_value
+            else None
+        )
+        result[raw["id"]] = Backend(
+            id=raw["id"],
+            display_name=raw["display_name"],
+            server=server,
+            kind=str(raw.get("kind", "llama_cpp")),
+            worker=worker,
+            model_alias=str(raw.get("model_alias", "")),
+            layer_slices=tuple(str(value) for value in raw.get("layer_slices", [])),
+            gpu_ids=tuple(int(value) for value in raw.get("gpu_ids", [])),
+            environment=tuple(
+                (str(key), str(value))
+                for key, value in raw.get("environment", {}).items()
+            ),
+            supports_slots=bool(raw.get("supports_slots", True)),
+        )
     return result
 
 
@@ -295,13 +323,26 @@ def backend_for(model: Model) -> Backend:
     if backend is None:
         raise ValueError(f"backend '{model.family.backend}' is not configured")
     if not backend.server.is_file() or not os.access(backend.server, os.X_OK):
-        raise ValueError(f"llama-server is missing or not executable: {backend.server}")
+        raise ValueError(f"backend server is missing or not executable: {backend.server}")
+    if backend.kind == "ds4_distributed" and (
+        backend.worker is None
+        or not backend.worker.is_file()
+        or not os.access(backend.worker, os.X_OK)
+    ):
+        raise ValueError(
+            f"DS4 worker is missing or not executable: {backend.worker or '(not configured)'}"
+        )
     return backend
 
 
 def server_command(model: Model, profile: Profile, backend: Backend | None = None) -> list[str]:
     cfg = settings()
     selected = backend or backend_for(model)
+    if selected.kind != "llama_cpp":
+        raise ValueError(
+            f"backend '{selected.id}' uses {selected.kind}; it requires Marathon's "
+            "multi-process runtime instead of a llama-server command"
+        )
     command = [
         str(selected.server), "--model", str(model.path), "--alias", model.alias,
         "--host", cfg.llama_host, "--port", str(cfg.llama_port),

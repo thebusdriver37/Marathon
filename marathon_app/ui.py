@@ -20,6 +20,7 @@ from rich.table import Table
 from .catalog import (
     Model,
     Profile,
+    backends,
     discover_models,
     find_model,
     find_profile,
@@ -39,6 +40,11 @@ from .runtime import Runtime, load_selection, save_selection
 
 
 FRONTEND_NAMES = {"codex": "Codex", "direct": "Direct Chat"}
+
+
+def _dyno_supported(model: Model) -> bool:
+    backend = backends().get(model.family.backend)
+    return backend is not None and backend.kind == "llama_cpp"
 
 
 @dataclass
@@ -384,7 +390,7 @@ def _home_items(
             "change",
         )
     )
-    if not warm and allow_tune:
+    if not warm and allow_tune and _dyno_supported(selection.model):
         items.append(
             MenuItem(
                 "Tune / benchmark",

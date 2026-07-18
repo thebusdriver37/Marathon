@@ -18,17 +18,32 @@ id = "deepseek-v4"
 display_name = "DeepSeek V4 llama.cpp fork"
 server = "backends/llama.cpp-deepseek-v4/build/bin/llama-server"
 
+[[backends]]
+id = "ds4-distributed"
+display_name = "DwarfStar DS4 four-GPU pipeline"
+kind = "ds4_distributed"
+server = "backends/ds4-tp/ds4-server"
+worker = "backends/ds4-tp/ds4"
+model_alias = "deepseek-v4-flash"
+# The final worker returns its hidden state; the faster coordinator GPU runs
+# the output head. This is output-identical and avoids a duplicate head copy
+# on GPU 3.
+layer_slices = ["0:9", "10:20", "21:31", "32:42"]
+gpu_ids = [0, 1, 2, 3]
+supports_slots = false
+environment = { DS4_METAL_PREFILL_CHUNK = "1024", DS4_CUDA_NO_Q8_F16_CACHE = "1", DS4_CUDA_WEIGHT_PRELOAD_SPAN_MB = "256", DS4_CUDA_WEIGHT_ARENA_CHUNK_MB = "256" }
+
 [[families]]
 id = "deepseek-v4-flash"
 display_name = "DeepSeek V4 Flash"
 patterns = ["deepseek-v4-flash", "deepseek_v4_flash"]
-backend = "deepseek-v4"
+backend = "ds4-distributed"
 default_profile = "long-64k"
 
 [[families.profiles]]
 id = "safe"
 display_name = "Safe 8K"
-description = "Conservative experimental-backend baseline for direct chat."
+description = "Low-context DS4 four-GPU profile for direct chat."
 context = 8192
 batch = 512
 ubatch = 128
@@ -38,14 +53,14 @@ split_mode = "layer"
 cache_k = "f16"
 cache_v = "f16"
 flash_attention = "off"
-extra_args = []
+extra_args = ["--dist-prefill-chunk", "512", "--dist-prefill-window", "4"]
 confidence = "benchmarked"
 frontends = ["direct"]
 
 [[families.profiles]]
 id = "long-64k"
 display_name = "Long 64K"
-description = "Four-GPU long-context profile; requires stability validation."
+description = "Verified DS4 four-GPU profile for Codex and long conversations."
 context = 65536
 batch = 512
 ubatch = 128
@@ -55,9 +70,8 @@ split_mode = "layer"
 cache_k = "f16"
 cache_v = "f16"
 flash_attention = "off"
-tool_thinking_budget = 1024
-extra_args = []
-confidence = "experimental"
+extra_args = ["--dist-prefill-chunk", "1024", "--dist-prefill-window", "4"]
+confidence = "verified"
 frontends = ["codex", "direct"]
 
 [[families]]

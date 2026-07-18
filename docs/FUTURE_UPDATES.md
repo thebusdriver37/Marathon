@@ -12,8 +12,8 @@ The inspection pass should read metadata from the first GGUF shard and:
 
 - identify architecture, quantization, trained context, layer count, dense or
   MoE layout, chat template, and shard completeness;
-- select a compatible llama.cpp backend and reject unsupported architectures
-  with a useful explanation;
+- select a compatible generic or architecture-specific backend and reject
+  unsupported architectures with a useful explanation;
 - derive conservative context, batch, micro-batch, KV-cache, and GPU-placement
   defaults from the model metadata and detected machine resources;
 - validate that the requested frontend is compatible, including Codex context

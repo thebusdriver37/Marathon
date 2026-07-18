@@ -159,6 +159,8 @@ class ModelProfile:
     auto_compact_token_limit: int
     truncation_limit: int
     supports_parallel_tool_calls: bool = False
+    supports_slots: bool = True
+    supervised: bool = False
 
     @property
     def port(self) -> int:
@@ -481,7 +483,7 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
 
     return ModelProfile(
         slug=slug,
-        alias=slug,
+        alias=_safe_model_slug(_env_str("MARATHON_BACKEND_MODEL_ID", slug)),
         display_name=_env_str("MARATHON_MODEL_DISPLAY_NAME", slug),
         description=_env_str("MARATHON_MODEL_DESCRIPTION", "Custom GGUF model served by llama.cpp."),
         launcher=str(root / "scripts/launchers/server_custom.sh"),
@@ -493,6 +495,8 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         supports_parallel_tool_calls=_env_bool(
             "MARATHON_MODEL_PARALLEL_TOOL_CALLS", False
         ),
+        supports_slots=_env_bool("MARATHON_BACKEND_SLOT_API", True),
+        supervised=_env_bool("MARATHON_MODEL_SUPERVISED", False),
     )
 
 
@@ -1467,6 +1471,10 @@ class RouterState:
             if self.current_model != profile.slug:
                 self._stop_other_backends(profile.slug)
             if not self._profile_ready(profile):
+                if profile.supervised:
+                    raise RuntimeError(
+                        f"Marathon's supervised backend for {profile.slug} is unavailable"
+                    )
                 self._stop_profile(profile)
                 self.live_slot_by_model.pop(profile.slug, None)
                 self._start_profile(profile)
@@ -1511,6 +1519,8 @@ class RouterState:
             self._stop_profile(profile)
 
     def _stop_profile(self, profile: ModelProfile) -> None:
+        if profile.supervised:
+            return
         pid = self._port_owner_pid(profile.port)
         if pid is None:
             self.live_slot_by_model.pop(profile.slug, None)
@@ -1939,6 +1949,8 @@ class RouterState:
             return []
         results: list[dict[str, Any]] = []
         for profile in self.available_profiles.values():
+            if not profile.supports_slots:
+                continue
             result = await asyncio.to_thread(self._delete_slot_snapshots_sync, profile)
             if result.get("deleted_count"):
                 results.append({"profile_slug": profile.slug, **result})
@@ -2061,6 +2073,11 @@ class RouterState:
 
     async def backend_health(self, profile: ModelProfile | None = None) -> dict[str, Any]:
         target_profile = profile or self.resolve_model(self.current_model or self.default_model)
+        if target_profile.supervised:
+            return {
+                "status": "ok" if self._profile_ready(target_profile) else "error",
+                "supervised": True,
+            }
         return await self._request_json(target_profile, "GET", "/health")
 
     def mint_response_id(self, kind: str = "resp") -> str:
@@ -2583,6 +2600,7 @@ class RouterState:
 
         delta_only_restore = (
             self.experimental_delta_only
+            and profile.supports_slots
             and parent_snapshot is not None
             and scaffold_matches
             and generate is not False
@@ -2594,8 +2612,12 @@ class RouterState:
         if delta_only_restore:
             forward_request.pop("instructions", None)
             forward_request["tools"] = []
-        forward_request["id_slot"] = self.slot_id
-        forward_request["cache_prompt"] = True
+        if profile.supports_slots:
+            forward_request["id_slot"] = self.slot_id
+            forward_request["cache_prompt"] = True
+        else:
+            forward_request.pop("id_slot", None)
+            forward_request.pop("cache_prompt", None)
         forward_request["stream"] = False
         output_limit = _max_output_tokens(profile)
         requested_output_limit = forward_request.get("max_output_tokens")
@@ -2718,7 +2740,8 @@ class RouterState:
                 and self.live_slot_by_model.get(profile.slug) == previous_response_id
             )
             live_reconnect_root = (
-                parent_snapshot is None
+                profile.supports_slots
+                and parent_snapshot is None
                 and _can_reuse_reconnect_root(
                     profile.slug,
                     prompt_cache_key,
@@ -2726,7 +2749,15 @@ class RouterState:
                     self.live_prompt_cache_key_by_model,
                 )
             )
-            if live_reconnect_root:
+            if not profile.supports_slots:
+                slot_prepare_mode = "backend-prefix-cache"
+                restore_result = {
+                    "status": "skipped",
+                    "reason": "backend replays full lineage and manages its own prefix cache",
+                }
+                self.live_slot_by_model.pop(profile.slug, None)
+                self.live_prompt_cache_key_by_model.pop(profile.slug, None)
+            elif live_reconnect_root:
                 slot_prepare_mode = "reuse-live-reconnect-root"
                 restore_result = {
                     "status": "skipped",
@@ -2778,7 +2809,7 @@ class RouterState:
             save_error: str | None = None
             snapshot_saved = False
             save_start = time.perf_counter()
-            if self.slot_snapshots_enabled:
+            if self.slot_snapshots_enabled and profile.supports_slots:
                 snapshot_filename = f"{profile.slug}__{response_id}.bin"
                 snapshot_path = self._slot_save_dir(profile) / snapshot_filename
                 pre_prune_result = await self.prune_slot_snapshots(profile)
@@ -2796,16 +2827,22 @@ class RouterState:
                     if not snapshot_saved:
                         save_error = "slot save produced an empty or missing snapshot"
             else:
-                save_result = {"status": "skipped", "reason": "snapshots disabled"}
+                reason = (
+                    "snapshots disabled"
+                    if profile.supports_slots
+                    else "backend has no llama.cpp slot API"
+                )
+                save_result = {"status": "skipped", "reason": reason}
             slot_save_ms = (time.perf_counter() - save_start) * 1000.0
             post_prune_result: dict[str, Any] | None = None
-            if self.slot_snapshots_enabled:
+            if self.slot_snapshots_enabled and profile.supports_slots:
                 post_prune_result = await self.prune_slot_snapshots(
                     profile,
                     protected_filename=snapshot_filename if snapshot_saved else None,
                 )
-            self.live_slot_by_model[profile.slug] = response_id
-            if prompt_cache_key:
+            if profile.supports_slots:
+                self.live_slot_by_model[profile.slug] = response_id
+            if profile.supports_slots and prompt_cache_key:
                 self.live_prompt_cache_key_by_model[profile.slug] = prompt_cache_key
 
         output_items = all_output_items
