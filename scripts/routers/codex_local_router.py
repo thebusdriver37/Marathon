@@ -112,6 +112,7 @@ DEFAULT_STALLED_RESPONSE_RECOVERIES = 1
 DEFAULT_TOOL_PROTOCOL_RECOVERIES = 1
 DEFAULT_TOOL_ARGUMENT_MAX_CHARS = 24_576
 DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 90.0
+_BACKEND_STREAM_ACTIVITY_EVENT = "_marathon.backend_stream_activity"
 _BACKEND_ARGUMENTS_KEY = "_marathon_backend_arguments"
 
 StreamEventSink = Callable[[dict[str, Any]], Awaitable[bool]]
@@ -144,6 +145,10 @@ class SseEvent:
 
 class ToolProtocolError(RuntimeError):
     """The backend stopped making valid, bounded tool-call progress."""
+
+
+class BackendStreamIdleError(RuntimeError):
+    """The backend connection produced no wire activity before its deadline."""
 
 
 @dataclass(frozen=True)
@@ -356,6 +361,18 @@ def _web_turn_scope(profile: "ModelProfile", request: dict[str, Any]) -> str:
         "last_user": last_user,
     }
     return _sha256_text(_stable_json(seed))
+
+
+def _active_ws_request_scope(request: dict[str, Any]) -> str | None:
+    """Return the one in-flight generation scope owned by a Codex session."""
+
+    if request.get("generate") is False:
+        return None
+    prompt_cache_key = request.get("prompt_cache_key")
+    if not isinstance(prompt_cache_key, str) or not prompt_cache_key.strip():
+        return None
+    model = str(request.get("model") or "").strip()
+    return f"{model}\0{prompt_cache_key.strip()}"
 
 
 def _max_output_tokens(profile: "ModelProfile") -> int:
@@ -1267,6 +1284,7 @@ class RouterState:
         self.last_response_by_model: dict[str, str] = {}
         self.live_slot_by_model: dict[str, str] = {}
         self.live_prompt_cache_key_by_model: dict[str, str] = {}
+        self.active_ws_tasks: dict[str, asyncio.Task[Any]] = {}
         self.web_tool_cache_max_entries = max(
             1,
             _env_int(
@@ -1293,6 +1311,13 @@ class RouterState:
         self.web_fetch = WebFetchExecutor(self.web_fetch_settings)
 
     async def close(self) -> None:
+        active_tasks = list(self.active_ws_tasks.values())
+        self.active_ws_tasks.clear()
+        for task in active_tasks:
+            if not task.done():
+                task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
         if self.web_search is not None:
             await self.web_search.close()
             self.web_search = None
@@ -1302,6 +1327,25 @@ class RouterState:
         if self.http_client is not None:
             await self.http_client.close()
             self.http_client = None
+
+    def replace_active_ws_task(
+        self,
+        scope: str | None,
+        task: asyncio.Task[Any],
+    ) -> asyncio.Task[Any] | None:
+        if scope is None:
+            return None
+        previous = self.active_ws_tasks.get(scope)
+        self.active_ws_tasks[scope] = task
+
+        def remove_when_done(done: asyncio.Task[Any]) -> None:
+            if self.active_ws_tasks.get(scope) is done:
+                self.active_ws_tasks.pop(scope, None)
+
+        task.add_done_callback(remove_when_done)
+        if previous is task or previous is None or previous.done():
+            return None
+        return previous
 
     def model_catalog(self) -> dict[str, Any]:
         self._refresh_profiles()
@@ -1617,11 +1661,21 @@ class RouterState:
                 if frame is None:
                     break
                 event = _parse_sse_frame(frame)
-                if event is None or event.data == "[DONE]":
+                if event is None:
+                    # SSE comments are deliberately used as heartbeats while a
+                    # model is prefilling or reasoning silently.  They are not
+                    # forwarded to Codex, but they must reset the backend idle
+                    # watchdog or a healthy long turn gets retried as if it
+                    # were a malformed tool call.
+                    if frame.strip():
+                        yield {"type": _BACKEND_STREAM_ACTIVITY_EVENT}
+                    continue
+                if event.data == "[DONE]":
                     continue
                 try:
                     payload = json.loads(event.data)
                 except json.JSONDecodeError:
+                    yield {"type": _BACKEND_STREAM_ACTIVITY_EVENT}
                     continue
                 if isinstance(payload, dict):
                     yield payload
@@ -1723,11 +1777,14 @@ class RouterState:
                 except StopAsyncIteration:
                     break
                 except TimeoutError as error:
-                    raise ToolProtocolError(
-                        "the backend emitted no streaming progress before the idle timeout"
+                    raise BackendStreamIdleError(
+                        "the backend emitted no wire activity before the stream idle timeout"
                     ) from error
                 event_type = event.get("type")
                 if not isinstance(event_type, str):
+                    continue
+
+                if event_type == _BACKEND_STREAM_ACTIVITY_EVENT:
                     continue
 
                 if event_type in {"response.created", "response.in_progress"}:
@@ -3200,6 +3257,19 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                     event_sink=safe_send,
                 )
             )
+            request_scope = _active_ws_request_scope(payload)
+            previous_task = state.replace_active_ws_task(request_scope, result_task)
+            if previous_task is not None:
+                state.telemetry.emit(
+                    "router.ws.request.superseded",
+                    {
+                        "scope": _sha256_text(request_scope or "")[:16],
+                        "response_id": preset_id,
+                    },
+                    level="warning",
+                )
+                previous_task.cancel()
+                await asyncio.gather(previous_task, return_exceptions=True)
             try:
                 client_connected = True
                 while True:

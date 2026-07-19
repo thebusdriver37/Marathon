@@ -355,6 +355,80 @@ class RouterContextTests(unittest.TestCase):
             )
         )
 
+    def test_ws_scope_supersedes_only_the_same_generating_session(self) -> None:
+        request = {
+            "model": "model-a",
+            "prompt_cache_key": "session-a",
+        }
+        self.assertEqual(
+            router_module._active_ws_request_scope(request),
+            "model-a\0session-a",
+        )
+        self.assertIsNone(
+            router_module._active_ws_request_scope({**request, "generate": False})
+        )
+        self.assertIsNone(router_module._active_ws_request_scope({"model": "model-a"}))
+
+        async def scenario() -> None:
+            state = object.__new__(router_module.RouterState)
+            state.active_ws_tasks = {}
+            blocker = asyncio.Event()
+            first = asyncio.create_task(blocker.wait())
+            second = asyncio.create_task(asyncio.sleep(0))
+            scope = router_module._active_ws_request_scope(request)
+            self.assertIsNone(state.replace_active_ws_task(scope, first))
+            self.assertIs(state.replace_active_ws_task(scope, second), first)
+            first.cancel()
+            await asyncio.gather(first, second, return_exceptions=True)
+            await asyncio.sleep(0)
+            self.assertEqual(state.active_ws_tasks, {})
+
+        asyncio.run(scenario())
+
+    def test_sse_comments_count_as_backend_stream_activity(self) -> None:
+        class Content:
+            async def iter_chunked(self, _size: int):
+                yield b": decode\n\n"
+                yield b'data: {"type":"response.created"}\n\n'
+
+        async def collect() -> list[dict[str, object]]:
+            state = object.__new__(router_module.RouterState)
+            response = SimpleNamespace(content=Content())
+            return [event async for event in state._iter_sse_json(response)]
+
+        events = asyncio.run(collect())
+        self.assertEqual(
+            events[0]["type"], router_module._BACKEND_STREAM_ACTIVITY_EVENT
+        )
+        self.assertEqual(events[1]["type"], "response.created")
+
+    def test_stream_idle_is_not_retried_as_a_tool_protocol_error(self) -> None:
+        profile = fixture_profile(65_536)
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        state._request_responses_stream = mock.AsyncMock(
+            side_effect=router_module.BackendStreamIdleError("idle")
+        )
+
+        async def sink(_event: dict[str, object]) -> bool:
+            return True
+
+        with self.assertRaises(router_module.BackendStreamIdleError):
+            asyncio.run(
+                state._run_responses_loop(
+                    profile=profile,
+                    forward_request={
+                        "input": [],
+                        "tools": [{"type": "function", "name": "exec_command"}],
+                    },
+                    web_search_enabled=False,
+                    event_sink=sink,
+                )
+            )
+        self.assertEqual(state._request_responses_stream.await_count, 1)
+        state.telemetry.emit.assert_not_called()
+
     def test_output_budget_scales_and_is_profile_overrideable(self) -> None:
         self.assertEqual(router_module._max_output_tokens(fixture_profile(32_768)), 4_096)
         self.assertEqual(router_module._max_output_tokens(fixture_profile(65_536)), 8_192)
