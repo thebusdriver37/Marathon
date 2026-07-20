@@ -3,8 +3,9 @@
 Marathon is a one-command, terminal-first local AI runtime. It discovers GGUF
 models in the centralized AI directory, starts the model's configured local
 backend and Marathon's API router in the foreground, then opens either Codex or
-a clean Direct Chat. Shipped backends currently include llama.cpp and the
-four-GPU DwarfStar pipeline used by DeepSeek V4 Flash.
+a clean Direct Chat. Shipped profiles currently cover upstream llama.cpp,
+DeepSeek V4's optimized long-context llama.cpp fork, and the legacy four-GPU
+DwarfStar pipeline.
 
 Planned work that is intentionally not current behavior is tracked in
 [`docs/FUTURE_UPDATES.md`](docs/FUTURE_UPDATES.md).
@@ -111,15 +112,46 @@ Specific overrides take precedence over `MARATHON_AI_ROOT`; relative paths in
 the runtime catalog are resolved beneath the effective AI root.
 
 llama.cpp profiles may use automatic placement or explicit tensor splits.
-DeepSeek V4 Flash instead uses DwarfStar's distributed pipeline: one contiguous
-layer slice per GPU, three workers, and one HTTP coordinator. The verified 64K
-profile pipelines 1,024-token prefill chunks with a four-chunk window. Marathon
-supervises all four processes as one foreground backend and stops them together.
-The final worker returns its hidden state so the faster coordinator GPU can run
-the output head without keeping a duplicate output-head copy on the last GPU.
-`MARATHON_DS4_GPUS` overrides the catalog's `0,1,2,3` GPU mapping; the layer
-slices remain catalog data rather than model-name conditionals in application
-code.
+DeepSeek V4 Flash defaults to **Stable 64K**, which uses the `ds4-longctx`
+branch of `alesha-pro/llama.cpp`. Its constant-shape, causal-indexer, and
+MoE-tile switches are catalog data rather than model-name conditionals in Marathon. The
+profile uses deterministic sampling, F16 KV, 4,096-token batches, and a
+`1,1,0.95,0.9` layer split.
+
+**Experimental MTP 64K** adds the fork's speculative-decoding path. It can
+raise decode throughput from roughly 24 to 30 tokens/second on this four-GPU
+rig. The former long-continuation crash was traced to `DSV4_SPARSE_FA`, which
+poisoned the base model logits before MTP exposed the invalid token index. The
+root cause was a stream-K bookkeeping mismatch: the sparse CUDA kernel processed
+the selected rows while its result combiner mapped the full KV width. The patched
+backend now schedules the selected rows consistently, both DeepSeek profiles
+enable sparse prompt attention, and the exact 40K/42K/43K regression sequence
+passes with MTP active. The profile remains experimental until it completes
+broader real Codex workloads.
+
+The optimized backend is intentionally stored outside the repository beneath
+the centralized AI root. Build it once on the Linux GPU host:
+
+```bash
+git clone --branch ds4-longctx https://github.com/alesha-pro/llama.cpp \
+  ~/AI/backends/llama.cpp-ds4-longctx
+cmake -S ~/AI/backends/llama.cpp-ds4-longctx \
+  -B ~/AI/backends/llama.cpp-ds4-longctx/build-cuda \
+  -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build ~/AI/backends/llama.cpp-ds4-longctx/build-cuda \
+  --config Release -j"$(nproc)"
+```
+
+If the machine has multiple CUDA toolkits, set `CUDACXX` to the intended
+`nvcc` before configuring. Place the matching
+`DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf` beside the main DeepSeek GGUF, or set
+`DSV4_MTP_GGUF` to its absolute path. `marathon doctor` reports a missing fork
+or sidecar before a normal run is attempted.
+
+**Legacy DS4 64K** remains available as a rollback profile. It uses one
+contiguous layer slice per GPU, three workers, and one HTTP coordinator.
+Marathon supervises all four processes as one foreground backend and stops them
+together. `MARATHON_DS4_GPUS` overrides its catalog `0,1,2,3` GPU mapping.
 
 ## Commands
 

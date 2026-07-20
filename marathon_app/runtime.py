@@ -20,7 +20,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, TextIO
 
-from .catalog import Backend, Model, Profile, ROOT_DIR, backend_for, server_command, settings
+from .catalog import (
+    Backend,
+    Model,
+    Profile,
+    ROOT_DIR,
+    backend_environment,
+    backend_for,
+    server_command,
+    settings,
+)
 from .telemetry import EventWriter, create_run_writer, redact_text, runs_dir
 
 
@@ -391,7 +400,12 @@ class Runtime:
         if backend.kind == "llama_cpp":
             command = server_command(self.model, self.profile, backend)
             command.extend(["--slot-save-path", str(slot_path)])
-            return [BackendProcessSpec("llama", tuple(command))]
+            environment = backend_environment(self.model, backend)
+            return [
+                BackendProcessSpec(
+                    "llama", tuple(command), tuple(environment.items())
+                )
+            ]
 
         if backend.kind != "ds4_distributed":
             raise ValueError(f"unsupported backend kind: {backend.kind}")
@@ -425,10 +439,7 @@ class Runtime:
             raise ValueError("MARATHON_DS4_CONTROL_PORT must leave room for four consecutive ports")
 
         common = ["--cuda", "--model", str(self.model.path), "--ctx", str(self.profile.context)]
-        defaults = {
-            key: os.environ.get(key, value)
-            for key, value in backend.environment
-        }
+        defaults = backend_environment(self.model, backend)
         specs: list[BackendProcessSpec] = []
         for index in range(1, len(slices)):
             process_environment = {
@@ -543,7 +554,7 @@ class Runtime:
         self._install_handlers()
         self.telemetry = create_run_writer(self.model.id)
         self._run_started_mono = time.monotonic()
-        self._backend = backend_for(self.model)
+        self._backend = backend_for(self.model, self.profile)
         slot_path = SLOT_ROOT / self.model.alias
         backend_specs = self._backend_specs(self._backend, slot_path)
         backend_commands = [list(spec.command) for spec in backend_specs]
@@ -574,6 +585,8 @@ class Runtime:
                     "flash_attention": self.profile.flash_attention,
                     "tool_thinking_budget": self.profile.tool_thinking_budget,
                     "parallel_tool_calls": self.profile.parallel_tool_calls,
+                    "backend": self.profile.backend,
+                    "temperature": self.profile.temperature,
                     "confidence": self.profile.confidence,
                 },
                 "backend": {
@@ -581,6 +594,9 @@ class Runtime:
                     "display_name": self._backend.display_name,
                     "kind": self._backend.kind,
                     "supports_slots": self._backend.supports_slots,
+                    "environment_keys": sorted(
+                        key for key, _value in self._backend.environment
+                    ),
                 },
                 "backend_commands": backend_commands,
                 # Kept for compatibility with existing run-log readers.
@@ -679,6 +695,10 @@ class Runtime:
         if self.profile.tool_thinking_budget is not None:
             router_env["MARATHON_MODEL_TOOL_THINKING_BUDGET_TOKENS"] = str(
                 self.profile.tool_thinking_budget
+            )
+        if self.profile.temperature is not None:
+            router_env["MARATHON_MODEL_TEMPERATURE"] = str(
+                self.profile.temperature
             )
         configured_python = os.environ.get("MARATHON_ROUTER_PYTHON")
         python = (

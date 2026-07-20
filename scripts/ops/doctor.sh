@@ -174,19 +174,43 @@ else
 fi
 
 backend_inventory="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" - <<'PY' 2>/dev/null || true
-from marathon_app.catalog import backends, discover_models
+from marathon_app.catalog import backend_environment, backends, discover_models
 
 configured = backends()
-for backend_id in sorted({model.family.backend for model in discover_models()}):
-    backend = configured.get(backend_id)
-    if backend is None:
-        print(f"{backend_id}||")
-    else:
-        print(f"{backend_id}|{backend.server}|{backend.worker or ''}")
+seen_backends = set()
+seen_files = set()
+for model in discover_models():
+    for profile in model.family.profiles:
+        backend_id = profile.backend or model.family.backend
+        backend = configured.get(backend_id)
+        if backend_id not in seen_backends:
+            seen_backends.add(backend_id)
+            if backend is None:
+                print(f"backend|{backend_id}||")
+            else:
+                print(f"backend|{backend_id}|{backend.server}|{backend.worker or ''}")
+        if backend is None:
+            continue
+        for key, value in backend_environment(model, backend).items():
+            if not key.endswith("_GGUF") or (key, value) in seen_files:
+                continue
+            seen_files.add((key, value))
+            print(f"file|{key}|{value}|")
 PY
 )"
-while IFS='|' read -r backend_id server worker; do
-  [[ -z "$backend_id" ]] && continue
+while IFS='|' read -r kind identity path extra; do
+  [[ -z "$kind" ]] && continue
+  if [[ "$kind" == "file" ]]; then
+    if [[ -f "$path" ]]; then
+      pass "$identity sidecar exists: $path"
+    else
+      fail "$identity sidecar missing: $path"
+    fi
+    continue
+  fi
+  backend_id="$identity"
+  server="$path"
+  worker="$extra"
   if [[ -x "$server" ]]; then
     pass "$backend_id server exists: $server"
   else

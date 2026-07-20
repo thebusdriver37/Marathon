@@ -19,6 +19,18 @@ display_name = "DeepSeek V4 llama.cpp fork"
 server = "backends/llama.cpp-deepseek-v4/build/bin/llama-server"
 
 [[backends]]
+id = "deepseek-v4-longctx"
+display_name = "DeepSeek V4 optimized long-context llama.cpp"
+server = "backends/llama.cpp-ds4-longctx/build-cuda/bin/llama-server"
+environment = { DSV4_CONSTANT_SHAPE = "1", DSV4_IDX_SKIP = "1", DSV4_MOE_TILE = "1", DSV4_SPARSE_FA = "1" }
+
+[[backends]]
+id = "deepseek-v4-longctx-mtp"
+display_name = "DeepSeek V4 optimized long-context llama.cpp + MTP"
+server = "backends/llama.cpp-ds4-longctx/build-cuda/bin/llama-server"
+environment = { DSV4_CONSTANT_SHAPE = "1", DSV4_IDX_SKIP = "1", DSV4_MOE_TILE = "1", DSV4_SPARSE_FA = "1", DSV4_MTP_SPEC = "1", DSV4_MTP_DEV = "CUDA3", DSV4_MTP_EMBD_DEV = "CUDA3", DSV4_MTP_GGUF = "{model_dir}/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf" }
+
+[[backends]]
 id = "ds4-distributed"
 display_name = "DwarfStar DS4 four-GPU pipeline"
 kind = "ds4_distributed"
@@ -59,8 +71,48 @@ frontends = ["direct"]
 
 [[families.profiles]]
 id = "long-64k"
-display_name = "Long 64K"
-description = "Verified DS4 four-GPU profile for Codex and long conversations."
+display_name = "Stable 64K"
+description = "Optimized four-GPU profile without experimental speculative decoding."
+context = 65536
+batch = 4096
+ubatch = 512
+parallel = 1
+gpu_layers = "999"
+split_mode = "layer"
+tensor_split = "1,1,0.95,0.9"
+cache_k = "f16"
+cache_v = "f16"
+flash_attention = "on"
+extra_args = ["--no-repack", "--fit", "off", "--reasoning", "on", "--reasoning-format", "deepseek", "--reasoning-budget", "2048"]
+confidence = "verified"
+frontends = ["codex", "direct"]
+backend = "deepseek-v4-longctx"
+temperature = 0.0
+
+[[families.profiles]]
+id = "experimental-mtp-64k"
+display_name = "Experimental MTP 64K"
+description = "Faster speculative decoding with corrected sparse prompt attention."
+context = 65536
+batch = 4096
+ubatch = 512
+parallel = 1
+gpu_layers = "999"
+split_mode = "layer"
+tensor_split = "1,1,0.95,0.9"
+cache_k = "f16"
+cache_v = "f16"
+flash_attention = "on"
+extra_args = ["--no-repack", "--fit", "off", "--spec-type", "dsv4-mtp", "--reasoning", "on", "--reasoning-format", "deepseek", "--reasoning-budget", "2048"]
+confidence = "experimental"
+frontends = ["codex", "direct"]
+backend = "deepseek-v4-longctx-mtp"
+temperature = 0.0
+
+[[families.profiles]]
+id = "legacy-ds4-64k"
+display_name = "Legacy DS4 64K"
+description = "Previous four-process DwarfStar pipeline retained as a rollback path."
 context = 65536
 batch = 512
 ubatch = 128
@@ -71,8 +123,9 @@ cache_k = "f16"
 cache_v = "f16"
 flash_attention = "off"
 extra_args = ["--dist-prefill-chunk", "1024", "--dist-prefill-window", "4"]
-confidence = "verified"
+confidence = "benchmarked"
 frontends = ["codex", "direct"]
+backend = "ds4-distributed"
 
 [[families]]
 id = "qwen3.6-27b"

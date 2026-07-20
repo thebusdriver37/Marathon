@@ -63,6 +63,8 @@ class Profile:
     frontends: tuple[str, ...]
     tool_thinking_budget: int | None = None
     parallel_tool_calls: bool = False
+    backend: str | None = None
+    temperature: float | None = None
 
     def supports(self, frontend: str) -> bool:
         return frontend in self.frontends
@@ -188,6 +190,12 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                     else None
                 ),
                 parallel_tool_calls=bool(item.get("parallel_tool_calls", False)),
+                backend=(str(item["backend"]) if item.get("backend") else None),
+                temperature=(
+                    float(item["temperature"])
+                    if item.get("temperature") is not None
+                    else None
+                ),
             )
             for item in raw.get("profiles", [])
         )
@@ -207,6 +215,12 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
 def _first_shard(path: Path) -> bool:
     match = re.search(r"-(\d{5})-of-(\d{5})\.gguf$", path.name, re.IGNORECASE)
     return not match or match.group(1) == "00001"
+
+
+def _model_sidecar(path: Path) -> bool:
+    """Keep helper weights such as DeepSeek MTP drafts out of the model picker."""
+
+    return bool(re.search(r"(?:^|[-_.])mtp(?:[-_.]|$)", path.stem, re.IGNORECASE))
 
 
 def _family_for(path: Path, known: tuple[Family, ...]) -> Family:
@@ -248,7 +262,7 @@ def discover_models(model_root: Path | None = None) -> list[Model]:
     for path in sorted(root.rglob("*.gguf")):
         if ".cache" in path.parts or path.name.lower().startswith("mmproj"):
             continue
-        if not _first_shard(path) or path.stat().st_size == 0:
+        if _model_sidecar(path) or not _first_shard(path) or path.stat().st_size == 0:
             continue
         family = _family_for(path, known)
         quant = _quant(path.name)
@@ -318,10 +332,11 @@ def find_profile(model: Model, profile_id: str | None, frontend: str | None = No
     )
 
 
-def backend_for(model: Model) -> Backend:
-    backend = backends().get(model.family.backend)
+def backend_for(model: Model, profile: Profile | None = None) -> Backend:
+    backend_id = profile.backend if profile and profile.backend else model.family.backend
+    backend = backends().get(backend_id)
     if backend is None:
-        raise ValueError(f"backend '{model.family.backend}' is not configured")
+        raise ValueError(f"backend '{backend_id}' is not configured")
     if not backend.server.is_file() or not os.access(backend.server, os.X_OK):
         raise ValueError(f"backend server is missing or not executable: {backend.server}")
     if backend.kind == "ds4_distributed" and (
@@ -332,12 +347,43 @@ def backend_for(model: Model) -> Backend:
         raise ValueError(
             f"DS4 worker is missing or not executable: {backend.worker or '(not configured)'}"
         )
+    for key, path in backend_files(model, backend).items():
+        if not path.is_file():
+            raise ValueError(f"backend file from {key} is missing: {path}")
     return backend
+
+
+def backend_environment(model: Model, backend: Backend) -> dict[str, str]:
+    """Expand portable catalog values, while preserving explicit user overrides."""
+
+    configured = settings()
+    placeholders = {
+        "{ai_root}": str(configured.ai_root),
+        "{model_dir}": str(model.path.parent),
+        "{model_path}": str(model.path),
+    }
+    result: dict[str, str] = {}
+    for key, default in backend.environment:
+        value = os.environ.get(key, default)
+        for placeholder, replacement in placeholders.items():
+            value = value.replace(placeholder, replacement)
+        result[key] = os.path.expanduser(value)
+    return result
+
+
+def backend_files(model: Model, backend: Backend) -> dict[str, Path]:
+    """Return catalog environment values that name required GGUF sidecars."""
+
+    return {
+        key: Path(value).expanduser()
+        for key, value in backend_environment(model, backend).items()
+        if key.endswith("_GGUF")
+    }
 
 
 def server_command(model: Model, profile: Profile, backend: Backend | None = None) -> list[str]:
     cfg = settings()
-    selected = backend or backend_for(model)
+    selected = backend or backend_for(model, profile)
     if selected.kind != "llama_cpp":
         raise ValueError(
             f"backend '{selected.id}' uses {selected.kind}; it requires Marathon's "
@@ -356,6 +402,8 @@ def server_command(model: Model, profile: Profile, backend: Backend | None = Non
         command.extend(["--main-gpu", str(profile.main_gpu)])
     elif profile.tensor_split:
         command.extend(["--tensor-split", profile.tensor_split])
+    if profile.temperature is not None:
+        command.extend(["--temp", str(profile.temperature)])
     command.extend(profile.extra_args)
     return command
 

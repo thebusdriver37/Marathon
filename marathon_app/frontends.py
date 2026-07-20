@@ -100,7 +100,11 @@ def _stream_chat(
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "temperature": 0.7,
+            "temperature": (
+                runtime.profile.temperature
+                if runtime.profile.temperature is not None
+                else 0.7
+            ),
         }
     ).encode("utf-8")
     request = urllib.request.Request(

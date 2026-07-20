@@ -49,6 +49,19 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(models[0].size_bytes, 24)
         self.assertEqual(models[0].quant, "Q2_K-XL")
 
+    def test_mtp_sidecar_is_not_offered_as_a_full_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "DeepSeek-V4-Flash-IQ2_XXS.gguf").write_bytes(b"model")
+            (root / "DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf").write_bytes(
+                b"draft"
+            )
+
+            models = catalog.discover_models(root)
+
+        self.assertEqual(len(models), 1)
+        self.assertNotIn("MTP", models[0].path.name)
+
     def test_qwen_quant_and_family_are_detected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -73,21 +86,75 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(command[command.index("--tensor-split") + 1], "1,1,1,1")
         self.assertEqual(command[command.index("--flash-attn") + 1], "on")
 
-    def test_deepseek_profiles_use_ds4_pipeline_chunks(self) -> None:
+    def test_deepseek_profiles_keep_optimized_and_legacy_paths_separate(self) -> None:
         model = fixture_model("deepseek-v4-flash")
         self.assertEqual(model.family.backend, "ds4-distributed")
         safe_profile = catalog.find_profile(model, "safe", "direct")
         long_profile = catalog.find_profile(model, "long-64k", "codex")
+        mtp_profile = catalog.find_profile(model, "experimental-mtp-64k", "codex")
+        legacy_profile = catalog.find_profile(model, "legacy-ds4-64k", "codex")
         self.assertEqual(
             safe_profile.extra_args,
             ("--dist-prefill-chunk", "512", "--dist-prefill-window", "4"),
         )
-        self.assertEqual(
-            long_profile.extra_args,
-            ("--dist-prefill-chunk", "1024", "--dist-prefill-window", "4"),
-        )
+        self.assertEqual(long_profile.backend, "deepseek-v4-longctx")
+        self.assertNotIn("dsv4-mtp", long_profile.extra_args)
+        self.assertEqual(long_profile.temperature, 0.0)
+        long_environment = dict(catalog.backends()["deepseek-v4-longctx"].environment)
+        mtp_environment = dict(catalog.backends()["deepseek-v4-longctx-mtp"].environment)
+        for environment in (long_environment, mtp_environment):
+            self.assertEqual(environment["DSV4_SPARSE_FA"], "1")
+            self.assertNotIn("DSV4_FA_UNION", environment)
+        self.assertEqual(mtp_environment["DSV4_MTP_DEV"], "CUDA3")
+        self.assertEqual(mtp_environment["DSV4_MTP_EMBD_DEV"], "CUDA3")
+        self.assertEqual(mtp_profile.backend, "deepseek-v4-longctx-mtp")
+        self.assertIn("dsv4-mtp", mtp_profile.extra_args)
+        self.assertEqual(legacy_profile.backend, "ds4-distributed")
+        self.assertIn("--dist-prefill-chunk", legacy_profile.extra_args)
         self.assertIsNone(long_profile.tool_thinking_budget)
         self.assertFalse(long_profile.parallel_tool_calls)
+
+    def test_profile_backend_selection_is_generic(self) -> None:
+        model = fixture_model("deepseek-v4-flash")
+        profile = catalog.find_profile(model, "experimental-mtp-64k", "codex")
+        selected = catalog.Backend("deepseek-v4-longctx-mtp", "MTP", Path("/bin/true"))
+        fallback = catalog.Backend("ds4-distributed", "DS4", Path("/bin/true"))
+        with mock.patch.object(
+            catalog,
+            "backends",
+            return_value={selected.id: selected, fallback.id: fallback},
+        ):
+            self.assertEqual(catalog.backend_for(model, profile), selected)
+            self.assertEqual(catalog.backend_for(model), fallback)
+
+    def test_backend_environment_expands_model_directory_and_user_override(self) -> None:
+        model = fixture_model("deepseek-v4-flash")
+        backend = catalog.Backend(
+            "test",
+            "Test",
+            Path("/bin/true"),
+            environment=(
+                ("DSV4_MTP_GGUF", "{model_dir}/mtp.gguf"),
+                ("DSV4_MOE_TILE", "1"),
+            ),
+        )
+        with mock.patch.dict(os.environ, {"DSV4_MOE_TILE": "0"}, clear=False):
+            environment = catalog.backend_environment(model, backend)
+        self.assertEqual(environment["DSV4_MTP_GGUF"], "/tmp/mtp.gguf")
+        self.assertEqual(environment["DSV4_MOE_TILE"], "0")
+
+    def test_missing_backend_sidecar_fails_before_server_launch(self) -> None:
+        model = fixture_model("deepseek-v4-flash")
+        profile = catalog.find_profile(model, "experimental-mtp-64k", "codex")
+        backend = catalog.Backend(
+            profile.backend or "test",
+            "Test",
+            Path("/bin/true"),
+            environment=(("DSV4_MTP_GGUF", "{model_dir}/missing-mtp.gguf"),),
+        )
+        with mock.patch.object(catalog, "backends", return_value={backend.id: backend}):
+            with self.assertRaisesRegex(ValueError, "DSV4_MTP_GGUF"):
+                catalog.backend_for(model, profile)
 
     def test_portable_ai_root_resolves_catalog_paths(self) -> None:
         loaded = catalog.load_catalog()
@@ -96,6 +163,7 @@ class CatalogTests(unittest.TestCase):
             resolved_backends = catalog.backends(loaded)
             upstream = resolved_backends["upstream"]
             ds4 = resolved_backends["ds4-distributed"]
+            longctx = resolved_backends["deepseek-v4-longctx-mtp"]
 
         self.assertEqual(configured.ai_root, Path("/tmp/marathon-home/AI"))
         self.assertEqual(
@@ -112,6 +180,13 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(
             ds4.worker,
             Path("/tmp/marathon-home/AI/backends/ds4-tp/ds4"),
+        )
+        self.assertEqual(
+            longctx.server,
+            Path(
+                "/tmp/marathon-home/AI/backends/llama.cpp-ds4-longctx/"
+                "build-cuda/bin/llama-server"
+            ),
         )
 
     def test_ai_root_and_specific_model_override_precedence(self) -> None:
@@ -164,7 +239,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_ds4_backend_builds_three_workers_and_one_coordinator(self) -> None:
         model = fixture_model("deepseek-v4-flash")
-        profile = catalog.find_profile(model, "long-64k", "codex")
+        profile = catalog.find_profile(model, "legacy-ds4-64k", "codex")
         runtime = Runtime(model, profile)
         backend = catalog.Backend(
             "ds4",
@@ -194,6 +269,24 @@ class RuntimeTests(unittest.TestCase):
         coordinator = list(specs[-1].command)
         self.assertIn("--dist-prefill-chunk", coordinator)
         self.assertEqual(coordinator[coordinator.index("--listen") + 2], "19300")
+
+    def test_llama_backend_receives_catalog_environment(self) -> None:
+        model = fixture_model("deepseek-v4-flash")
+        profile = catalog.find_profile(model, "long-64k", "codex")
+        runtime = Runtime(model, profile)
+        backend = catalog.Backend(
+            "test",
+            "Test",
+            Path("/bin/true"),
+            environment=(("DSV4_MTP_GGUF", "{model_dir}/mtp.gguf"),),
+        )
+
+        specs = runtime._backend_specs(backend, Path("/tmp/slots"))
+
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(
+            dict(specs[0].environment)["DSV4_MTP_GGUF"], "/tmp/mtp.gguf"
+        )
 
     def test_model_readiness_accepts_llama_models_shape(self) -> None:
         payload = {"models": [{"name": "local-model"}]}
@@ -342,6 +435,32 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual(answer, "hello")
         self.assertNotIn("tools", captured)
         self.assertNotIn("instructions", captured)
+        self.assertEqual(captured["temperature"], 0.7)
+
+    def test_direct_chat_uses_model_profile_temperature(self) -> None:
+        model = fixture_model("deepseek-v4-flash")
+        runtime = Runtime(model, catalog.find_profile(model, "long-64k", "direct"))
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def __iter__(self):
+                yield b"data: [DONE]\n"
+
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured.update(json.loads(request.data.decode("utf-8")))
+            return Response()
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            _stream_chat(runtime, [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(captured["temperature"], 0.0)
 
 
 class TelemetryTests(unittest.TestCase):

@@ -215,6 +215,13 @@ def _profile_from_dict(raw: dict[str, object]) -> Profile:
             if raw.get("tool_thinking_budget") is not None
             else None
         ),
+        parallel_tool_calls=bool(raw.get("parallel_tool_calls", False)),
+        backend=(str(raw["backend"]) if raw.get("backend") else None),
+        temperature=(
+            float(raw["temperature"])
+            if raw.get("temperature") is not None
+            else None
+        ),
     )
 
 

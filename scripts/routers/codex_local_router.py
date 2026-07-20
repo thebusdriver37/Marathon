@@ -160,6 +160,7 @@ class ModelProfile:
     supports_parallel_tool_calls: bool = False
     supports_slots: bool = True
     supervised: bool = False
+    temperature: float | None = None
 
     @property
     def port(self) -> int:
@@ -491,6 +492,12 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
     )
     truncation_limit = _env_int("MARATHON_MODEL_TRUNCATION_LIMIT", auto_compact_limit)
     port = _env_int("MARATHON_MODEL_PORT", 18095)
+    temperature_raw = os.getenv("MARATHON_MODEL_TEMPERATURE")
+    temperature = (
+        _env_float("MARATHON_MODEL_TEMPERATURE", 0.0)
+        if temperature_raw is not None and temperature_raw.strip()
+        else None
+    )
 
     return ModelProfile(
         slug=slug,
@@ -508,6 +515,7 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         ),
         supports_slots=_env_bool("MARATHON_BACKEND_SLOT_API", True),
         supervised=_env_bool("MARATHON_MODEL_SUPERVISED", False),
+        temperature=temperature,
     )
 
 
@@ -2554,6 +2562,8 @@ class RouterState:
             profile = await self.ensure_model_async(requested_model)
 
         request["model"] = profile.alias
+        if profile.temperature is not None:
+            request["temperature"] = profile.temperature
         request = normalize_responses_request(request)
         request["model"] = profile.alias
 
@@ -3064,6 +3074,8 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
     if data is not None:
         raw_snapshot = copy.deepcopy(data)
         data["model"] = profile.alias
+        if profile.temperature is not None:
+            data["temperature"] = profile.temperature
         if path == "/v1/responses":
             data = normalize_responses_request(data)
             if data.pop("_marathon_web_search_enabled", False):

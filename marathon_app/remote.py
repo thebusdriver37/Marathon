@@ -107,6 +107,12 @@ def _profile_from_payload(payload: dict[str, object]) -> Profile:
             else None
         ),
         parallel_tool_calls=bool(payload.get("parallel_tool_calls", False)),
+        backend=(str(payload["backend"]) if payload.get("backend") else None),
+        temperature=(
+            float(payload["temperature"])
+            if payload.get("temperature") is not None
+            else None
+        ),
     )
 
 

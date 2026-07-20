@@ -40,6 +40,7 @@ class RouterContextTests(unittest.TestCase):
             "MARATHON_BACKEND_MODEL_ID": "deepseek-v4-flash",
             "MARATHON_BACKEND_SLOT_API": "0",
             "MARATHON_MODEL_SUPERVISED": "1",
+            "MARATHON_MODEL_TEMPERATURE": "0",
         }
         with mock.patch.dict(router_module.os.environ, environment, clear=True):
             profile = router_module._custom_model_profile(ROOT_DIR)
@@ -50,6 +51,7 @@ class RouterContextTests(unittest.TestCase):
         self.assertEqual(profile.alias, "deepseek-v4-flash")
         self.assertFalse(profile.supports_slots)
         self.assertTrue(profile.supervised)
+        self.assertEqual(profile.temperature, 0.0)
 
     def test_catalog_advertises_full_dynamic_context_window(self) -> None:
         profile = fixture_profile()
