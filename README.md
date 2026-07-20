@@ -229,13 +229,13 @@ reporting a false-successful Codex turn. Set
 Tool calls also have a model-agnostic protocol guard: invalid patch JSON, exact
 repetition loops, or arguments over 24,576 characters are aborted and retried
 once with a smaller generation budget and instructions to split the edit. A
-separate 90-second transport watchdog measures wire activity, including SSE
-heartbeat comments during hidden reasoning. Genuine transport silence fails
-once; it is never fed back to the model as a fake tool-protocol recovery.
-Reconnects for the same Codex prompt-cache session supersede and cancel its old
-in-flight generation. `MARATHON_TOOL_ARGUMENT_MAX_CHARS`,
-`MARATHON_STREAM_IDLE_TIMEOUT_SECONDS`, and `MARATHON_TOOL_PROTOCOL_RECOVERIES`
-tune these independent bounds.
+supervised backend stream is allowed to remain quiet while a structured tool
+call is generated; Marathon sends Codex independent progress keepalives and an
+actual backend exit closes the stream immediately. This avoids cancel/retry and
+checkpoint-rewind loops on slower local models. Reconnects for the same Codex
+prompt-cache session still supersede a genuinely abandoned in-flight request.
+`MARATHON_TOOL_ARGUMENT_MAX_CHARS` and `MARATHON_TOOL_PROTOCOL_RECOVERIES` tune
+the protocol guard and its bounded recovery.
 The Marathon Codex patch removes stock Codex's fixed 12K display normalization,
 so the visible percentage is the backend-reported active tokens divided by that
 loaded window. `marathon build-codex` performs a release build in a temporary

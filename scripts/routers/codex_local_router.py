@@ -111,8 +111,6 @@ DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 DEFAULT_STALLED_RESPONSE_RECOVERIES = 1
 DEFAULT_TOOL_PROTOCOL_RECOVERIES = 1
 DEFAULT_TOOL_ARGUMENT_MAX_CHARS = 24_576
-DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 90.0
-_BACKEND_STREAM_ACTIVITY_EVENT = "_marathon.backend_stream_activity"
 _BACKEND_ARGUMENTS_KEY = "_marathon_backend_arguments"
 
 StreamEventSink = Callable[[dict[str, Any]], Awaitable[bool]]
@@ -145,10 +143,6 @@ class SseEvent:
 
 class ToolProtocolError(RuntimeError):
     """The backend stopped making valid, bounded tool-call progress."""
-
-
-class BackendStreamIdleError(RuntimeError):
-    """The backend connection produced no wire activity before its deadline."""
 
 
 @dataclass(frozen=True)
@@ -1266,13 +1260,6 @@ class RouterState:
             "MARATHON_SLOT_SNAPSHOTS_ENABLED",
             DEFAULT_SLOT_SNAPSHOTS_ENABLED,
         )
-        self.stream_idle_timeout_seconds = max(
-            5.0,
-            _env_float(
-                "MARATHON_STREAM_IDLE_TIMEOUT_SECONDS",
-                DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
-            ),
-        )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.trace_log_path = self.log_dir / "codex_local_router_trace.jsonl"
@@ -1662,20 +1649,12 @@ class RouterState:
                     break
                 event = _parse_sse_frame(frame)
                 if event is None:
-                    # SSE comments are deliberately used as heartbeats while a
-                    # model is prefilling or reasoning silently.  They are not
-                    # forwarded to Codex, but they must reset the backend idle
-                    # watchdog or a healthy long turn gets retried as if it
-                    # were a malformed tool call.
-                    if frame.strip():
-                        yield {"type": _BACKEND_STREAM_ACTIVITY_EVENT}
                     continue
                 if event.data == "[DONE]":
                     continue
                 try:
                     payload = json.loads(event.data)
                 except json.JSONDecodeError:
-                    yield {"type": _BACKEND_STREAM_ACTIVITY_EVENT}
                     continue
                 if isinstance(payload, dict):
                     yield payload
@@ -1763,28 +1742,15 @@ class RouterState:
                 text = await response.text()
                 raise RuntimeError(f"backend POST /v1/responses failed: {response.status} {text}")
 
-            events = self._iter_sse_json(response).__aiter__()
-            while True:
-                try:
-                    event = await asyncio.wait_for(
-                        anext(events),
-                        timeout=getattr(
-                            self,
-                            "stream_idle_timeout_seconds",
-                            DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
-                        ),
-                    )
-                except StopAsyncIteration:
-                    break
-                except TimeoutError as error:
-                    raise BackendStreamIdleError(
-                        "the backend emitted no wire activity before the stream idle timeout"
-                    ) from error
+            # llama.cpp can remain wire-silent while it builds one structured
+            # tool call. DeepSeek regularly needs more than 90 seconds here at
+            # long context even though the supervised process is healthy and
+            # decoding. Do not cancel that request: the websocket handler sends
+            # Codex independent response.in_progress keepalives, and an actual
+            # backend exit closes this stream immediately.
+            async for event in self._iter_sse_json(response):
                 event_type = event.get("type")
                 if not isinstance(event_type, str):
-                    continue
-
-                if event_type == _BACKEND_STREAM_ACTIVITY_EVENT:
                     continue
 
                 if event_type in {"response.created", "response.in_progress"}:

@@ -385,7 +385,7 @@ class RouterContextTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_sse_comments_count_as_backend_stream_activity(self) -> None:
+    def test_sse_comments_are_ignored(self) -> None:
         class Content:
             async def iter_chunked(self, _size: int):
                 yield b": decode\n\n"
@@ -397,37 +397,52 @@ class RouterContextTests(unittest.TestCase):
             return [event async for event in state._iter_sse_json(response)]
 
         events = asyncio.run(collect())
-        self.assertEqual(
-            events[0]["type"], router_module._BACKEND_STREAM_ACTIVITY_EVENT
-        )
-        self.assertEqual(events[1]["type"], "response.created")
+        self.assertEqual(events, [{"type": "response.created"}])
 
-    def test_stream_idle_is_not_retried_as_a_tool_protocol_error(self) -> None:
+    def test_slow_live_backend_stream_is_not_canceled(self) -> None:
         profile = fixture_profile(65_536)
+
+        class Content:
+            async def iter_chunked(self, _size: int):
+                await asyncio.sleep(0.02)
+                yield (
+                    b'data: {"type":"response.completed","response":'
+                    b'{"id":"resp_slow","usage":{"output_tokens":1}}}\n\n'
+                )
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Client:
+            def post(self, _url: str, *, json: dict[str, object]):
+                self.request = json
+                return Response()
+
         state = object.__new__(router_module.RouterState)
-        state.web_search_settings = SimpleNamespace(max_iterations=3)
-        state.telemetry = mock.Mock()
-        state._request_responses_stream = mock.AsyncMock(
-            side_effect=router_module.BackendStreamIdleError("idle")
-        )
+        state.http_client = Client()
+        # This was the old fatal watchdog value. Keeping it on this lightweight
+        # fixture makes the regression fail if that cancellation path returns.
+        state.stream_idle_timeout_seconds = 0.001
 
         async def sink(_event: dict[str, object]) -> bool:
             return True
 
-        with self.assertRaises(router_module.BackendStreamIdleError):
-            asyncio.run(
-                state._run_responses_loop(
-                    profile=profile,
-                    forward_request={
-                        "input": [],
-                        "tools": [{"type": "function", "name": "exec_command"}],
-                    },
-                    web_search_enabled=False,
-                    event_sink=sink,
-                )
+        response = asyncio.run(
+            state._request_responses_stream(
+                profile,
+                {"input": [], "tools": []},
+                event_sink=sink,
             )
-        self.assertEqual(state._request_responses_stream.await_count, 1)
-        state.telemetry.emit.assert_not_called()
+        )
+        self.assertEqual(response["id"], "resp_slow")
+        self.assertEqual(response["usage"]["output_tokens"], 1)
 
     def test_output_budget_scales_and_is_profile_overrideable(self) -> None:
         self.assertEqual(router_module._max_output_tokens(fixture_profile(32_768)), 4_096)
