@@ -145,6 +145,15 @@ class ToolProtocolError(RuntimeError):
     """The backend stopped making valid, bounded tool-call progress."""
 
 
+def _is_client_disconnect(error: Exception) -> bool:
+    """Return whether a downstream client closed an otherwise valid response."""
+
+    return isinstance(error, (ConnectionResetError, BrokenPipeError)) or str(error) in {
+        "Cannot write to closing transport",
+        "Cannot write to closing transport.",
+    }
+
+
 @dataclass(frozen=True)
 class ModelProfile:
     slug: str
@@ -3126,6 +3135,7 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
         headers["Content-Type"] = headers.get("Content-Type", "application/json")
 
     upstream_url = profile.target.rstrip("/") + path
+    response: web.StreamResponse | None = None
     try:
         async with state.http_client.request(
             request.method,
@@ -3160,6 +3170,19 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
             )
             return response
     except Exception as exc:
+        if _is_client_disconnect(exc):
+            state.telemetry.emit(
+                "router.http.client_disconnected",
+                {
+                    "path": path,
+                    "duration_ms": (time.perf_counter() - request_started) * 1000.0,
+                    "response_bytes": response_bytes if response is not None else 0,
+                    "message": str(exc),
+                },
+            )
+            # Headers may already be on the wire, so attempting to replace the
+            # response with a JSON error would only cause a second write error.
+            return response if response is not None else web.Response(status=499)
         state.telemetry.emit(
             "router.http.error",
             {

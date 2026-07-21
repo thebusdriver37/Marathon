@@ -33,6 +33,14 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_closed_client_transport_is_not_a_backend_error(self) -> None:
+        self.assertTrue(
+            router_module._is_client_disconnect(
+                ConnectionResetError("Cannot write to closing transport")
+            )
+        )
+        self.assertFalse(router_module._is_client_disconnect(RuntimeError("kernel failed")))
+
     def test_custom_supervised_backend_can_use_native_alias_without_slots(self) -> None:
         environment = {
             "MARATHON_MODEL_PATH": "/tmp/model.gguf",
