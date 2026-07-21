@@ -107,11 +107,14 @@ DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = True
 DEFAULT_SLOT_SNAPSHOTS_ENABLED = False
 DEFAULT_TOOL_OUTPUT_MAX_CHARS = 16_384
 DEFAULT_WEB_TOOL_CACHE_MAX_ENTRIES = 256
+DEFAULT_WEB_TURN_PROGRESS_MAX_ENTRIES = 64
+DEFAULT_WEB_TURN_PROGRESS_TTL_SECONDS = 3_600
 DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 DEFAULT_STALLED_RESPONSE_RECOVERIES = 1
 DEFAULT_TOOL_PROTOCOL_RECOVERIES = 1
 DEFAULT_TOOL_ARGUMENT_MAX_CHARS = 24_576
 _BACKEND_ARGUMENTS_KEY = "_marathon_backend_arguments"
+_WEB_REPLAYED_COMPLETION_KEY = "_marathon_web_replayed_completion"
 
 StreamEventSink = Callable[[dict[str, Any]], Awaitable[bool]]
 
@@ -195,6 +198,19 @@ class ResponseSnapshot:
     tools_hash: str
     prompt_cache_key: str
     created_at: float
+
+
+@dataclass
+class ManagedWebTurnProgress:
+    """Model-visible managed-web state that survives transport reconnects."""
+
+    request_suffix: list[dict[str, Any]]
+    cumulative_items: list[dict[str, Any]]
+    iterations: int
+    seen_signatures: set[str]
+    finalizing: bool
+    completed_response: dict[str, Any] | None
+    updated_at: float
 
 
 def _effective_instructions_for_request(
@@ -354,15 +370,24 @@ def _web_turn_scope(profile: "ModelProfile", request: dict[str, Any]) -> str:
 
     input_items = request.get("input")
     items = input_items if isinstance(input_items, list) else []
-    last_user: Any = None
-    for item in reversed(items):
-        if isinstance(item, dict) and item.get("role") == "user":
-            last_user = item
-            break
+    # Codex can replay partial assistant text after a broken stream. Excluding
+    # only those messages keeps a reconnect stable while preserving local tool
+    # calls/outputs, which must create a distinct generation scope.
+    stable_items = [
+        item
+        for item in items
+        if not (
+            isinstance(item, dict)
+            and item.get("type") == "message"
+            and item.get("role") == "assistant"
+        )
+    ]
     seed = {
         "model": profile.slug,
         "prompt_cache_key": request.get("prompt_cache_key"),
-        "last_user": last_user,
+        "input": stable_items,
+        "instructions": _sha256_text(str(request.get("instructions") or "")),
+        "tools": _sha256_text(_stable_json(request.get("tools") or [])),
     }
     return _sha256_text(_stable_json(seed))
 
@@ -1297,6 +1322,21 @@ class RouterState:
             ),
         )
         self.web_tool_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+        self.web_turn_progress_max_entries = max(
+            1,
+            _env_int(
+                "MARATHON_WEB_TURN_PROGRESS_MAX_ENTRIES",
+                DEFAULT_WEB_TURN_PROGRESS_MAX_ENTRIES,
+            ),
+        )
+        self.web_turn_progress_ttl_seconds = max(
+            1,
+            _env_int(
+                "MARATHON_WEB_TURN_PROGRESS_TTL_SECONDS",
+                DEFAULT_WEB_TURN_PROGRESS_TTL_SECONDS,
+            ),
+        )
+        self.web_turn_progress: OrderedDict[str, ManagedWebTurnProgress] = OrderedDict()
         self.http_client: ClientSession | None = None
         self.web_search_settings = WebSearchSettings.from_env()
         self.web_search: WebSearchExecutor | None = None
@@ -1350,6 +1390,57 @@ class RouterState:
         if previous is task or previous is None or previous.done():
             return None
         return previous
+
+    def _prune_web_turn_progress(self) -> None:
+        cache = getattr(self, "web_turn_progress", None)
+        if cache is None:
+            cache = OrderedDict()
+            self.web_turn_progress = cache
+        ttl = max(
+            1,
+            int(
+                getattr(
+                    self,
+                    "web_turn_progress_ttl_seconds",
+                    DEFAULT_WEB_TURN_PROGRESS_TTL_SECONDS,
+                )
+            ),
+        )
+        cutoff = time.time() - ttl
+        for scope in list(cache):
+            if cache[scope].updated_at < cutoff:
+                cache.pop(scope, None)
+        max_entries = max(
+            1,
+            int(
+                getattr(
+                    self,
+                    "web_turn_progress_max_entries",
+                    DEFAULT_WEB_TURN_PROGRESS_MAX_ENTRIES,
+                )
+            ),
+        )
+        while len(cache) > max_entries:
+            cache.popitem(last=False)
+
+    def load_web_turn_progress(self, scope: str) -> ManagedWebTurnProgress | None:
+        self._prune_web_turn_progress()
+        progress = self.web_turn_progress.get(scope)
+        if progress is None:
+            return None
+        self.web_turn_progress.move_to_end(scope)
+        return copy.deepcopy(progress)
+
+    def save_web_turn_progress(
+        self,
+        scope: str,
+        progress: ManagedWebTurnProgress,
+    ) -> None:
+        stored = copy.deepcopy(progress)
+        stored.updated_at = time.time()
+        self.web_turn_progress[scope] = stored
+        self.web_turn_progress.move_to_end(scope)
+        self._prune_web_turn_progress()
 
     def model_catalog(self) -> dict[str, Any]:
         self._refresh_profiles()
@@ -2362,10 +2453,13 @@ class RouterState:
         lineage), and the number of web_search iterations executed.
         """
 
-        request = forward_request
+        request = copy.deepcopy(forward_request)
         web_scope = _web_turn_scope(profile, forward_request)
         max_iters = max(1, self.web_search_settings.max_iterations)
         cumulative_items: list[dict[str, Any]] = []
+        request_suffix: list[dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+        finalizing = False
         last_response: dict[str, Any] = {}
         iterations = 0
         stalled_recoveries = 0
@@ -2384,6 +2478,61 @@ class RouterState:
                 DEFAULT_TOOL_PROTOCOL_RECOVERIES,
             ),
         )
+
+        def persist_progress(
+            *,
+            completed_response: dict[str, Any] | None = None,
+        ) -> None:
+            if not web_search_enabled:
+                return
+            self.save_web_turn_progress(
+                web_scope,
+                ManagedWebTurnProgress(
+                    request_suffix=copy.deepcopy(request_suffix),
+                    cumulative_items=copy.deepcopy(cumulative_items),
+                    iterations=iterations,
+                    seen_signatures=set(seen_signatures),
+                    finalizing=finalizing,
+                    completed_response=copy.deepcopy(completed_response),
+                    updated_at=time.time(),
+                ),
+            )
+
+        if web_search_enabled:
+            progress = self.load_web_turn_progress(web_scope)
+            if progress is not None:
+                request_suffix = copy.deepcopy(progress.request_suffix)
+                cumulative_items = copy.deepcopy(progress.cumulative_items)
+                iterations = progress.iterations
+                seen_signatures = set(progress.seen_signatures)
+                finalizing = progress.finalizing
+                request["input"] = list(request.get("input") or []) + copy.deepcopy(
+                    request_suffix
+                )
+                if finalizing:
+                    request["tools"] = _strip_managed_web_tools(request.get("tools"))
+                self.telemetry.emit(
+                    "router.web_turn.resumed",
+                    {
+                        "scope": web_scope[:16],
+                        "iterations": iterations,
+                        "restored_items": len(request_suffix),
+                        "finalizing": finalizing,
+                        "completed": progress.completed_response is not None,
+                    },
+                )
+                if progress.completed_response is not None:
+                    replayed = copy.deepcopy(progress.completed_response)
+                    replayed[_WEB_REPLAYED_COMPLETION_KEY] = True
+                    self.telemetry.emit(
+                        "router.web_turn.completion_replayed",
+                        {
+                            "scope": web_scope[:16],
+                            "iterations": iterations,
+                            "output_items": len(cumulative_items),
+                        },
+                    )
+                    return replayed, cumulative_items, iterations
 
         for _attempt in range(
             max_iters + max_stalled_recoveries + max_tool_protocol_recoveries + 2
@@ -2428,11 +2577,12 @@ class RouterState:
                     level="warning",
                 )
                 request = copy.deepcopy(request)
-                request["input"] = list(request.get("input") or []) + [
-                    _tool_protocol_recovery_message(reason)
-                ]
+                recovery_items = [_tool_protocol_recovery_message(reason)]
+                request["input"] = list(request.get("input") or []) + recovery_items
+                request_suffix.extend(copy.deepcopy(recovery_items))
                 request["tool_choice"] = "required"
                 request["max_output_tokens"] = min(attempt_output_limit, 4_096)
+                persist_progress()
                 continue
             last_response = response
             iter_items: list[dict[str, Any]] = []
@@ -2468,10 +2618,11 @@ class RouterState:
                     level="warning",
                 )
                 request = copy.deepcopy(request)
-                request["input"] = list(request.get("input") or []) + [
-                    _stalled_recovery_message()
-                ]
+                recovery_items = [_stalled_recovery_message()]
+                request["input"] = list(request.get("input") or []) + recovery_items
+                request_suffix.extend(copy.deepcopy(recovery_items))
                 request["tool_choice"] = "required"
+                persist_progress()
                 continue
 
             if not web_search_enabled:
@@ -2480,20 +2631,59 @@ class RouterState:
             if not pending_calls:
                 break
 
-            if iterations >= max_iters:
-                # Safety cap: drop the managed tools so the model must finalize.
-                tool_outputs = [
-                    make_function_call_output(
-                        synthesize_call_id(call, idx),
-                        "Tool-call iteration cap reached; please answer from "
-                        "the results you already have.",
+            pending_signatures = {
+                _managed_call_signature(call) for call in pending_calls
+            }
+            repeated_only = bool(pending_signatures) and pending_signatures.issubset(
+                seen_signatures
+            )
+            if iterations >= max_iters or repeated_only:
+                # A reconnect must never restart an already-completed web
+                # action indefinitely. Feed a valid output for the current
+                # call id, then remove managed tools and force a final answer.
+                if repeated_only:
+                    tool_outputs = []
+                    for idx, call in enumerate(pending_calls):
+                        output = await self._execute_managed_call_cached(
+                            call, idx, web_scope
+                        )
+                        text = str(output.get("output") or "")
+                        output["output"] = (
+                            text
+                            + "\n\n[Marathon: this exact web action already completed "
+                            "during this user turn. Use the existing result and finish "
+                            "without requesting it again.]"
+                        )
+                        tool_outputs.append(output)
+                    iterations += 1
+                    self.telemetry.emit(
+                        "router.web_tool.repeat_guard",
+                        {
+                            "scope": web_scope[:16],
+                            "iterations": iterations,
+                            "repeated_calls": len(pending_calls),
+                        },
+                        level="warning",
                     )
-                    for idx, call in enumerate(pending_calls)
-                ]
+                else:
+                    tool_outputs = [
+                        make_function_call_output(
+                            synthesize_call_id(call, idx),
+                            "Tool-call iteration cap reached; please answer from "
+                            "the results you already have.",
+                        )
+                        for idx, call in enumerate(pending_calls)
+                    ]
+                    iterations = max_iters
+                seen_signatures.update(pending_signatures)
                 cumulative_items.extend(tool_outputs)
                 request = copy.deepcopy(request)
-                request["input"] = list(request.get("input") or []) + copy.deepcopy(iter_items) + tool_outputs
+                appended_items = copy.deepcopy(iter_items) + copy.deepcopy(tool_outputs)
+                request["input"] = list(request.get("input") or []) + appended_items
+                request_suffix.extend(copy.deepcopy(appended_items))
                 request["tools"] = _strip_managed_web_tools(request.get("tools"))
+                finalizing = True
+                persist_progress()
                 if event_sink is None:
                     request["stream"] = False
                     final = await self._request_json(profile, "POST", "/v1/responses", request)
@@ -2513,7 +2703,6 @@ class RouterState:
                     item for item in final_items if not _is_droppable_commentary_message(item)
                 ]
                 cumulative_items.extend(final_items)
-                iterations = max_iters
                 break
 
             tool_outputs = []
@@ -2522,20 +2711,27 @@ class RouterState:
                     await self._execute_managed_call_cached(call, idx, web_scope)
                 )
             cumulative_items.extend(tool_outputs)
+            seen_signatures.update(pending_signatures)
+            request = copy.deepcopy(request)
+            appended_items = copy.deepcopy(iter_items) + copy.deepcopy(tool_outputs)
+            request["input"] = list(request.get("input") or []) + appended_items
+            request_suffix.extend(copy.deepcopy(appended_items))
+            thinking_budget = _tool_thinking_budget_for_turn(request, tool_outputs)
+            if thinking_budget is not None:
+                request["thinking_budget_tokens"] = thinking_budget
+            iterations += 1
+            # Persist before touching the client stream. If that socket has
+            # already gone away, the reconnect resumes after this tool result
+            # instead of reconstructing the turn from its original prompt.
+            persist_progress()
             if event_sink is not None:
                 for item in externalize_for_codex(copy.deepcopy(pending_calls)):
                     if not await event_sink({"type": "response.output_item.done", "item": item}):
                         raise ConnectionError("websocket client disconnected")
 
-            request = copy.deepcopy(request)
-            request["input"] = list(request.get("input") or []) + copy.deepcopy(iter_items) + tool_outputs
-            thinking_budget = _tool_thinking_budget_for_turn(request, tool_outputs)
-            if thinking_budget is not None:
-                request["thinking_budget_tokens"] = thinking_budget
-            iterations += 1
-
         last_response = copy.deepcopy(last_response)
         last_response["usage"] = self.usage_payload(last_response.get("usage"))
+        persist_progress(completed_response=last_response)
         return last_response, cumulative_items, iterations
 
     async def process_websocket_create(
@@ -2839,6 +3035,9 @@ class RouterState:
                 web_search_enabled=web_search_enabled,
                 event_sink=event_sink,
             )
+            replayed_web_completion = bool(
+                backend_response.pop(_WEB_REPLAYED_COMPLETION_KEY, False)
+            )
             backend_ms = (time.perf_counter() - backend_start) * 1000.0
 
             response_id = preset_response_id or str(
@@ -2992,7 +3191,9 @@ class RouterState:
             "usage": usage_payload,
             "output_items": codex_output_items,
             "backend_response": backend_response,
-            "streamed": event_sink is not None,
+            # A completed turn replayed after reconnect emitted no fresh
+            # backend SSE events, so the WS handler must send its stored items.
+            "streamed": event_sink is not None and not replayed_web_completion,
         }
 
 
@@ -3245,7 +3446,26 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
             preset_id = state.mint_response_id(
                 "warm" if payload.get("generate") is False else "resp"
             )
-            if not await safe_send(
+            request_scope = _active_ws_request_scope(payload)
+            disconnect_reported = False
+
+            async def response_send(message: dict[str, Any]) -> bool:
+                nonlocal disconnect_reported
+                sent = await safe_send(message)
+                if not sent and not disconnect_reported:
+                    disconnect_reported = True
+                    state.telemetry.emit(
+                        "router.ws.client_disconnected",
+                        {
+                            "scope": _sha256_text(request_scope or "")[:16],
+                            "response_id": preset_id,
+                            "last_event_type": str(message.get("type") or "unknown"),
+                        },
+                        level="warning",
+                    )
+                return sent
+
+            if not await response_send(
                 {"type": "response.created", "response": {"id": preset_id}}
             ):
                 # Client dropped before we could ack; skip the heavy work.
@@ -3255,10 +3475,9 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                 state.process_websocket_create(
                     payload,
                     preset_response_id=preset_id,
-                    event_sink=safe_send,
+                    event_sink=response_send,
                 )
             )
-            request_scope = _active_ws_request_scope(payload)
             previous_task = state.replace_active_ws_task(request_scope, result_task)
             if previous_task is not None:
                 state.telemetry.emit(
@@ -3283,7 +3502,7 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                     if done:
                         result = result_task.result()
                         break
-                    if not await safe_send(
+                    if not await response_send(
                         {
                             "type": "response.in_progress",
                             "response": {"id": preset_id, "status": "in_progress"},
@@ -3299,7 +3518,7 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                 if not client_connected:
                     continue
             except Exception as exc:
-                await safe_send(
+                await response_send(
                     {
                         "type": "response.failed",
                         "response": {
@@ -3313,11 +3532,11 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
 
             if not result.get("streamed"):
                 for item in result["output_items"]:
-                    if not await safe_send(
+                    if not await response_send(
                         {"type": "response.output_item.done", "item": item}
                     ):
                         break
-            await safe_send(
+            await response_send(
                 {
                     "type": "response.completed",
                     "response": {

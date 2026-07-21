@@ -647,6 +647,206 @@ class RouterContextTests(unittest.TestCase):
             mock.ANY,
         )
 
+    def test_managed_web_progress_survives_stream_disconnect(self) -> None:
+        profile = fixture_profile(131_072)
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=5)
+        state.web_tool_cache = router_module.OrderedDict()
+        state.web_tool_cache_max_entries = 10
+        state.telemetry = mock.Mock()
+        state._execute_managed_call = mock.AsyncMock(
+            return_value={
+                "type": "function_call_output",
+                "call_id": "search_1",
+                "output": "durable search result",
+            }
+        )
+        search_call = {
+            "type": "function_call",
+            "name": "web_search",
+            "call_id": "search_1",
+            "arguments": '{"query":"durable websocket state"}',
+        }
+        final_message = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "finished"}],
+        }
+        state._request_responses_stream = mock.AsyncMock(
+            side_effect=[
+                {"output": [search_call], "usage": {"output_tokens": 20}},
+                {"output": [final_message], "usage": {"output_tokens": 10}},
+            ]
+        )
+        request = {
+            "model": profile.alias,
+            "prompt_cache_key": "session-a",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "research this"}],
+                }
+            ],
+            "tools": [router_module.web_search_function_tool()],
+            "max_output_tokens": 8_192,
+        }
+
+        async def disconnected_sink(_event: dict[str, object]) -> bool:
+            return False
+
+        async def connected_sink(_event: dict[str, object]) -> bool:
+            return True
+
+        async def scenario():
+            with self.assertRaisesRegex(ConnectionError, "client disconnected"):
+                await state._run_responses_loop(
+                    profile=profile,
+                    forward_request=request,
+                    web_search_enabled=True,
+                    event_sink=disconnected_sink,
+                )
+            return await state._run_responses_loop(
+                profile=profile,
+                forward_request=request,
+                web_search_enabled=True,
+                event_sink=connected_sink,
+            )
+
+        response, items, iterations = asyncio.run(scenario())
+
+        resumed_request = state._request_responses_stream.await_args_list[1].args[1]
+        resumed_types = [item.get("type") for item in resumed_request["input"]]
+        self.assertIn("function_call", resumed_types)
+        self.assertIn("function_call_output", resumed_types)
+        self.assertEqual(iterations, 1)
+        self.assertEqual(items[-1]["content"], final_message["content"])
+        self.assertEqual(items[-1]["phase"], "final_answer")
+        state._execute_managed_call.assert_awaited_once()
+        state.telemetry.emit.assert_any_call(
+            "router.web_turn.resumed",
+            mock.ANY,
+        )
+
+    def test_repeated_managed_web_call_forces_final_and_replays_completion(self) -> None:
+        profile = fixture_profile(131_072)
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=5)
+        state.web_tool_cache = router_module.OrderedDict()
+        state.web_tool_cache_max_entries = 10
+        state.telemetry = mock.Mock()
+        state._execute_managed_call = mock.AsyncMock(
+            return_value={
+                "type": "function_call_output",
+                "call_id": "search_1",
+                "output": "one network result",
+            }
+        )
+
+        def search(call_id: str) -> dict[str, object]:
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "web_search",
+                        "call_id": call_id,
+                        "arguments": '{"query":"same query"}',
+                    }
+                ],
+                "usage": {"output_tokens": 20},
+            }
+
+        final = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "final answer"}],
+                }
+            ],
+            "usage": {"output_tokens": 10},
+        }
+        state._request_responses_stream = mock.AsyncMock(
+            side_effect=[search("search_1"), search("search_2"), final]
+        )
+        request = {
+            "model": profile.alias,
+            "prompt_cache_key": "session-repeat",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "research this"}],
+                }
+            ],
+            "tools": [router_module.web_search_function_tool()],
+            "max_output_tokens": 8_192,
+        }
+
+        async def sink(_event: dict[str, object]) -> bool:
+            return True
+
+        async def scenario():
+            first = await state._run_responses_loop(
+                profile=profile,
+                forward_request=request,
+                web_search_enabled=True,
+                event_sink=sink,
+            )
+            replayed = await state._run_responses_loop(
+                profile=profile,
+                forward_request=request,
+                web_search_enabled=True,
+                event_sink=sink,
+            )
+            return first, replayed
+
+        first, replayed = asyncio.run(scenario())
+
+        self.assertEqual(first[2], 2)
+        self.assertEqual(state._request_responses_stream.await_count, 3)
+        state._execute_managed_call.assert_awaited_once()
+        final_request = state._request_responses_stream.await_args_list[2].args[1]
+        final_tool_names = {
+            tool.get("name") for tool in final_request.get("tools", [])
+        }
+        self.assertNotIn("web_search", final_tool_names)
+        self.assertTrue(
+            replayed[0].get(router_module._WEB_REPLAYED_COMPLETION_KEY)
+        )
+        self.assertEqual(replayed[1], first[1])
+        state.telemetry.emit.assert_any_call(
+            "router.web_tool.repeat_guard",
+            mock.ANY,
+            level="warning",
+        )
+
+    def test_web_turn_progress_is_bounded_and_expires(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        state.web_turn_progress = router_module.OrderedDict()
+        state.web_turn_progress_max_entries = 2
+        state.web_turn_progress_ttl_seconds = 10
+
+        def progress(updated_at: float) -> router_module.ManagedWebTurnProgress:
+            return router_module.ManagedWebTurnProgress(
+                request_suffix=[],
+                cumulative_items=[],
+                iterations=0,
+                seen_signatures=set(),
+                finalizing=False,
+                completed_response=None,
+                updated_at=updated_at,
+            )
+
+        now = router_module.time.time()
+        state.web_turn_progress["expired"] = progress(now - 11)
+        state.web_turn_progress["first"] = progress(now)
+        state.save_web_turn_progress("second", progress(now))
+        state.save_web_turn_progress("third", progress(now))
+
+        self.assertEqual(list(state.web_turn_progress), ["second", "third"])
+        self.assertIsNone(state.load_web_turn_progress("expired"))
+
 
 if __name__ == "__main__":
     unittest.main()

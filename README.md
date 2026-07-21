@@ -403,6 +403,19 @@ inside one Codex request, and rewrites the result back into `web_search_call`
 ResponseItems (`action.type=search` or `action.type=open_page`) so Codex's TUI
 renders native pills.
 
+Managed web progress is retained in bounded, in-memory turn state. If Codex's
+WebSocket reconnects during a long search/fetch sequence, the replacement
+request receives the calls and results already completed instead of restarting
+from the original prompt. Completed turns can be replayed without another model
+inference, and an exact repeated web action forces the model to finish from its
+existing evidence. This state never writes prompt or result content to disk; by
+default the router retains at most 64 turns for one hour.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `MARATHON_WEB_TURN_PROGRESS_MAX_ENTRIES` | `64` | Maximum reconnectable managed-web turns retained in router memory |
+| `MARATHON_WEB_TURN_PROGRESS_TTL_SECONDS` | `3600` | Expiration time for reconnectable managed-web state |
+
 **Prerequisites:** Docker 20.10+ with the `docker compose` v2 plugin, and
 Python 3.10+ on the host.
 
