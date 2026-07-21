@@ -11,7 +11,13 @@ from pathlib import Path
 from unittest import mock
 
 from marathon_app import catalog
-from marathon_app.frontends import _codex_binary, _stream_chat, codex_command
+from marathon_app.frontends import (
+    _codex_binary,
+    _stream_chat,
+    codex_command,
+    hermes_command,
+    run_hermes,
+)
 from marathon_app.codex_telemetry import snapshot_sessions, summarize_session_changes
 from marathon_app import runtime as runtime_module
 from marathon_app.runtime import (
@@ -421,6 +427,34 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("model_auto_compact_token_limit=229376", command)
         self.assertNotIn("--ignore-user-config", command)
 
+    def test_hermes_uses_selected_model_without_ignoring_user_config(self) -> None:
+        model = fixture_model()
+        profile = catalog.find_profile(model, "balanced", "hermes")
+        runtime = Runtime(model, profile)
+
+        command = hermes_command(runtime)
+
+        self.assertEqual(
+            command,
+            ["hermes", "chat", "--model", model.alias, "--provider", "custom"],
+        )
+        self.assertNotIn("--ignore-user-config", command)
+        self.assertNotIn("--ignore-rules", command)
+
+    def test_hermes_child_targets_marathon_router_only(self) -> None:
+        model = fixture_model()
+        runtime = Runtime(model, catalog.find_profile(model, "balanced", "hermes"))
+        completed = subprocess.CompletedProcess([], 0)
+
+        with mock.patch("marathon_app.frontends.subprocess.run", return_value=completed) as run:
+            code = run_hermes(runtime)
+
+        self.assertEqual(code, 0)
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["CUSTOM_BASE_URL"], f"{runtime.router_url}/v1")
+        self.assertEqual(environment["HERMES_INFERENCE_MODEL"], model.alias)
+        self.assertEqual(environment["HERMES_INFERENCE_PROVIDER"], "custom")
+
     def test_direct_chat_sends_no_tools_or_agent_instructions(self) -> None:
         model = fixture_model()
         runtime = Runtime(model, catalog.find_profile(model, "balanced", "direct"))
@@ -524,6 +558,25 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(summary["prompt_tps"], 200)
         self.assertEqual(summary["decode_tps"], 20)
         self.assertEqual(summary["duration_s"], 2)
+
+    def test_run_summary_counts_hermes_and_chat_api_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.jsonl"
+            writer = EventWriter(path, "run-test", "runtime")
+            writer.emit(
+                "run.started",
+                {"model": {"id": "test-model"}, "profile": {"id": "agent"}},
+            )
+            writer.emit("frontend.started", {"frontend": "hermes"})
+            writer.emit(
+                "router.http.completed",
+                {"path": "/v1/chat/completions", "status": 200},
+            )
+
+            summary = summarize_run(path)
+
+        self.assertEqual(summary["hermes_sessions"], 1)
+        self.assertEqual(summary["chat_completion_requests"], 1)
 
     def test_run_summary_falls_back_to_llama_process_timings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -709,7 +762,7 @@ class UiTests(unittest.TestCase):
         console = mock.Mock()
 
         with (
-            mock.patch("marathon_app.ui._arrow_menu", return_value=2),
+            mock.patch("marathon_app.ui._arrow_menu", return_value=3),
             mock.patch("marathon_app.ui._choose_model_profile", return_value=changed),
         ):
             action, result = _home(console, models, current, warm=True)
@@ -725,7 +778,7 @@ class UiTests(unittest.TestCase):
         console = mock.Mock()
 
         with (
-            mock.patch("marathon_app.ui._arrow_menu", side_effect=[2, 3]),
+            mock.patch("marathon_app.ui._arrow_menu", side_effect=[3, 3]),
             mock.patch("marathon_app.ui._choose_model_profile", return_value=changed),
         ):
             action, result = _home(console, models, current, warm=False)
@@ -742,6 +795,20 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(cold.count("tune"), 1)
         self.assertNotIn("tune", warm)
+
+    def test_hermes_is_offered_only_by_agent_context_profiles(self) -> None:
+        model = fixture_model()
+        balanced = Selection(
+            model, catalog.find_profile(model, "balanced"), "hermes"
+        )
+        quick = Selection(model, catalog.find_profile(model, "quick"), "direct")
+
+        self.assertIn(
+            "hermes", [item.value for item in _home_items(balanced, warm=False)]
+        )
+        self.assertNotIn(
+            "hermes", [item.value for item in _home_items(quick, warm=False)]
+        )
 
     def test_dyno_is_hidden_for_architecture_specific_backend(self) -> None:
         model = fixture_model("deepseek-v4-flash")

@@ -1,4 +1,4 @@
-"""Same-terminal Codex and direct-chat frontends."""
+"""Same-terminal Codex, Hermes, and direct-chat frontends."""
 
 from __future__ import annotations
 
@@ -32,6 +32,10 @@ def _codex_binary() -> str:
     ).expanduser()
     patched = data_home / "marathon" / "bin" / "codex"
     return str(patched) if patched.is_file() and os.access(patched, os.X_OK) else "codex"
+
+
+def _hermes_binary() -> str:
+    return os.environ.get("MARATHON_HERMES_BIN") or "hermes"
 
 
 def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list[str]:
@@ -82,6 +86,65 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
             "returncode": result.returncode,
             "duration_ms": (time.monotonic() - started) * 1000.0,
             "sessions_changed": len(summaries),
+        },
+        level="info" if result.returncode in (0, 130) else "error",
+    )
+    return result.returncode
+
+
+def hermes_command(runtime: Runtime, extra_args: list[str] | None = None) -> list[str]:
+    """Build a Hermes invocation that keeps the user's normal agent setup."""
+
+    command = [
+        _hermes_binary(),
+        "chat",
+        "--model", runtime.model.alias,
+        "--provider", "custom",
+    ]
+    command.extend(extra_args or [])
+    return command
+
+
+def run_hermes(runtime: Runtime, extra_args: list[str] | None = None) -> int:
+    """Run Hermes in this terminal against Marathon's supervised backend."""
+
+    command = hermes_command(runtime, extra_args)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            # Hermes deliberately treats its YAML as the normal source of truth,
+            # but CUSTOM_BASE_URL is its supported per-process custom-provider
+            # override.  This leaves ~/.hermes, memory, rules, and skills intact.
+            "CUSTOM_BASE_URL": f"{runtime.router_url}/v1",
+            "HERMES_INFERENCE_MODEL": runtime.model.alias,
+            "HERMES_INFERENCE_PROVIDER": "custom",
+        }
+    )
+    started = time.monotonic()
+    runtime.record(
+        "frontend.started",
+        {
+            "frontend": "hermes",
+            "binary": command[0],
+            "cwd": str(Path.cwd()),
+            "endpoint": f"{runtime.router_url}/v1",
+            "context": runtime.context_window,
+        },
+    )
+    with runtime.frontend_signals():
+        result = subprocess.run(
+            command,
+            cwd=Path.cwd(),
+            env=environment,
+            preexec_fn=_restore_sigint,
+            check=False,
+        )
+    runtime.record(
+        "frontend.completed",
+        {
+            "frontend": "hermes",
+            "returncode": result.returncode,
+            "duration_ms": (time.monotonic() - started) * 1000.0,
         },
         level="info" if result.returncode in (0, 130) else "error",
     )

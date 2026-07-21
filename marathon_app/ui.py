@@ -29,7 +29,7 @@ from .catalog import (
     settings,
 )
 from .dyno import OBJECTIVES, candidate_profiles, run_tuning
-from .frontends import direct_chat, run_codex
+from .frontends import direct_chat, run_codex, run_hermes
 from .remote import (
     RemoteRuntime,
     fetch_remote_catalog,
@@ -39,7 +39,11 @@ from .remote import (
 from .runtime import Runtime, load_selection, save_selection
 
 
-FRONTEND_NAMES = {"codex": "Codex", "direct": "Direct Chat"}
+FRONTEND_NAMES = {
+    "codex": "Codex",
+    "hermes": "Hermes Agent",
+    "direct": "Direct Chat",
+}
 
 
 def _dyno_supported(model: Model) -> bool:
@@ -376,6 +380,15 @@ def _home_items(
     items: list[MenuItem] = []
     if selection.profile.supports("codex"):
         items.append(MenuItem("Start Codex" if not warm else "Open Codex", suffix, "codex", "default"))
+    if selection.profile.supports("hermes"):
+        items.append(
+            MenuItem(
+                "Start Hermes" if not warm else "Open Hermes",
+                "Use the normal Hermes tools, memory, skills, and project rules.",
+                "hermes",
+                "agent",
+            )
+        )
     items.append(
         MenuItem(
             "Start Direct Chat" if not warm else "Open Direct Chat",
@@ -462,7 +475,7 @@ def _home(
                 if warm and current != previous:
                     return "change", selection
             continue
-        if action in {"codex", "direct"}:
+        if action in {"codex", "hermes", "direct"}:
             selection.frontend = action
             if not _confirm_experimental(console, selection.profile):
                 continue
@@ -494,9 +507,11 @@ def _launch_frontend(
     if frontend == "direct":
         direct_chat(runtime, console)
         return
-    code = run_codex(runtime)
+    code = run_hermes(runtime) if frontend == "hermes" else run_codex(runtime)
     if code not in (0, 130):
-        console.print(f"[yellow]Codex exited with status {code}.[/yellow]")
+        console.print(
+            f"[yellow]{FRONTEND_NAMES[frontend]} exited with status {code}.[/yellow]"
+        )
 
 
 def _apply_initial_frontend(

@@ -13,6 +13,7 @@ SLOT_DIR="${MARATHON_SLOT_SAVE_ROOT:-$AI_ROOT/cache/marathon/slots}"
 ROUTER_STATE_DIR="$AI_ROOT/cache/marathon/router"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 PATCHED_CODEX_BIN="${MARATHON_PATCHED_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
+HERMES_BIN="${MARATHON_HERMES_BIN:-hermes}"
 
 failures=0
 warnings=0
@@ -128,6 +129,12 @@ elif have codex; then
   warn "using stock Codex; run 'marathon build-codex' for Marathon's status meters"
 else
   fail "Codex is not installed; run: marathon build-codex"
+fi
+
+if have "$HERMES_BIN"; then
+  pass "Hermes available: $($HERMES_BIN --version 2>&1 | head -n1)"
+else
+  warn "Hermes is not installed; Codex and Direct Chat remain available"
 fi
 
 if [[ -x "$ROOT_DIR/.marathon/venv/bin/python3" ]]; then

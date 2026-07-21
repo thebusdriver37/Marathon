@@ -85,7 +85,7 @@ cache_v = "f16"
 flash_attention = "on"
 extra_args = ["--no-repack", "--fit", "off", "--reasoning", "on", "--reasoning-format", "deepseek", "--reasoning-budget", "2048"]
 confidence = "verified"
-frontends = ["codex", "direct"]
+frontends = ["codex", "hermes", "direct"]
 backend = "deepseek-v4-longctx"
 temperature = 0.0
 
@@ -105,7 +105,7 @@ cache_v = "f16"
 flash_attention = "on"
 extra_args = ["--no-repack", "--fit", "off", "--spec-type", "dsv4-mtp", "--reasoning", "on", "--reasoning-format", "deepseek", "--reasoning-budget", "2048"]
 confidence = "experimental"
-frontends = ["codex", "direct"]
+frontends = ["codex", "hermes", "direct"]
 backend = "deepseek-v4-longctx-mtp"
 temperature = 0.0
 
@@ -125,7 +125,7 @@ cache_v = "f16"
 flash_attention = "on"
 extra_args = ["--no-repack", "--fit", "off", "--spec-type", "dsv4-mtp", "--reasoning", "on", "--reasoning-format", "deepseek", "--reasoning-budget", "2048"]
 confidence = "verified"
-frontends = ["codex", "direct"]
+frontends = ["codex", "hermes", "direct"]
 backend = "deepseek-v4-longctx-mtp"
 temperature = 0.0
 
@@ -144,7 +144,7 @@ cache_v = "f16"
 flash_attention = "off"
 extra_args = ["--dist-prefill-chunk", "1024", "--dist-prefill-window", "4"]
 confidence = "benchmarked"
-frontends = ["codex", "direct"]
+frontends = ["codex", "hermes", "direct"]
 backend = "ds4-distributed"
 
 [[families]]
@@ -167,7 +167,7 @@ tensor_split = "1,1,1,1"
 cache_k = "q8_0"
 cache_v = "q8_0"
 confidence = "verified"
-frontends = ["codex", "direct"]
+frontends = ["codex", "hermes", "direct"]
 
 [[families.profiles]]
 id = "quick"
@@ -204,7 +204,7 @@ tensor_split = "1,1,1,1"
 cache_k = "f16"
 cache_v = "f16"
 confidence = "verified"
-frontends = ["codex", "direct"]
+frontends = ["codex", "hermes", "direct"]
 
 [[families.profiles]]
 id = "quick"
@@ -241,7 +241,7 @@ tensor_split = "1,1,1,1"
 cache_k = "q8_0"
 cache_v = "q8_0"
 confidence = "baseline"
-frontends = ["codex", "direct"]
+frontends = ["codex", "hermes", "direct"]
 
 [[families.profiles]]
 id = "quick"

@@ -68,13 +68,17 @@ class RouterContextTests(unittest.TestCase):
         state._refresh_profiles = lambda: state.available_profiles
 
         with mock.patch.object(router_module, "_base_instructions", return_value="prompt"):
-            model = state.model_catalog()["models"][0]
+            catalog = state.model_catalog()
+            model = catalog["models"][0]
+            openai_model = catalog["data"][0]
 
         self.assertEqual(model["context_window"], 262_144)
         self.assertEqual(model["max_context_window"], 262_144)
         self.assertFalse(model["supports_parallel_tool_calls"])
         self.assertEqual(model["auto_compact_token_limit"], 235_929)
         self.assertEqual(model["effective_context_window_percent"], 100)
+        self.assertEqual(openai_model["context_length"], 262_144)
+        self.assertEqual(openai_model["max_model_len"], 262_144)
 
     def test_catalog_advertises_profile_parallel_tool_capability(self) -> None:
         profile = replace(fixture_profile(), supports_parallel_tool_calls=True)

@@ -2,8 +2,8 @@
 
 Marathon is a one-command, terminal-first local AI runtime. It discovers GGUF
 models in the centralized AI directory, starts the model's configured local
-backend and Marathon's API router in the foreground, then opens either Codex or
-a clean Direct Chat. Shipped profiles currently cover upstream llama.cpp,
+backend and Marathon's API router in the foreground, then opens Codex, Hermes,
+or a clean Direct Chat. Shipped profiles currently cover upstream llama.cpp,
 DeepSeek V4's optimized long-context llama.cpp fork, and the legacy four-GPU
 DwarfStar pipeline.
 
@@ -13,8 +13,8 @@ Planned work that is intentionally not current behavior is tracked in
 The process showing the Marathon dashboard owns the backend. Exiting Marathon
 stops its router and every backend process group and frees the GPUs. This lifecycle
 works through an ordinary SSH shell; no exposed daemon or web UI is required.
-Marathon also has a native remote-client mode: Codex and its tools run on a
-client machine while inference runs on a Linux GPU host through an SSH tunnel.
+Marathon also has a native remote-client mode: Codex or Hermes and its tools run
+on a client machine while inference runs on a Linux GPU host through an SSH tunnel.
 
 ## Quick Start
 
@@ -37,22 +37,22 @@ marathon
 The remembered model, profile, and frontend are preselected. Use the arrow keys
 and press Enter to load the highlighted setup. Model selection drills directly
 into that model's profiles. When a frontend exits, Marathon returns to its
-dashboard with the model still warm. Reopen Codex, enter Direct Chat, switch
+dashboard with the model still warm. Reopen Codex or Hermes, enter Direct Chat, switch
 models, or quit and unload the backend.
 
 ```text
 marathon  →  Enter  →  model loads  →  Codex
                                       ↓ exit
                          Marathon dashboard
-                     Codex · Direct Chat · switch · quit
+                  Codex · Hermes · Direct Chat · switch · quit
 ```
 
 ## Native Mac client with Linux GPUs
 
 Install the same Marathon checkout on the Mac and Linux GPU host. The Linux
 host needs the models and Marathon's configured inference backends. The Mac
-needs Marathon's Python environment, Codex, and key-based SSH access, but it
-does not need local models or llama.cpp.
+needs Marathon's Python environment, the desired frontend, and key-based SSH
+access, but it does not need local models or llama.cpp.
 
 From the Mac, enter the project that Codex should edit and name the SSH host:
 
@@ -63,13 +63,13 @@ marathon remote deforest@gpu-rig
 
 The normal arrow-key model/profile dashboard is populated from the Linux host.
 After selection, Marathon starts the Linux runtime in the foreground, creates a
-loopback-only SSH tunnel, and launches Codex on the Mac. Consequently:
+loopback-only SSH tunnel, and launches the selected frontend on the Mac. Consequently:
 
-- Codex tools read and edit the Mac project, not the Linux filesystem.
+- Codex or Hermes tools read and edit the Mac project, not the Linux filesystem.
 - Mac-global skills, plugins, configuration, and local/repository `AGENTS.md`
-  discovery work normally because the Codex process is local.
+  discovery work normally because the frontend process is local.
 - Inference workers, the router, GPU telemetry, and models remain on Linux.
-- Exiting Codex returns to the Mac dashboard with the remote model warm.
+- Exiting the frontend returns to the Mac dashboard with the remote model warm.
 - Quitting Marathon, losing SSH, or closing the client connection stops the
   Linux supervisor and frees its GPUs.
 
@@ -165,10 +165,11 @@ together. `MARATHON_DS4_GPUS` overrides its catalog `0,1,2,3` GPU mapping.
 ## Commands
 
 ```bash
-marathon                  # dashboard; Enter starts remembered Codex setup
+marathon                  # dashboard; Enter starts the remembered setup
 marathon codex            # dashboard with Codex selected
+marathon hermes           # dashboard with Hermes Agent selected
 marathon direct           # dashboard with clean Direct Chat selected
-marathon remote HOST      # local Codex, remote Linux GPUs over secure SSH
+marathon remote HOST      # local frontend, remote Linux GPUs over secure SSH
 marathon tune             # open Dyno directly
 marathon models           # list installed centralized GGUF models
 marathon status           # inspect an active foreground runtime
@@ -293,6 +294,23 @@ Direct Chat sends a streaming Chat Completions request through the local
 router. It deliberately provides no tools, coding-agent prompt, AGENTS files,
 skills, memory, or Hermes harness. Use `/new` to clear the conversation and
 `/back` to return to the warm dashboard.
+
+## Hermes behavior
+
+Agent-capable profiles with at least 64K context offer **Hermes Agent** beside
+Codex and Direct Chat. Marathon launches the installed `hermes` command in the
+same terminal and points only that child process at Marathon's supervised API
+router. Hermes continues to use the normal `~/.hermes` configuration, memory,
+skills, toolsets, session history, and repository rules. Exiting Hermes returns
+to the warm Marathon dashboard; exiting Marathon unloads the model and frees
+the GPUs.
+
+The router publishes the context actually allocated by the selected profile in
+its OpenAI-compatible model metadata. Hermes therefore discovers 64K, 128K,
+256K, or another loaded window dynamically. Remove any old global
+`model.context_length` override from `~/.hermes/config.yaml`, because an
+explicit Hermes override intentionally takes precedence over endpoint metadata.
+Set `MARATHON_HERMES_BIN` only when `hermes` is not on `PATH`.
 
 ## Runtime storage
 

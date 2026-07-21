@@ -105,8 +105,11 @@ def _report(target: str | None) -> int:
     )
     table.add_row(
         "Activity",
-        f"{summary['router_turns']} Codex responses · {summary['direct_turns']} direct turns · "
-        f"{summary['codex_sessions']} Codex launches{active_label}",
+        f"{summary['router_turns']} Codex responses · "
+        f"{summary['chat_completion_requests']} chat API calls · "
+        f"{summary['direct_turns']} direct turns · "
+        f"{summary['codex_sessions']} Codex launches{active_label} · "
+        f"{summary['hermes_sessions']} Hermes launches",
     )
     usage = summary["usage"]
     if usage:
@@ -210,6 +213,8 @@ def _compare(targets: list[str]) -> int:
         ("Profile", left["profile"], right["profile"]),
         ("Duration", _format_duration(left["duration_s"]), _format_duration(right["duration_s"])),
         ("Backend turns", left["router_turns"], right["router_turns"]),
+        ("Chat API calls", left["chat_completion_requests"], right["chat_completion_requests"]),
+        ("Hermes launches", left["hermes_sessions"], right["hermes_sessions"]),
         ("Backend output tokens", left["usage"].get("output_tokens", 0), right["usage"].get("output_tokens", 0)),
         ("Average backend latency", f"{(left['avg_backend_latency_ms'] or 0) / 1000:.2f}s", f"{(right['avg_backend_latency_ms'] or 0) / 1000:.2f}s"),
         ("Prompt throughput", f"{left['prompt_tps'] or 0:.1f} tok/s", f"{right['prompt_tps'] or 0:.1f} tok/s"),
@@ -230,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="marathon", description="One-command local AI runtime")
     parser.add_argument("--version", action="version", version=f"Marathon {__version__}")
     parser.add_argument(
-        "command", nargs="?", choices=("dashboard", "codex", "direct", "remote", "remote-host", "tune", "models", "status", "stop", "report", "compare"),
+        "command", nargs="?", choices=("dashboard", "codex", "hermes", "direct", "remote", "remote-host", "tune", "models", "status", "stop", "report", "compare"),
         default="dashboard",
     )
     parser.add_argument("targets", nargs="*")
@@ -260,7 +265,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_remote_dashboard(args.targets[0])
     if args.command == "tune":
         return run_dyno_dashboard()
-    return run_dashboard(args.command if args.command in {"codex", "direct"} else None)
+    return run_dashboard(
+        args.command if args.command in {"codex", "hermes", "direct"} else None
+    )
 
 
 if __name__ == "__main__":

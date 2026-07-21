@@ -1488,6 +1488,11 @@ class RouterState:
                     "object": "model",
                     "owned_by": "local-codex-router",
                     "description": profile.description,
+                    # OpenAI does not require these fields, but local clients
+                    # such as Hermes use them to discover the context actually
+                    # allocated by the active Marathon profile.
+                    "context_length": profile.context_window,
+                    "max_model_len": profile.context_window,
                 }
             )
         return {"models": models, "object": "list", "data": data}

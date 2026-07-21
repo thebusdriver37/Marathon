@@ -198,7 +198,19 @@ def summarize_run(path: Path, *, live: bool = False) -> dict[str, Any]:
     end_data = (completed or {}).get("data") or {}
 
     router_responses = [item.get("data") or {} for item in events if item.get("event") == "router.response.completed"]
+    chat_completion_requests = [
+        item.get("data") or {}
+        for item in events
+        if item.get("event") == "router.http.completed"
+        and (item.get("data") or {}).get("path") == "/v1/chat/completions"
+    ]
     direct_turns = [item.get("data") or {} for item in events if item.get("event") == "direct.turn.completed"]
+    hermes_sessions = [
+        item
+        for item in events
+        if item.get("event") == "frontend.started"
+        and (item.get("data") or {}).get("frontend") == "hermes"
+    ]
     codex_sessions = [
         refresh_legacy_tool_metrics(item.get("data") or {})
         for item in events
@@ -396,7 +408,9 @@ def summarize_run(path: Path, *, live: bool = False) -> dict[str, Any]:
         "event_types": counts,
         "router_turns": len(router_responses) - warmups,
         "router_warmups": warmups,
+        "chat_completion_requests": len(chat_completion_requests),
         "direct_turns": len(direct_turns),
+        "hermes_sessions": len(hermes_sessions),
         "codex_sessions": len(codex_sessions),
         "active_codex_sessions": len(active_codex_sessions),
         "usage": dict(usage_totals),
