@@ -92,6 +92,9 @@ class CatalogTests(unittest.TestCase):
         safe_profile = catalog.find_profile(model, "safe", "direct")
         long_profile = catalog.find_profile(model, "long-64k", "codex")
         mtp_profile = catalog.find_profile(model, "experimental-mtp-64k", "codex")
+        mtp_128k_profile = catalog.find_profile(
+            model, "experimental-mtp-128k", "codex"
+        )
         legacy_profile = catalog.find_profile(model, "legacy-ds4-64k", "codex")
         self.assertEqual(
             safe_profile.extra_args,
@@ -109,6 +112,13 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(mtp_environment["DSV4_MTP_EMBD_DEV"], "CUDA3")
         self.assertEqual(mtp_profile.backend, "deepseek-v4-longctx-mtp")
         self.assertIn("dsv4-mtp", mtp_profile.extra_args)
+        self.assertEqual(mtp_128k_profile.backend, "deepseek-v4-longctx-mtp")
+        self.assertEqual(mtp_128k_profile.context, 131_072)
+        self.assertEqual(mtp_128k_profile.tensor_split, "1,1,1,0.85")
+        self.assertEqual(mtp_128k_profile.cache_k, "f16")
+        self.assertEqual(mtp_128k_profile.cache_v, "f16")
+        self.assertIn("dsv4-mtp", mtp_128k_profile.extra_args)
+        self.assertEqual(mtp_128k_profile.confidence, "verified")
         self.assertEqual(legacy_profile.backend, "ds4-distributed")
         self.assertIn("--dist-prefill-chunk", legacy_profile.extra_args)
         self.assertIsNone(long_profile.tool_thinking_budget)

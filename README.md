@@ -129,6 +129,15 @@ enable sparse prompt attention, and the exact 40K/42K/43K regression sequence
 passes with MTP active. The profile remains experimental until it completes
 broader real Codex workloads.
 
+**MTP 128K** requests the full 131,072-token window with the fork author's
+documented `1,1,1,0.85` four-GPU placement. It keeps the same F16 compressed
+KV representation, 4,096/512 prompt batching, sparse attention, greedy
+sampling, and MTP decode path. A 120,021-token local validation completed at
+389.0 prompt tokens/second and 17.2 decode tokens/second, recovered an exact
+needle from the start of the prompt, and stayed below 22.7 GiB on every GPU.
+These figures describe the four-GPU development rig, not a portability
+guarantee. The 64K profiles remain unchanged.
+
 The optimized backend is intentionally stored outside the repository beneath
 the centralized AI root. Build it once on the Linux GPU host:
 

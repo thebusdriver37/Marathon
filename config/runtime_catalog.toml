@@ -110,6 +110,26 @@ backend = "deepseek-v4-longctx-mtp"
 temperature = 0.0
 
 [[families.profiles]]
+id = "experimental-mtp-128k"
+display_name = "MTP 128K"
+description = "Verified 128K window using the fork's documented four-3090 MTP layout."
+context = 131072
+batch = 4096
+ubatch = 512
+parallel = 1
+gpu_layers = "999"
+split_mode = "layer"
+tensor_split = "1,1,1,0.85"
+cache_k = "f16"
+cache_v = "f16"
+flash_attention = "on"
+extra_args = ["--no-repack", "--fit", "off", "--spec-type", "dsv4-mtp", "--reasoning", "on", "--reasoning-format", "deepseek", "--reasoning-budget", "2048"]
+confidence = "verified"
+frontends = ["codex", "direct"]
+backend = "deepseek-v4-longctx-mtp"
+temperature = 0.0
+
+[[families.profiles]]
 id = "legacy-ds4-64k"
 display_name = "Legacy DS4 64K"
 description = "Previous four-process DwarfStar pipeline retained as a rollback path."
