@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,9 @@ from marathon_app.runtime import (
 )
 from marathon_app.ui import Selection, _home, _home_items
 from marathon_app.telemetry import EventWriter, read_events, summarize_run
+
+
+TEST_EXECUTABLE = Path(sys.executable)
 
 
 def fixture_model(family_id: str = "qwen3.6-27b") -> catalog.Model:
@@ -79,7 +83,7 @@ class CatalogTests(unittest.TestCase):
     def test_server_command_uses_selected_profile(self) -> None:
         model = fixture_model()
         profile = catalog.find_profile(model, "balanced", "codex")
-        backend = catalog.Backend("test", "Test backend", Path("/bin/true"))
+        backend = catalog.Backend("test", "Test backend", TEST_EXECUTABLE)
         command = catalog.server_command(model, profile, backend)
         self.assertEqual(command[command.index("--ctx-size") + 1], "65536")
         self.assertEqual(command[command.index("--n-gpu-layers") + 1], "999")
@@ -127,8 +131,8 @@ class CatalogTests(unittest.TestCase):
     def test_profile_backend_selection_is_generic(self) -> None:
         model = fixture_model("deepseek-v4-flash")
         profile = catalog.find_profile(model, "experimental-mtp-64k", "codex")
-        selected = catalog.Backend("deepseek-v4-longctx-mtp", "MTP", Path("/bin/true"))
-        fallback = catalog.Backend("ds4-distributed", "DS4", Path("/bin/true"))
+        selected = catalog.Backend("deepseek-v4-longctx-mtp", "MTP", TEST_EXECUTABLE)
+        fallback = catalog.Backend("ds4-distributed", "DS4", TEST_EXECUTABLE)
         with mock.patch.object(
             catalog,
             "backends",
@@ -142,7 +146,7 @@ class CatalogTests(unittest.TestCase):
         backend = catalog.Backend(
             "test",
             "Test",
-            Path("/bin/true"),
+            TEST_EXECUTABLE,
             environment=(
                 ("DSV4_MTP_GGUF", "{model_dir}/mtp.gguf"),
                 ("DSV4_MOE_TILE", "1"),
@@ -159,7 +163,7 @@ class CatalogTests(unittest.TestCase):
         backend = catalog.Backend(
             profile.backend or "test",
             "Test",
-            Path("/bin/true"),
+            TEST_EXECUTABLE,
             environment=(("DSV4_MTP_GGUF", "{model_dir}/missing-mtp.gguf"),),
         )
         with mock.patch.object(catalog, "backends", return_value={backend.id: backend}):
@@ -254,9 +258,9 @@ class RuntimeTests(unittest.TestCase):
         backend = catalog.Backend(
             "ds4",
             "DS4",
-            Path("/bin/true"),
+            TEST_EXECUTABLE,
             kind="ds4_distributed",
-            worker=Path("/bin/true"),
+            worker=TEST_EXECUTABLE,
             model_alias="deepseek-v4-flash",
             layer_slices=("0:9", "10:20", "21:31", "32:output"),
             gpu_ids=(0, 1, 2, 3),
@@ -287,7 +291,7 @@ class RuntimeTests(unittest.TestCase):
         backend = catalog.Backend(
             "test",
             "Test",
-            Path("/bin/true"),
+            TEST_EXECUTABLE,
             environment=(("DSV4_MTP_GGUF", "{model_dir}/mtp.gguf"),),
         )
 

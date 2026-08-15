@@ -125,7 +125,7 @@ if [[ -x "$PATCHED_CODEX_BIN" ]]; then
     info "Marathon Codex source: $(cat "$PATCHED_CODEX_BIN.source")"
   fi
 elif have codex; then
-  warn "using stock Codex; run 'marathon build-codex' for the raw context meter"
+  warn "using stock Codex; run 'marathon build-codex' for Marathon's status meters"
 else
   fail "Codex is not installed; run: marathon build-codex"
 fi

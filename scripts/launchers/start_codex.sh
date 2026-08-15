@@ -117,15 +117,15 @@ ensure_codex_home_config() {
   config_path="${CODEX_HOME:-}/config.toml"
   [[ -n "$config_path" ]] || return 0
   touch "$config_path"
-  if rg -q '^tui\.status_line = \["model-name", "context-remaining", "context-window-size", "used-tokens"\]$' "$config_path" 2>/dev/null; then
-    perl -0pi -e 's/^tui\.status_line = \["model-name", "context-remaining", "context-window-size", "used-tokens"\]$/tui.status_line = ["model-name", "context-remaining", "context-window-size", "context-tokens"]/m' "$config_path"
+  if rg -q '^tui\.status_line = \["model-name", "context-remaining", "context-window-size", "(used-tokens|context-tokens)"\]$' "$config_path" 2>/dev/null; then
+    perl -0pi -e 's/^tui\.status_line = \["model-name", "context-remaining", "context-window-size", "(?:used-tokens|context-tokens)"\]$/tui.status_line = ["model-name", "context-remaining", "context-window-size", "context-tokens", "tokens-per-second"]/m' "$config_path"
     return 0
   fi
   if ! rg -q '^(status_line|tui\.status_line)\s*=' "$config_path" 2>/dev/null; then
     local tmp
     tmp="$(mktemp)"
     {
-      printf 'tui.status_line = ["model-name", "context-remaining", "context-window-size", "context-tokens"]\n'
+      printf 'tui.status_line = ["model-name", "context-remaining", "context-window-size", "context-tokens", "tokens-per-second"]\n'
       cat "$config_path"
     } >"$tmp"
     mv "$tmp" "$config_path"

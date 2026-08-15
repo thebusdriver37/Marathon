@@ -1,0 +1,529 @@
+diff --git a/codex-rs/tui/src/bottom_pane/status_line_setup.rs b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
+index 96104b3f3d71f5daa2415a7f2dea0bfa1e789532..82e3cb5d74527304103471f320e518c5ae113ff3 100644
+--- a/codex-rs/tui/src/bottom_pane/status_line_setup.rs
++++ b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
+@@ -127,6 +127,9 @@ pub(crate) enum StatusLineItem {
+     /// Total output tokens generated.
+     TotalOutputTokens,
+
++    /// Output generation speed for the current or most recent turn.
++    TokensPerSecond,
++
+     /// Estimated credits attributed directly to the current enterprise thread.
+     ThreadCredits,
+
+@@ -192,6 +195,7 @@ impl StatusLineItem {
+             StatusLineItem::UsedTokens => "Total tokens used in session (omitted when zero)",
+             StatusLineItem::TotalInputTokens => "Total input tokens used in session",
+             StatusLineItem::TotalOutputTokens => "Total output tokens used in session",
++            StatusLineItem::TokensPerSecond => "Output speed for the current or most recent turn",
+             StatusLineItem::ThreadCredits => {
+                 "Estimated current-thread credits (Enterprise workspaces only; omitted when unavailable)"
+             }
+@@ -236,6 +240,7 @@ impl StatusLineItem {
+             StatusLineItem::UsedTokens => StatusSurfacePreviewItem::UsedTokens,
+             StatusLineItem::TotalInputTokens => StatusSurfacePreviewItem::TotalInputTokens,
+             StatusLineItem::TotalOutputTokens => StatusSurfacePreviewItem::TotalOutputTokens,
++            StatusLineItem::TokensPerSecond => StatusSurfacePreviewItem::TokensPerSecond,
+             StatusLineItem::ThreadCredits => StatusSurfacePreviewItem::ThreadCredits,
+             StatusLineItem::EstimatedThreadCost => StatusSurfacePreviewItem::EstimatedThreadCost,
+             StatusLineItem::SessionId => StatusSurfacePreviewItem::SessionId,
+diff --git a/codex-rs/tui/src/bottom_pane/status_line_style.rs b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+index 10a6d790607e32ea66c0406e9c091642578a0b3b..a23594dfc6802811eb6e5e2b47ba467179c57231 100644
+--- a/codex-rs/tui/src/bottom_pane/status_line_style.rs
++++ b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+@@ -45,6 +45,7 @@ impl StatusLineAccent {
+             | StatusLineItem::UsedTokens
+             | StatusLineItem::TotalInputTokens
+             | StatusLineItem::TotalOutputTokens
++            | StatusLineItem::TokensPerSecond
+             | StatusLineItem::ThreadCredits
+             | StatusLineItem::EstimatedThreadCost => Self::Usage,
+             StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => Self::Limit,
+diff --git a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+index 7553e9fb77e00f2471bcdeea943f657ee2ff6b19..2bb16e819ed8c47d0cd4e0569c68d06b3b20284b 100644
+--- a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
++++ b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+@@ -28,6 +28,7 @@ pub(crate) enum StatusSurfacePreviewItem {
+     UsedTokens,
+     TotalInputTokens,
+     TotalOutputTokens,
++    TokensPerSecond,
+     ThreadCredits,
+     EstimatedThreadCost,
+     SessionId,
+@@ -64,6 +65,7 @@ impl StatusSurfacePreviewItem {
+             StatusSurfacePreviewItem::UsedTokens => "0 used",
+             StatusSurfacePreviewItem::TotalInputTokens => "0 in",
+             StatusSurfacePreviewItem::TotalOutputTokens => "0 out",
++            StatusSurfacePreviewItem::TokensPerSecond => "0.0 tok/s",
+             StatusSurfacePreviewItem::ThreadCredits => "5.2 credits",
+             StatusSurfacePreviewItem::EstimatedThreadCost => "~$1.82",
+             StatusSurfacePreviewItem::SessionId => "550e8400-e29b-41d4",
+@@ -100,6 +102,7 @@ impl StatusSurfacePreviewItem {
+             Self::UsedTokens,
+             Self::TotalInputTokens,
+             Self::TotalOutputTokens,
++            Self::TokensPerSecond,
+             Self::ThreadCredits,
+             Self::EstimatedThreadCost,
+             Self::SessionId,
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 03b51a17cc2efa96a8eafa2b169233d7f31a8a9e..d85d5e544b189e913a3ab16b2c1079218198afde 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -435,6 +435,8 @@ use self::transcript::TranscriptState;
+ mod turn_lifecycle;
+ mod turn_runtime;
+ use self::turn_lifecycle::TurnLifecycleState;
++mod turn_throughput;
++use self::turn_throughput::TurnThroughput;
+ mod usage;
+ mod user_messages;
+ use self::user_messages::PendingSteer;
+@@ -491,7 +493,8 @@ const ASK_FOR_APPROVAL_LABEL: &str = "Ask for approval";
+ const APPROVE_FOR_ME_LABEL: &str = "Approve for me";
+ const AUTO_REVIEW_DESCRIPTION: &str = "Only ask for actions detected as potentially unsafe.";
+ const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+-const DEFAULT_STATUS_LINE_ITEMS: [&str; 2] = ["model-with-reasoning", "current-dir"];
++const DEFAULT_STATUS_LINE_ITEMS: [&str; 3] =
++    ["model-with-reasoning", "current-dir", "tokens-per-second"];
+
+ /// Common initialization parameters shared by all `ChatWidget` constructors.
+ pub(crate) struct ChatWidgetInit {
+@@ -607,6 +610,7 @@ pub(crate) struct ChatWidget {
+     last_unified_wait: Option<UnifiedExecWaitState>,
+     unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
+     turn_lifecycle: TurnLifecycleState,
++    turn_throughput: TurnThroughput,
+     safety_buffering: SafetyBufferingState,
+     task_complete_pending: bool,
+     unified_exec_processes: Vec<UnifiedExecProcessSummary>,
+diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index 5198cc13ccf015210107704cd09218ec01177c9b..0a8476b1d3402db7830d20080b4ec2d5fa32ac40 100644
+--- a/codex-rs/tui/src/chatwidget/constructor.rs
++++ b/codex-rs/tui/src/chatwidget/constructor.rs
+@@ -161,6 +161,7 @@ impl ChatWidget {
+             last_unified_wait: None,
+             unified_exec_wait_streak: None,
+             turn_lifecycle: TurnLifecycleState::new(prevent_idle_sleep),
++            turn_throughput: TurnThroughput::default(),
+             safety_buffering: SafetyBufferingState::default(),
+             task_complete_pending: false,
+             unified_exec_processes: Vec::new(),
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index 5efc024bea5fbfabe02116c3b15307df64a95349..45e4f37e71d07fbfb6e213ba07d92394b2f90f5f 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -32,6 +32,9 @@ impl ChatWidget {
+         }
+         match notification {
+             ServerNotification::ThreadTokenUsageUpdated(notification) => {
++                if !from_replay {
++                    self.complete_turn_response(Some(notification.token_usage.last.output_tokens));
++                }
+                 self.set_token_info(Some(token_usage_info_from_app_server(
+                     notification.token_usage,
+                 )));
+@@ -76,13 +79,27 @@ impl ChatWidget {
+                 self.handle_item_completed_notification(notification, replay_kind);
+             }
+             ServerNotification::AgentMessageDelta(notification) => {
++                if !from_replay {
++                    self.record_turn_output_delta(&notification.delta);
++                }
+                 self.on_agent_message_delta(notification.delta);
+             }
+-            ServerNotification::PlanDelta(notification) => self.on_plan_delta(notification.delta),
++            ServerNotification::PlanDelta(notification) => {
++                if !from_replay {
++                    self.record_turn_output_delta(&notification.delta);
++                }
++                self.on_plan_delta(notification.delta);
++            }
+             ServerNotification::ReasoningSummaryTextDelta(notification) => {
++                if !from_replay {
++                    self.record_turn_output_delta(&notification.delta);
++                }
+                 self.on_agent_reasoning_delta(notification.delta);
+             }
+             ServerNotification::ReasoningTextDelta(notification) => {
++                if !from_replay {
++                    self.record_turn_output_delta(&notification.delta);
++                }
+                 if self.config.show_raw_agent_reasoning {
+                     self.on_agent_reasoning_delta(notification.delta);
+                 }
+@@ -204,7 +221,6 @@ impl ChatWidget {
+             | ServerNotification::ThreadDeleted(_)
+             | ServerNotification::ThreadUnarchived(_)
+             | ServerNotification::RawResponseItemCompleted(_)
+-            | ServerNotification::RawResponseCompleted(_)
+             | ServerNotification::CommandExecOutputDelta(_)
+             | ServerNotification::ProcessOutputDelta(_)
+             | ServerNotification::ProcessExited(_)
+@@ -233,6 +249,13 @@ impl ChatWidget {
+             | ServerNotification::WindowsSandboxSetupCompleted(_)
+             | ServerNotification::AccountLoginCompleted(_) => {}
+             ServerNotification::ContextCompacted(_) => {}
++            ServerNotification::RawResponseCompleted(notification) => {
++                if !from_replay {
++                    self.complete_turn_response(
++                        notification.usage.map(|usage| usage.output_tokens),
++                    );
++                }
++            }
+         }
+         self.thread_usage.replaying_turn_completion = was_replaying_turn_completion;
+     }
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ac2c08c29b7c9908a9f744e801fc13b5ca4a21d
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+@@ -0,0 +1,10 @@
++---
++source: tui/src/chatwidget/tests/status_and_layout.rs
++assertion_line: 2883
++expression: normalized_backend_snapshot(terminal.backend())
++---
++"                                                "
++"                                                "
++"› Ask Codex to do anything                      "
++"                                                "
++"  21.0 tok/s                                    "
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index 258541ee4bbf4c742e175fda4b6a90c104d215a1..7f2c7bbe325deae5d9ad5cbdebda29482c28c227 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -411,6 +411,13 @@ impl ChatWidget {
+             .unwrap_or_default()
+     }
+
++    pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
++        self.turn_throughput.sample(Instant::now()).map(|sample| {
++            let prefix = if sample.estimated { "~" } else { "" };
++            format!("{prefix}{:.1} tok/s", sample.tokens_per_second)
++        })
++    }
++
+     pub(super) fn status_line_limit_display(
+         &self,
+         window: Option<&RateLimitWindowDisplay>,
+diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+index 215cfcc724edd3a7c0f42badc45e15af98e4d05a..5fdad7337aae744c8ff905933f536904b652e96c 100644
+--- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
++++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+@@ -753,6 +753,7 @@ impl ChatWidget {
+                     format_tokens_compact(self.status_line_total_usage().output_tokens)
+                 )
+             }),
++            StatusLineItem::TokensPerSecond => self.status_line_tokens_per_second(),
+             StatusLineItem::ThreadCredits => self
+                 .estimated_thread_usage()
+                 .map(|usage| usage.estimated_usage_credits_micros)
+@@ -820,6 +821,7 @@ impl ChatWidget {
+             StatusSurfacePreviewItem::UsedTokens => StatusLineItem::UsedTokens,
+             StatusSurfacePreviewItem::TotalInputTokens => StatusLineItem::TotalInputTokens,
+             StatusSurfacePreviewItem::TotalOutputTokens => StatusLineItem::TotalOutputTokens,
++            StatusSurfacePreviewItem::TokensPerSecond => StatusLineItem::TokensPerSecond,
+             StatusSurfacePreviewItem::ThreadCredits => StatusLineItem::ThreadCredits,
+             StatusSurfacePreviewItem::EstimatedThreadCost => StatusLineItem::EstimatedThreadCost,
+             StatusSurfacePreviewItem::SessionId => StatusLineItem::SessionId,
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 83f56e166d081cc66386176233544d815cdf5654..a4e184c25949ca064b12a651544b06e07c379236 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -2854,6 +2854,49 @@ async fn status_line_context_tokens_renders_live_context_count() {
+     );
+ }
+
++#[tokio::test]
++async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
++    use std::time::Duration;
++
++    use ratatui::Terminal;
++    use ratatui::backend::TestBackend;
++
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    chat.show_welcome_banner = false;
++    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
++    let started_at = Instant::now() - Duration::from_secs(200);
++    chat.turn_throughput.start_turn();
++    chat.turn_throughput
++        .record_output_delta("streamed response", started_at);
++    let response_usage = TokenUsage {
++        total_tokens: 4_200,
++        output_tokens: 4_200,
++        ..TokenUsage::default()
++    };
++    handle_token_count(
++        &mut chat,
++        Some(TokenUsageInfo {
++            total_token_usage: response_usage.clone(),
++            last_token_usage: response_usage,
++            model_context_window: Some(131_072),
++        }),
++    );
++    chat.refresh_status_line();
++
++    assert_eq!(status_line_text(&chat), Some("21.0 tok/s".to_string()));
++
++    let width = 48;
++    let height = chat.desired_height(width);
++    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
++    terminal
++        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
++        .expect("draw tokens-per-second footer");
++    assert_chatwidget_snapshot!(
++        "status_line_tokens_per_second_footer",
++        normalized_backend_snapshot(terminal.backend())
++    );
++}
++
+ #[tokio::test]
+ async fn status_line_legacy_context_usage_renders_context_used_percent() {
+     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+index db05609d1c24ca43f3ec41231d18fb32034d49f4..ebb879ea5744a16d1923438d1227bf6d61544a24 100644
+--- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
++++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+@@ -72,6 +72,7 @@ impl ChatWidget {
+         self.input_queue.user_turn_pending_start = false;
+         self.reset_safety_buffering_for_turn_start();
+         self.turn_lifecycle.start(Instant::now());
++        self.turn_throughput.start_turn();
+         self.transcript.reset_turn_flags();
+         self.adaptive_chunking.reset();
+         if self.plan_stream_controller.take().is_some() {
+@@ -102,6 +103,18 @@ impl ChatWidget {
+         self.request_redraw();
+     }
+
++    pub(super) fn record_turn_output_delta(&mut self, delta: &str) {
++        self.turn_throughput
++            .record_output_delta(delta, Instant::now());
++        self.refresh_status_line();
++    }
++
++    pub(super) fn complete_turn_response(&mut self, output_tokens: Option<i64>) {
++        self.turn_throughput
++            .complete_response(output_tokens, Instant::now());
++        self.refresh_status_line();
++    }
++
+     pub(super) fn on_task_complete(
+         &mut self,
+         last_agent_message: Option<String>,
+@@ -145,6 +158,8 @@ impl ChatWidget {
+         }
+         self.flush_unified_exec_wait_streak();
+         if !from_replay {
++            self.turn_throughput.finish_turn(Instant::now());
++            self.refresh_status_line();
+             self.collect_runtime_metrics_delta();
+             let runtime_metrics =
+                 (!self.turn_runtime_metrics.is_empty()).then_some(self.turn_runtime_metrics);
+@@ -313,6 +328,8 @@ impl ChatWidget {
+     /// This does not clear MCP startup tracking, because MCP startup can overlap with turn cleanup
+     /// and should continue to drive the bottom-pane running indicator while it is in progress.
+     pub(super) fn finalize_turn(&mut self) {
++        self.turn_throughput.finish_turn(Instant::now());
++        self.refresh_status_line();
+         self.clear_safety_buffering();
+         // Drop preview-only stream tail content on any termination path before
+         // failed-cell finalization, so transient tail cells are never persisted.
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..58253e6c5e73028d089955124ce0126b2059cf22
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+@@ -0,0 +1,107 @@
++//! Per-turn output throughput derived from live deltas and exact response usage.
++
++use std::time::Duration;
++use std::time::Instant;
++
++use codex_utils_string::approx_tokens_from_byte_count;
++
++const MIN_SAMPLE_DURATION: Duration = Duration::from_millis(250);
++
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub(super) struct ThroughputSample {
++    pub(super) tokens_per_second: f64,
++    pub(super) estimated: bool,
++}
++
++#[derive(Debug)]
++struct ActiveResponse {
++    started_at: Instant,
++    output_bytes: usize,
++}
++
++#[derive(Debug, Default)]
++pub(super) struct TurnThroughput {
++    active_response: Option<ActiveResponse>,
++    completed_output_tokens: u64,
++    completed_generation_duration: Duration,
++    last_sample: Option<ThroughputSample>,
++}
++
++impl TurnThroughput {
++    pub(super) fn start_turn(&mut self) {
++        *self = Self::default();
++    }
++
++    pub(super) fn record_output_delta(&mut self, delta: &str, now: Instant) {
++        let response = self.active_response.get_or_insert(ActiveResponse {
++            started_at: now,
++            output_bytes: 0,
++        });
++        response.output_bytes = response.output_bytes.saturating_add(delta.len());
++    }
++
++    pub(super) fn complete_response(&mut self, output_tokens: Option<i64>, now: Instant) {
++        let live_sample = self.sample(now);
++        let Some(response) = self.active_response.take() else {
++            return;
++        };
++        let elapsed = now.saturating_duration_since(response.started_at);
++        let Some(output_tokens) = output_tokens.and_then(|tokens| u64::try_from(tokens).ok())
++        else {
++            self.last_sample = live_sample;
++            return;
++        };
++        if output_tokens == 0 || elapsed < MIN_SAMPLE_DURATION {
++            self.last_sample = live_sample;
++            return;
++        }
++
++        self.completed_output_tokens = self.completed_output_tokens.saturating_add(output_tokens);
++        self.completed_generation_duration =
++            self.completed_generation_duration.saturating_add(elapsed);
++        self.last_sample = sample_from_totals(
++            self.completed_output_tokens,
++            self.completed_generation_duration,
++            /*estimated*/ false,
++        );
++    }
++
++    pub(super) fn finish_turn(&mut self, now: Instant) {
++        if self.active_response.is_some() {
++            self.last_sample = self.sample(now);
++            self.active_response = None;
++        }
++    }
++
++    pub(super) fn sample(&self, now: Instant) -> Option<ThroughputSample> {
++        let Some(response) = self.active_response.as_ref() else {
++            return self.last_sample;
++        };
++        let elapsed = now.saturating_duration_since(response.started_at);
++        let live_tokens = approx_tokens_from_byte_count(response.output_bytes);
++        sample_from_totals(
++            self.completed_output_tokens.saturating_add(live_tokens),
++            self.completed_generation_duration.saturating_add(elapsed),
++            /*estimated*/ true,
++        )
++        .or(self.last_sample)
++    }
++}
++
++fn sample_from_totals(
++    output_tokens: u64,
++    generation_duration: Duration,
++    estimated: bool,
++) -> Option<ThroughputSample> {
++    if output_tokens == 0 || generation_duration < MIN_SAMPLE_DURATION {
++        return None;
++    }
++    Some(ThroughputSample {
++        tokens_per_second: output_tokens as f64 / generation_duration.as_secs_f64(),
++        estimated,
++    })
++}
++
++#[cfg(test)]
++#[path = "turn_throughput_tests.rs"]
++mod tests;
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..274729cd714b0d4eae750b726c44d7f63abf6591
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+@@ -0,0 +1,75 @@
++use std::time::Duration;
++use std::time::Instant;
++
++use pretty_assertions::assert_eq;
++
++use super::ThroughputSample;
++use super::TurnThroughput;
++
++#[test]
++fn live_sample_is_estimated_from_streamed_bytes() {
++    let started_at = Instant::now();
++    let mut throughput = TurnThroughput::default();
++
++    throughput.start_turn();
++    throughput.record_output_delta("1234567890123456789012345678901234567890", started_at);
++
++    assert_eq!(
++        throughput.sample(started_at + Duration::from_secs(2)),
++        Some(ThroughputSample {
++            tokens_per_second: 5.0,
++            estimated: true,
++        })
++    );
++}
++
++#[test]
++fn completed_response_replaces_estimate_with_exact_usage() {
++    let started_at = Instant::now();
++    let completed_at = started_at + Duration::from_secs(2);
++    let mut throughput = TurnThroughput::default();
++
++    throughput.start_turn();
++    throughput.record_output_delta("streamed text", started_at);
++    throughput.complete_response(Some(30), completed_at);
++
++    assert_eq!(
++        throughput.sample(completed_at),
++        Some(ThroughputSample {
++            tokens_per_second: 15.0,
++            estimated: false,
++        })
++    );
++}
++
++#[test]
++fn completed_responses_form_a_generation_time_weighted_turn_average() {
++    let started_at = Instant::now();
++    let mut throughput = TurnThroughput::default();
++
++    throughput.start_turn();
++    throughput.record_output_delta("first", started_at);
++    throughput.complete_response(Some(20), started_at + Duration::from_secs(2));
++    throughput.record_output_delta("second", started_at + Duration::from_secs(10));
++    throughput.complete_response(Some(40), started_at + Duration::from_secs(14));
++
++    assert_eq!(
++        throughput.sample(started_at + Duration::from_secs(14)),
++        Some(ThroughputSample {
++            tokens_per_second: 10.0,
++            estimated: false,
++        })
++    );
++}
++
++#[test]
++fn starting_a_turn_clears_the_previous_sample() {
++    let started_at = Instant::now();
++    let mut throughput = TurnThroughput::default();
++    throughput.record_output_delta("streamed text", started_at);
++    throughput.complete_response(Some(30), started_at + Duration::from_secs(2));
++
++    throughput.start_turn();
++
++    assert_eq!(throughput.sample(started_at + Duration::from_secs(3)), None);
++}

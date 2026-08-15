@@ -1,5 +1,5 @@
 diff --git a/codex-rs/tui/src/bottom_pane/status_line_setup.rs b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
-index 63ce4237db..7ca4f33c1a 100644
+index 0092d170bdebec02bdb58e51f6df3549c2d7e6ea..96104b3f3d71f5daa2415a7f2dea0bfa1e789532 100644
 --- a/codex-rs/tui/src/bottom_pane/status_line_setup.rs
 +++ b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
 @@ -115,6 +115,9 @@ pub(crate) enum StatusLineItem {
@@ -12,7 +12,7 @@ index 63ce4237db..7ca4f33c1a 100644
      /// Total tokens used in the current session.
      UsedTokens,
 
-@@ -179,6 +182,7 @@ impl StatusLineItem {
+@@ -185,6 +188,7 @@ impl StatusLineItem {
              StatusLineItem::ContextWindowSize => {
                  "Total context window size in tokens (omitted when unknown)"
              }
@@ -20,7 +20,7 @@ index 63ce4237db..7ca4f33c1a 100644
              StatusLineItem::UsedTokens => "Total tokens used in session (omitted when zero)",
              StatusLineItem::TotalInputTokens => "Total input tokens used in session",
              StatusLineItem::TotalOutputTokens => "Total output tokens used in session",
-@@ -216,6 +220,7 @@ impl StatusLineItem {
+@@ -228,6 +232,7 @@ impl StatusLineItem {
              StatusLineItem::WeeklyLimit => StatusSurfacePreviewItem::WeeklyLimit,
              StatusLineItem::CodexVersion => StatusSurfacePreviewItem::CodexVersion,
              StatusLineItem::ContextWindowSize => StatusSurfacePreviewItem::ContextWindowSize,
@@ -29,7 +29,7 @@ index 63ce4237db..7ca4f33c1a 100644
              StatusLineItem::TotalInputTokens => StatusSurfacePreviewItem::TotalInputTokens,
              StatusLineItem::TotalOutputTokens => StatusSurfacePreviewItem::TotalOutputTokens,
 diff --git a/codex-rs/tui/src/bottom_pane/status_line_style.rs b/codex-rs/tui/src/bottom_pane/status_line_style.rs
-index 4198943a4f..bceb074b4d 100644
+index 29e82b8e21b320b5536b2b6832d089bbee0874ca..10a6d790607e32ea66c0406e9c091642578a0b3b 100644
 --- a/codex-rs/tui/src/bottom_pane/status_line_style.rs
 +++ b/codex-rs/tui/src/bottom_pane/status_line_style.rs
 @@ -41,6 +41,7 @@ impl StatusLineAccent {
@@ -39,9 +39,9 @@ index 4198943a4f..bceb074b4d 100644
 +            | StatusLineItem::ContextTokens
              | StatusLineItem::UsedTokens
              | StatusLineItem::TotalInputTokens
-             | StatusLineItem::TotalOutputTokens => Self::Usage,
+             | StatusLineItem::TotalOutputTokens
 diff --git a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
-index b8b7a6fbd4..928412ed69 100644
+index ffa9ae9269e0b406f7e286c75cfbd3d3522ce243..7553e9fb77e00f2471bcdeea943f657ee2ff6b19 100644
 --- a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
 +++ b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
 @@ -24,6 +24,7 @@ pub(crate) enum StatusSurfacePreviewItem {
@@ -52,7 +52,7 @@ index b8b7a6fbd4..928412ed69 100644
      UsedTokens,
      TotalInputTokens,
      TotalOutputTokens,
-@@ -57,6 +58,7 @@ impl StatusSurfacePreviewItem {
+@@ -59,6 +60,7 @@ impl StatusSurfacePreviewItem {
              StatusSurfacePreviewItem::WeeklyLimit => "secondary 0%",
              StatusSurfacePreviewItem::CodexVersion => "0.0.0",
              StatusSurfacePreviewItem::ContextWindowSize => "0 window",
@@ -60,7 +60,7 @@ index b8b7a6fbd4..928412ed69 100644
              StatusSurfacePreviewItem::UsedTokens => "0 used",
              StatusSurfacePreviewItem::TotalInputTokens => "0 in",
              StatusSurfacePreviewItem::TotalOutputTokens => "0 out",
-@@ -90,6 +92,7 @@ impl StatusSurfacePreviewItem {
+@@ -94,6 +96,7 @@ impl StatusSurfacePreviewItem {
              Self::WeeklyLimit,
              Self::CodexVersion,
              Self::ContextWindowSize,
@@ -69,11 +69,11 @@ index b8b7a6fbd4..928412ed69 100644
              Self::TotalInputTokens,
              Self::TotalOutputTokens,
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index 2c58be9370..371eacf754 100644
+index 8ebdf0fab881bcd81cf8d053b2375f759eb8dfb7..258541ee4bbf4c742e175fda4b6a90c104d215a1 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -376,6 +376,13 @@ impl ChatWidget {
-         Some((100 - remaining).clamp(0, 100))
+@@ -397,6 +397,13 @@ impl ChatWidget {
+             .map(|remaining| (100 - remaining).clamp(0, 100))
      }
 
 +    pub(super) fn status_line_context_tokens(&self) -> i64 {
@@ -87,10 +87,10 @@ index 2c58be9370..371eacf754 100644
          self.token_info
              .as_ref()
 diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-index 7120462330..5acab064af 100644
+index 04b876aa2910500f8d2fe522cd6d313f62bb0be2..215cfcc724edd3a7c0f42badc45e15af98e4d05a 100644
 --- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
 +++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-@@ -719,6 +719,10 @@ impl ChatWidget {
+@@ -737,6 +737,10 @@ impl ChatWidget {
              StatusLineItem::ContextWindowSize => self
                  .status_line_context_window_size()
                  .map(|cws| format!("{} window", format_tokens_compact(cws))),
@@ -98,10 +98,10 @@ index 7120462330..5acab064af 100644
 +                "{} context",
 +                format_tokens_compact(self.status_line_context_tokens())
 +            )),
-             StatusLineItem::TotalInputTokens => Some(format!(
-                 "{} in",
-                 format_tokens_compact(self.status_line_total_usage().input_tokens)
-@@ -782,6 +786,7 @@ impl ChatWidget {
+             StatusLineItem::TotalInputTokens => (!self.token_usage_pending).then(|| {
+                 format!(
+                     "{} in",
+@@ -812,6 +816,7 @@ impl ChatWidget {
              StatusSurfacePreviewItem::WeeklyLimit => StatusLineItem::WeeklyLimit,
              StatusSurfacePreviewItem::CodexVersion => StatusLineItem::CodexVersion,
              StatusSurfacePreviewItem::ContextWindowSize => StatusLineItem::ContextWindowSize,
@@ -110,10 +110,10 @@ index 7120462330..5acab064af 100644
              StatusSurfacePreviewItem::TotalInputTokens => StatusLineItem::TotalInputTokens,
              StatusSurfacePreviewItem::TotalOutputTokens => StatusLineItem::TotalOutputTokens,
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 329d249340..6f4b0448e0 100644
+index b28bc6a63eafc273123ecfd16b8d956eeece986e..5a1c75f51eb18f152c15e5fb6e280be63e43bd8f 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -2260,6 +2260,22 @@ async fn status_line_context_remaining_renders_labeled_percent() {
+@@ -2838,6 +2838,22 @@ async fn status_line_context_remaining_renders_labeled_percent() {
      );
  }
 

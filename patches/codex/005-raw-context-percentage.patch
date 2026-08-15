@@ -1,21 +1,21 @@
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 1bb719fa72..2988c291b5 100644
+index bd5579987b3413eb4144da68a67d55a27677a1ca..0dad3404326621163b064c249e0db20bc341ea2c 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -2195,9 +2195,6 @@ pub struct SpendControlLimitSnapshot {
+@@ -2223,9 +2223,6 @@ pub struct SpendControlLimitSnapshot {
      pub resets_at: i64,
  }
- 
+
 -// Includes prompts, tools and space to call compact.
 -const BASELINE_TOKENS: i64 = 12000;
 -
  impl TokenUsage {
      pub fn is_zero(&self) -> bool {
          self.total_tokens == 0
-@@ -2220,25 +2217,15 @@ impl TokenUsage {
+@@ -2248,25 +2245,15 @@ impl TokenUsage {
          self.total_tokens
      }
- 
+
 -    /// Estimate the remaining user-controllable percentage of the model's context window.
 -    ///
 -    /// `context_window` is the total size of the model's context window.
@@ -32,7 +32,7 @@ index 1bb719fa72..2988c291b5 100644
 +        if context_window <= 0 {
              return 0;
          }
- 
+
 -        let effective_window = context_window - BASELINE_TOKENS;
 -        let used = (self.tokens_in_context_window() - BASELINE_TOKENS).max(0);
 -        let remaining = (effective_window - used).max(0);
@@ -43,7 +43,8 @@ index 1bb719fa72..2988c291b5 100644
              .clamp(0.0, 100.0)
              .round() as i64
      }
-@@ -6240,3 +6227,23 @@ mod tests {
+@@ -6005,4 +5992,21 @@ mod tests {
+
          assert_eq!(info.model_context_window, Some(258_400));
      }
 +
@@ -60,21 +61,154 @@ index 1bb719fa72..2988c291b5 100644
 +                ..TokenUsage::default()
 +            };
 +
-+            assert_eq!(
-+                usage.percent_of_context_window_remaining(window),
-+                expected
-+            );
++            assert_eq!(usage.percent_of_context_window_remaining(window), expected);
 +        }
 +    }
  }
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__plan_implementation_popup_context_usage.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__plan_implementation_popup_context_usage.snap
+index 4b8ae0099aa5eb3c27155a0f0f08775de387140d..45771b1ff9bfb2e4251927ce980b4091794b1408 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__plan_implementation_popup_context_usage.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__plan_implementation_popup_context_usage.snap
+@@ -5,7 +5,7 @@ expression: popup
+   Implement this plan?
+
+ › 1. Yes, implement this plan          Switch to Default and start coding.
+-  2. Yes, clear context and implement  Fresh thread. Context: 89% used.
++  2. Yes, clear context and implement  Fresh thread. Context: 90% used.
+   3. No, stay in Plan mode             Continue planning with the model.
+
+   Press enter to confirm or esc to go back
+diff --git a/codex-rs/tui/src/chatwidget/tests/review_mode.rs b/codex-rs/tui/src/chatwidget/tests/review_mode.rs
+index b1f3360c0d5be79cc52b1b3d704a2380ed249446..fb680af044a38efc761985671eb98592afe1d7aa 100644
+--- a/codex-rs/tui/src/chatwidget/tests/review_mode.rs
++++ b/codex-rs/tui/src/chatwidget/tests/review_mode.rs
+@@ -333,14 +333,14 @@ async fn review_restores_context_window_indicator() {
+     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+     let context_window = 13_000;
+-    let pre_review_tokens = 12_700; // ~30% remaining after subtracting baseline.
+-    let review_tokens = 12_030; // ~97% remaining after subtracting baseline.
++    let pre_review_tokens = 12_700; // ~2% of the runtime window remains.
++    let review_tokens = 12_030; // ~7% of the runtime window remains.
+
+     handle_token_count(
+         &mut chat,
+         Some(make_token_info(pre_review_tokens, context_window)),
+     );
+-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(30));
++    assert_eq!(chat.bottom_pane.context_window_percent(), Some(2));
+
+     handle_entered_review_mode(&mut chat, "feature branch");
+
+@@ -348,12 +348,12 @@ async fn review_restores_context_window_indicator() {
+         &mut chat,
+         Some(make_token_info(review_tokens, context_window)),
+     );
+-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(97));
++    assert_eq!(chat.bottom_pane.context_window_percent(), Some(7));
+
+     handle_exited_review_mode(&mut chat);
+     let _ = drain_insert_history(&mut rx);
+
+-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(30));
++    assert_eq!(chat.bottom_pane.context_window_percent(), Some(2));
+     assert!(!chat.review.is_review_mode);
+ }
+
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 5a1c75f51eb18f152c15e5fb6e280be63e43bd8f..83f56e166d081cc66386176233544d815cdf5654 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -37,7 +37,7 @@ async fn token_count_none_resets_context_indicator() {
+         &mut chat,
+         Some(make_token_info(pre_compact_tokens, context_window)),
+     );
+-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(30));
++    assert_eq!(chat.bottom_pane.context_window_percent(), Some(2));
+
+     handle_token_count(&mut chat, /*info*/ None);
+     assert_eq!(chat.bottom_pane.context_window_percent(), None);
+@@ -85,7 +85,7 @@ async fn resumed_session_hides_unknown_token_usage_until_an_update_arrives() {
+     chat.refresh_status_line();
+     assert_eq!(
+         status_line_text(&chat),
+-        Some("Context 30% left · Context 70% used · 0 in · 0 out".to_string())
++        Some("Context 2% left · Context 98% used · 0 in · 0 out".to_string())
+     );
+ }
+
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap
+index c7d89b17aa95c7e3ce85936b60b422de0e4cf58d..ca9600f64512c4b468789e6e37c27e854dc41170 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap
+@@ -16,7 +16,7 @@ expression: sanitized
+ │  Agents.md:        <none>                                                   │
+ │                                                                             │
+ │  Token usage:      1.05K total  (700 input + 350 output)                    │
+-│  Context window:   100% left (1.45K used / 272K)                            │
++│  Context window:   99% left (1.45K used / 272K)                             │
+ │  5h limit:         [████████░░░░░░░░░░░░] 40% left (resets 11:32)           │
+ │  Weekly limit:     [█████████████░░░░░░░] 65% left (resets 11:52)           │
+ │  Warning:          limits may be stale - start new turn to refresh.         │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap
+index c1636b6c15ee014cc3e4d374ef7831fa41d06f90..7171ab05861bc3646befc1c61a38fb1f54125ad1 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap
+@@ -16,7 +16,7 @@ expression: sanitized
+ │  Agents.md:        <none>                                                   │
+ │                                                                             │
+ │  Token usage:      2K total  (1.4K input + 600 output)                      │
+-│  Context window:   100% left (2.2K used / 272K)                             │
++│  Context window:   99% left (2.2K used / 272K)                              │
+ │  5h limit:         [███████████░░░░░░░░░] 55% left (resets 09:25)           │
+ │  Weekly limit:     [██████████████░░░░░░] 70% left (resets 09:55)           │
+ │  Credits:          Available                                                │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap
+index 96b2ed1648d5c55e83ca475543ba327fa111655d..77e3fa3851819e2949ebb5497ad229e8b7aa1618 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap
+@@ -16,7 +16,7 @@ expression: sanitized
+ │  Agents.md:        <none>                                                 │
+ │                                                                           │
+ │  Token usage:      1.9K total  (1K input + 900 output)                    │
+-│  Context window:   100% left (2.25K used / 272K)                          │
++│  Context window:   99% left (2.25K used / 272K)                           │
+ │  5h limit:         [██████░░░░░░░░░░░░░░] 28% left (resets 03:14)         │
+ │  Weekly limit:     [███████████░░░░░░░░░] 55% left (resets 03:24)         │
+ ╰───────────────────────────────────────────────────────────────────────────╯
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap
+index 8facd56275e18f782acfe20a7b30fc159e06dc72..b86e468b8b20b2753c421d59327c70b1ed909e89 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap
+@@ -16,7 +16,7 @@ expression: sanitized
+ │  Agents.md:        <none>                                                   │
+ │                                                                             │
+ │  Token usage:      1.9K total  (1K input + 900 output)                      │
+-│  Context window:   100% left (2.25K used / 272K)                            │
++│  Context window:   99% left (2.25K used / 272K)                             │
+ │  5h limit:         [██████░░░░░░░░░░░░░░] 28% left (resets 03:14)           │
+ │  Weekly limit:     [████████████░░░░░░░░] 60% left (resets 03:34)           │
+ │  Warning:          limits may be stale - start new turn to refresh.         │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap
+index 6b28b53b62837c57c0bd502fc855bde5ec4aadba..d695d95b803a7f2c18a67f5e6f3aa817d1ea393f 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap
+@@ -16,6 +16,6 @@ expression: sanitized
+ │  Agents.md:        <none>                                          │
+ │                                                                    │
+ │  Token usage:      1.9K total  (1K input + 900 output)             │
+-│  Context window:   100% left (2.25K used / 272K)                   │
++│  Context window:   99% left (2.25K used / 272K)                    │
+ │  5h limit:         [██████░░░░░░░░░░░░░░] 28% left (resets 03:14)  │
+ ╰────────────────────────────────────────────────────────────────────╯
 diff --git a/codex-rs/tui/src/token_usage.rs b/codex-rs/tui/src/token_usage.rs
-index ac9a20be9a..cc8a5d3206 100644
+index ac9a20be9adfa83a071564f8c2c3642951db2cf2..5ab2c54175c996f6e3addcd5f24b02fdabe2dacb 100644
 --- a/codex-rs/tui/src/token_usage.rs
 +++ b/codex-rs/tui/src/token_usage.rs
 @@ -6,8 +6,6 @@ use codex_protocol::num_format::format_with_separators;
  use serde::Deserialize;
  use serde::Serialize;
- 
+
 -const BASELINE_TOKENS: i64 = 12000;
 -
  #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,7 +216,7 @@ index ac9a20be9a..cc8a5d3206 100644
      pub input_tokens: i64,
 @@ -41,13 +39,12 @@ impl TokenUsage {
      }
- 
+
      pub(crate) fn percent_of_context_window_remaining(&self, context_window: i64) -> i64 {
 -        if context_window <= BASELINE_TOKENS {
 +        if context_window <= 0 {
@@ -98,7 +232,7 @@ index ac9a20be9a..cc8a5d3206 100644
              .clamp(0.0, 100.0)
              .round() as i64
      }
-@@ -87,3 +84,28 @@ impl fmt::Display for TokenUsage {
+@@ -87,3 +84,25 @@ impl fmt::Display for TokenUsage {
          )
      }
  }
@@ -120,10 +254,7 @@ index ac9a20be9a..cc8a5d3206 100644
 +                ..TokenUsage::default()
 +            };
 +
-+            assert_eq!(
-+                usage.percent_of_context_window_remaining(window),
-+                expected
-+            );
++            assert_eq!(usage.percent_of_context_window_remaining(window), expected);
 +        }
 +    }
 +}

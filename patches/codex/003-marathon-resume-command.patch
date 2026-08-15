@@ -1,25 +1,37 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 28071ca8b940fd6783f7205f43fc695576efc70a..76ff159fc6c3d4f4624e9e06be3e549e1f62e070 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -4522,6 +4522,7 @@ dependencies = [
+  "codex-shell-command",
+  "pretty_assertions",
+  "serde",
++ "serial_test",
+  "toml 0.9.11+spec-1.1.0",
+ ]
+
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index 897f1ec83f..0eed09cca2 100644
+index 610891ea3dd3b4a1affcaeb7a6567274b76c8de4..46834d3a9f7fdad8a0fc335c8e093b216259017a 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -1474,13 +1474,14 @@ async fn run_ratatui_app(
-         terminal_restore_guard.restore_silently();
-         session_log::log_session_end();
-         let _ = tui.terminal.clear();
-+        let action_command = codex_utils_cli::cli_command_for_action(action);
-         Ok(AppExitInfo {
-             token_usage: crate::token_usage::TokenUsage::default(),
-             thread_id: None,
-             resume_hint: None,
-             update_action: None,
-             exit_reason: ExitReason::Fatal(format!(
--                "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
-+                "No saved session found with ID {id_str}. Run `{action_command}` without an ID to choose from existing sessions."
-             )),
-         })
-     };
+@@ -1212,13 +1212,14 @@ async fn run_ratatui_app(
+             terminal_restore_guard.restore_silently();
+             session_log::log_session_end();
+             let _ = tui.terminal.clear();
++            let action_command = codex_utils_cli::cli_command_for_action(action);
+             Ok(AppExitInfo {
+                 token_usage: crate::token_usage::TokenUsage::default(),
+                 thread_id: None,
+                 resume_hint: None,
+                 update_action: None,
+                 exit_reason: ExitReason::Fatal(format!(
+-                    "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
++                    "No saved session found with ID {id_str}. Run `{action_command}` without an ID to choose from existing sessions."
+                 )),
+             })
+         };
 diff --git a/codex-rs/utils/cli/Cargo.toml b/codex-rs/utils/cli/Cargo.toml
-index 9d330c5ce6..32385f01d2 100644
+index 9d330c5ce6badd0d15e6c401cd777fb3d13c8d08..32385f01d27629602e6316bceb5f6cbcec4729dc 100644
 --- a/codex-rs/utils/cli/Cargo.toml
 +++ b/codex-rs/utils/cli/Cargo.toml
 @@ -16,6 +16,7 @@ toml = { workspace = true }
@@ -31,7 +43,7 @@ index 9d330c5ce6..32385f01d2 100644
  [lib]
  doctest = false
 diff --git a/codex-rs/utils/cli/src/lib.rs b/codex-rs/utils/cli/src/lib.rs
-index 633638e72d..ac0819c71d 100644
+index 633638e72d65a931f68a503d523c76f75d0ac62b..ac0819c71d1cd5b29b230ad1df73ae0bc2fb5e6e 100644
 --- a/codex-rs/utils/cli/src/lib.rs
 +++ b/codex-rs/utils/cli/src/lib.rs
 @@ -9,6 +9,7 @@ pub use approval_mode_cli_arg::ApprovalModeCliArg;
@@ -43,7 +55,7 @@ index 633638e72d..ac0819c71d 100644
  pub use resume_command::resume_hint;
  pub use sandbox_mode_cli_arg::SandboxModeCliArg;
 diff --git a/codex-rs/utils/cli/src/resume_command.rs b/codex-rs/utils/cli/src/resume_command.rs
-index d3c6839057..868a67ed0b 100644
+index d3c683905739e159e55e45d78318ed0f15ec81ec..868a67ed0b126d0444d38cbff77ca831ca8bf479 100644
 --- a/codex-rs/utils/cli/src/resume_command.rs
 +++ b/codex-rs/utils/cli/src/resume_command.rs
 @@ -2,6 +2,9 @@
