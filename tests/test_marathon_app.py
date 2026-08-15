@@ -81,6 +81,18 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(model.family.id, "qwen3.6-27b")
         self.assertEqual(model.quant, "UD-Q4_K_XL")
 
+    def test_qwen38_profile_has_bounded_post_tool_thinking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "Qwen3.8-27B-Q8_0.gguf"
+            path.write_bytes(b"model")
+            model = catalog.discover_models(root)[0]
+
+        profile = catalog.find_profile(model, "balanced", "codex")
+        self.assertEqual(model.family.id, "qwen3.8-27b")
+        self.assertEqual(model.quant, "Q8_0")
+        self.assertEqual(profile.tool_thinking_budget, 2_048)
+
     def test_quick_profile_rejects_codex(self) -> None:
         model = fixture_model()
         with self.assertRaisesRegex(ValueError, "not compatible with codex"):
