@@ -189,6 +189,8 @@ class ModelProfile:
     supports_slots: bool = True
     supervised: bool = False
     temperature: float | None = None
+    default_reasoning_level: str | None = None
+    supported_reasoning_levels: tuple[tuple[str, str], ...] = ()
 
     @property
     def port(self) -> int:
@@ -526,6 +528,36 @@ def _env_str(name: str, default: str) -> str:
     return raw.strip()
 
 
+def _reasoning_config_from_env() -> tuple[str | None, tuple[tuple[str, str], ...]]:
+    raw_levels = os.getenv("MARATHON_MODEL_REASONING_LEVELS", "[]")
+    try:
+        parsed_levels = json.loads(raw_levels)
+    except json.JSONDecodeError as exc:
+        raise ValueError("MARATHON_MODEL_REASONING_LEVELS must be valid JSON") from exc
+    if not isinstance(parsed_levels, list):
+        raise ValueError("MARATHON_MODEL_REASONING_LEVELS must be a JSON list")
+
+    levels: list[tuple[str, str]] = []
+    for item in parsed_levels:
+        if not isinstance(item, dict):
+            raise ValueError("each reasoning level must be a JSON object")
+        effort = str(item.get("effort") or "").strip()
+        if not effort:
+            raise ValueError("reasoning effort names must not be empty")
+        levels.append((effort, str(item.get("description") or "").strip()))
+
+    efforts = [effort for effort, _description in levels]
+    if len(efforts) != len(set(efforts)):
+        raise ValueError("reasoning effort names must be unique")
+    default = os.getenv("MARATHON_MODEL_DEFAULT_REASONING_LEVEL")
+    default = default.strip() if default and default.strip() else None
+    if default is not None and default not in efforts:
+        raise ValueError(f"default reasoning effort {default!r} is not supported")
+    if levels and default is None:
+        raise ValueError("reasoning levels require a default reasoning effort")
+    return default, tuple(levels)
+
+
 def _safe_model_slug(raw: str) -> str:
     value = raw.strip()
     if re.fullmatch(r"[A-Za-z0-9_.-]+", value):
@@ -555,6 +587,9 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         if temperature_raw is not None and temperature_raw.strip()
         else None
     )
+    default_reasoning_level, supported_reasoning_levels = (
+        _reasoning_config_from_env()
+    )
 
     return ModelProfile(
         slug=slug,
@@ -573,6 +608,8 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         supports_slots=_env_bool("MARATHON_BACKEND_SLOT_API", True),
         supervised=_env_bool("MARATHON_MODEL_SUPERVISED", False),
         temperature=temperature,
+        default_reasoning_level=default_reasoning_level,
+        supported_reasoning_levels=supported_reasoning_levels,
     )
 
 
@@ -1177,10 +1214,49 @@ def _backend_lineage_item(item: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
-def normalize_responses_request(data: dict[str, Any]) -> dict[str, Any]:
+def _apply_reasoning_effort(
+    data: dict[str, Any], profile: ModelProfile | None
+) -> None:
+    if profile is None or not profile.supported_reasoning_levels:
+        return
+    supported = {
+        effort for effort, _description in profile.supported_reasoning_levels
+    }
+    reasoning = data.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, dict):
+        raise ValueError("reasoning must be an object")
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    if effort is None:
+        effort = profile.default_reasoning_level
+    if not isinstance(effort, str) or effort not in supported:
+        choices = ", ".join(effort_name for effort_name, _ in profile.supported_reasoning_levels)
+        raise ValueError(
+            f"reasoning effort {effort!r} is not supported by {profile.slug}; "
+            f"choose one of: {choices}"
+        )
+
+    template_kwargs = data.get("chat_template_kwargs")
+    if template_kwargs is not None and not isinstance(template_kwargs, dict):
+        raise ValueError("chat_template_kwargs must be an object")
+    normalized_template_kwargs = dict(template_kwargs or {})
+    if effort == "none":
+        normalized_template_kwargs.pop("reasoning_effort", None)
+        normalized_template_kwargs["enable_thinking"] = False
+    else:
+        normalized_template_kwargs.update(
+            enable_thinking=True,
+            reasoning_effort=effort,
+        )
+    data["chat_template_kwargs"] = normalized_template_kwargs
+
+
+def normalize_responses_request(
+    data: dict[str, Any], profile: ModelProfile | None = None
+) -> dict[str, Any]:
     original_instructions = data.get("instructions")
     instruction_base = original_instructions if isinstance(original_instructions, str) else ""
     data["_marathon_instruction_base_hash"] = _sha256_text(instruction_base)
+    _apply_reasoning_effort(data, profile)
     tools = data.get("tools")
     web_search_requested = request_has_web_search_tool(tools) if isinstance(tools, list) else False
     if isinstance(tools, list):
@@ -1294,7 +1370,8 @@ class RouterState:
         self.state_dir = state_dir
         self.log_dir = log_dir
         self.telemetry = EventWriter.from_env("router")
-        self.available_profiles = self._refresh_profiles()
+        self.available_profiles: dict[str, ModelProfile] = {}
+        self._refresh_profiles()
         if not self.available_profiles:
             raise RuntimeError("no available local model profiles found")
         if default_model not in self.available_profiles:
@@ -1476,8 +1553,11 @@ class RouterState:
                     "slug": profile.slug,
                     "display_name": profile.display_name,
                     "description": profile.description,
-                    "default_reasoning_level": None,
-                    "supported_reasoning_levels": [],
+                    "default_reasoning_level": profile.default_reasoning_level,
+                    "supported_reasoning_levels": [
+                        {"effort": effort, "description": description}
+                        for effort, description in profile.supported_reasoning_levels
+                    ],
                     "shell_type": "shell_command",
                     "visibility": "list",
                     "supported_in_api": True,
@@ -2809,7 +2889,7 @@ class RouterState:
         request["model"] = profile.alias
         if profile.temperature is not None:
             request["temperature"] = profile.temperature
-        request = normalize_responses_request(request)
+        request = normalize_responses_request(request, profile)
         request["model"] = profile.alias
 
         base_instructions_hash = str(
@@ -3327,7 +3407,23 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
         if profile.temperature is not None:
             data["temperature"] = profile.temperature
         if path == "/v1/responses":
-            data = normalize_responses_request(data)
+            try:
+                data = normalize_responses_request(data, profile)
+            except ValueError as exc:
+                state.telemetry.emit(
+                    "router.http.rejected",
+                    {"path": path, "phase": "request", "error": str(exc)},
+                    level="warning",
+                )
+                return web.json_response(
+                    {
+                        "error": {
+                            "message": str(exc),
+                            "type": "invalid_request_error",
+                        }
+                    },
+                    status=400,
+                )
             if data.pop("_marathon_web_search_enabled", False):
                 # The managed web-tool loop is only implemented on the
                 # WebSocket Responses path. Keep HTTP/SSE fallback from

@@ -1,0 +1,68 @@
+diff --git a/codex-rs/tui/src/app/config_persistence.rs b/codex-rs/tui/src/app/config_persistence.rs
+--- a/codex-rs/tui/src/app/config_persistence.rs
++++ b/codex-rs/tui/src/app/config_persistence.rs
+@@ -744,7 +744,8 @@ impl App {
+ 
+     pub(super) fn reasoning_label(reasoning_effort: Option<&ReasoningEffortConfig>) -> String {
+         match reasoning_effort {
+-            None | Some(ReasoningEffortConfig::None) => "default".to_string(),
++            None => "default".to_string(),
++            Some(ReasoningEffortConfig::None) => "none".to_string(),
+             Some(reasoning_effort) => reasoning_effort.as_str().to_string(),
+         }
+     }
+@@ -1180,6 +1181,15 @@ mod tests {
+     use pretty_assertions::assert_eq;
+     use tempfile::tempdir;
+ 
++    #[test]
++    fn reasoning_label_distinguishes_unset_from_disabled() {
++        assert_eq!(App::reasoning_label(None), "default");
++        assert_eq!(
++            App::reasoning_label(Some(&ReasoningEffortConfig::None)),
++            "none"
++        );
++    }
++
+     #[tokio::test]
+     async fn update_reasoning_effort_updates_collaboration_mode() {
+         let mut app = make_test_app().await;
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -418,7 +418,8 @@ impl ChatWidget {
+         effort: Option<&ReasoningEffortConfig>,
+     ) -> String {
+         match effort {
+-            None | Some(ReasoningEffortConfig::None) => "default".to_string(),
++            None => "default".to_string(),
++            Some(ReasoningEffortConfig::None) => "none".to_string(),
+             Some(effort) => effort.as_str().to_string(),
+         }
+     }
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -3882,6 +3882,22 @@ async fn status_line_and_terminal_title_reasoning_render_only_effort() {
+     assert_eq!(chat.last_terminal_title, Some("xhigh".to_string()));
+ }
+ 
++#[tokio::test]
++async fn status_line_reasoning_distinguishes_unset_from_disabled() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
++    chat.config.tui_status_line = Some(vec!["reasoning".to_string()]);
++
++    chat.set_reasoning_effort(None);
++    chat.refresh_status_line();
++
++    assert_eq!(status_line_text(&chat), Some("default".to_string()));
++
++    chat.set_reasoning_effort(Some(ReasoningEffortConfig::None));
++    chat.refresh_status_line();
++
++    assert_eq!(status_line_text(&chat), Some("none".to_string()));
++}
++
+ #[tokio::test]
+ async fn status_line_reasoning_updates_on_mode_switch_without_manual_refresh() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;

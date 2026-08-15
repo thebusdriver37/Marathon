@@ -71,6 +71,12 @@ class Profile:
 
 
 @dataclass(frozen=True)
+class ReasoningLevel:
+    effort: str
+    description: str
+
+
+@dataclass(frozen=True)
 class Family:
     id: str
     display_name: str
@@ -78,6 +84,8 @@ class Family:
     backend: str
     default_profile: str
     profiles: tuple[Profile, ...]
+    reasoning_levels: tuple[ReasoningLevel, ...] = ()
+    default_reasoning_level: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +173,37 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
 def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
     result: list[Family] = []
     for raw in (catalog or load_catalog()).get("families", []):
+        raw_reasoning_levels = raw.get("reasoning_levels", [])
+        if not isinstance(raw_reasoning_levels, list) or any(
+            not isinstance(item, dict) for item in raw_reasoning_levels
+        ):
+            raise ValueError(
+                f"family {raw['id']} reasoning_levels must be a list of tables"
+            )
+        reasoning_levels = tuple(
+            ReasoningLevel(
+                effort=str(item["effort"]).strip(),
+                description=str(item.get("description", "")).strip(),
+            )
+            for item in raw_reasoning_levels
+        )
+        efforts = [level.effort for level in reasoning_levels]
+        if any(not effort for effort in efforts):
+            raise ValueError(f"family {raw['id']} has an empty reasoning effort")
+        if len(efforts) != len(set(efforts)):
+            raise ValueError(f"family {raw['id']} has duplicate reasoning efforts")
+        default_reasoning_level = raw.get("default_reasoning_level")
+        if default_reasoning_level is not None:
+            default_reasoning_level = str(default_reasoning_level).strip()
+            if default_reasoning_level not in efforts:
+                raise ValueError(
+                    f"family {raw['id']} default reasoning effort "
+                    f"{default_reasoning_level!r} is not supported"
+                )
+        elif reasoning_levels:
+            raise ValueError(
+                f"family {raw['id']} has reasoning levels without a default"
+            )
         profiles = tuple(
             Profile(
                 id=item["id"],
@@ -207,6 +246,8 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                 backend=raw["backend"],
                 default_profile=raw["default_profile"],
                 profiles=profiles,
+                reasoning_levels=reasoning_levels,
+                default_reasoning_level=default_reasoning_level,
             )
         )
     return tuple(result)

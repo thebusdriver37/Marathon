@@ -27,6 +27,7 @@ from .catalog import (
     Family,
     Model,
     Profile,
+    ReasoningLevel,
     discover_models,
     find_model,
     find_profile,
@@ -134,6 +135,10 @@ def remote_catalog_payload() -> dict[str, object]:
                     "display_name": model.family.display_name,
                     "backend": model.family.backend,
                     "default_profile": model.family.default_profile,
+                    "default_reasoning_level": model.family.default_reasoning_level,
+                    "reasoning_levels": [
+                        asdict(level) for level in model.family.reasoning_levels
+                    ],
                 },
                 "profiles": [
                     _profile_payload(profile) for profile in profiles_for_model(model)
@@ -165,6 +170,14 @@ def _models_from_payload(payload: dict[str, object]) -> list[Model]:
             for item in raw_profiles
             if isinstance(item, dict)
         )
+        reasoning_levels = tuple(
+            ReasoningLevel(
+                effort=str(item["effort"]),
+                description=str(item.get("description") or ""),
+            )
+            for item in family_data.get("reasoning_levels", [])
+            if isinstance(item, dict)
+        )
         family = Family(
             id=str(family_data["id"]),
             display_name=str(family_data["display_name"]),
@@ -172,6 +185,12 @@ def _models_from_payload(payload: dict[str, object]) -> list[Model]:
             backend=str(family_data.get("backend") or "remote"),
             default_profile=str(family_data["default_profile"]),
             profiles=profiles,
+            reasoning_levels=reasoning_levels,
+            default_reasoning_level=(
+                str(family_data["default_reasoning_level"])
+                if family_data.get("default_reasoning_level") is not None
+                else None
+            ),
         )
         result.append(
             Model(

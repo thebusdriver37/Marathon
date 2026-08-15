@@ -20,7 +20,7 @@ from .runtime import Runtime
 
 
 MARATHON_STATUS_LINE = [
-    "model-name",
+    "model-with-reasoning",
     "tokens-per-second",
     "context-remaining",
     "context-window-size",

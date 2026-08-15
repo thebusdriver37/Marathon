@@ -687,6 +687,19 @@ class Runtime:
                 "MARATHON_MODEL_PARALLEL_TOOL_CALLS": (
                     "1" if self.profile.parallel_tool_calls else "0"
                 ),
+                "MARATHON_MODEL_REASONING_LEVELS": json.dumps(
+                    [
+                        {
+                            "effort": level.effort,
+                            "description": level.description,
+                        }
+                        for level in self.model.family.reasoning_levels
+                    ],
+                    separators=(",", ":"),
+                ),
+                "MARATHON_MODEL_DEFAULT_REASONING_LEVEL": (
+                    self.model.family.default_reasoning_level or ""
+                ),
                 "MARATHON_SLOT_SAVE_ROOT": str(SLOT_ROOT),
                 "MARATHON_RUN_ID": str(self.run_id or ""),
                 "MARATHON_RUN_LOG": str(self.run_log or ""),

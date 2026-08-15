@@ -190,6 +190,13 @@ display_name = "Qwen 3.8 27B Dense"
 patterns = ["qwen3.8-27b", "qwen3_8-27b"]
 backend = "upstream"
 default_profile = "native-256k"
+default_reasoning_level = "xhigh"
+reasoning_levels = [
+  { effort = "none", description = "Disable reasoning for direct responses." },
+  { effort = "low", description = "Fast, focused reasoning for straightforward tasks." },
+  { effort = "medium", description = "Balanced reasoning for most coding work." },
+  { effort = "xhigh", description = "Deep reasoning for difficult tasks and careful validation." },
+]
 
 [[families.profiles]]
 id = "native-256k"

@@ -47,6 +47,13 @@ def fixture_model(family_id: str = "qwen3.6-27b") -> catalog.Model:
 
 
 class CatalogTests(unittest.TestCase):
+    def test_reasoning_catalog_requires_structured_levels(self) -> None:
+        loaded = catalog.load_catalog()
+        loaded["families"][0]["reasoning_levels"] = "low"
+
+        with self.assertRaisesRegex(ValueError, "list of tables"):
+            catalog.families(loaded)
+
     def test_discovers_first_shard_and_sums_all_shards(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -91,6 +98,11 @@ class CatalogTests(unittest.TestCase):
         profile = catalog.find_profile(model, None, "codex")
         self.assertEqual(model.family.id, "qwen3.8-27b")
         self.assertEqual(model.quant, "Q8_0")
+        self.assertEqual(model.family.default_reasoning_level, "xhigh")
+        self.assertEqual(
+            [level.effort for level in model.family.reasoning_levels],
+            ["none", "low", "medium", "xhigh"],
+        )
         self.assertEqual(profile.id, "native-256k")
         self.assertEqual(profile.context, 262_144)
         self.assertEqual(profile.tool_thinking_budget, 2_048)
@@ -470,7 +482,7 @@ class FrontendTests(unittest.TestCase):
                 command = codex_command(runtime)
 
         self.assertIn(
-            'tui.status_line=["model-name", "tokens-per-second", '
+            'tui.status_line=["model-with-reasoning", "tokens-per-second", '
             '"context-remaining", "context-window-size", "context-tokens"]',
             command,
         )

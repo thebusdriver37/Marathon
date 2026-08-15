@@ -2,9 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 ROUTER_HOST="${MARATHON_PROXY_HOST:-127.0.0.1}"
 ROUTER_PORT="${MARATHON_PROXY_PORT:-18111}"
-PATCHED_CODEX_BIN="${MARATHON_CODEX_BIN_PATH:-${MARATHON_CODEX_TARGET_DIR:-$ROOT_DIR/.marathon/codex-target}/debug/codex}"
+PATCHED_CODEX_BIN="${MARATHON_CODEX_BIN_PATH:-$DATA_HOME/marathon/bin/codex}"
 CODEX_BIN="${MARATHON_CODEX_BIN:-}"
 LOG_DIR="${MARATHON_LOG_DIR:-$ROOT_DIR/logs}"
 STATE_DIR="${MARATHON_ROUTER_STATE_DIR:-$ROOT_DIR/.marathon/state}"
@@ -126,7 +127,7 @@ ensure_codex_home_config() {
     local tmp
     tmp="$(mktemp)"
     {
-      printf 'tui.status_line = ["model-name", "tokens-per-second", "context-remaining", "context-window-size", "context-tokens"]\n'
+      printf 'tui.status_line = ["model-with-reasoning", "tokens-per-second", "context-remaining", "context-window-size", "context-tokens"]\n'
       cat "$config_path"
     } >"$tmp"
     mv "$tmp" "$config_path"

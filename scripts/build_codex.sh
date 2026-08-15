@@ -30,7 +30,9 @@ fi
 cleanup() {
   [[ -z "$INSTALL_TMP" ]] || rm -f "$INSTALL_TMP"
   [[ -z "$FEATURES_TMP" ]] || rm -f "$FEATURES_TMP"
-  [[ -z "$TEMP_TARGET" ]] || rm -rf "$TEMP_TARGET"
+  if [[ -n "$TEMP_TARGET" && -d "$TEMP_TARGET" ]]; then
+    rm -r -- "$TEMP_TARGET"
+  fi
 }
 trap cleanup EXIT
 

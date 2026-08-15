@@ -15,14 +15,14 @@ from marathon_app.frontends import codex_command
 
 
 def fixture_model() -> catalog.Model:
-    family = next(item for item in catalog.families() if item.id == "qwen3.6-27b")
+    family = next(item for item in catalog.families() if item.id == "qwen3.8-27b")
     return catalog.Model(
-        id="qwen3.6-27b-ud-q4-k-xl",
-        display_name="Qwen 3.6 27B Dense UD-Q4_K_XL",
+        id="qwen3.8-27b-q8-0",
+        display_name="Qwen 3.8 27B Dense Q8_0",
         path=Path("/srv/ai/qwen.gguf"),
-        size_bytes=17 * 1024**3,
+        size_bytes=28 * 1024**3,
         family=family,
-        quant="UD-Q4_K_XL",
+        quant="Q8_0",
     )
 
 
@@ -37,6 +37,14 @@ class RemoteCatalogTests(unittest.TestCase):
         self.assertEqual(decoded[0].id, model.id)
         self.assertEqual(decoded[0].size_bytes, model.size_bytes)
         self.assertEqual(decoded[0].family.default_profile, model.family.default_profile)
+        self.assertEqual(
+            decoded[0].family.default_reasoning_level,
+            model.family.default_reasoning_level,
+        )
+        self.assertEqual(
+            decoded[0].family.reasoning_levels,
+            model.family.reasoning_levels,
+        )
         self.assertEqual(
             [item.id for item in decoded[0].family.profiles],
             [item.id for item in catalog.profiles_for_model(model)],

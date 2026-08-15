@@ -255,6 +255,10 @@ Profiles whose backend supports a native thinking budget can set
 `tool_thinking_budget`. Marathon applies it only after Codex returns a tool
 result; initial user turns remain unrestricted. Set
 `MARATHON_ADAPTIVE_THINKING_BUDGET=0` to disable this behavior for an A/B test.
+Model families can declare their native reasoning efforts and default in `config/runtime_catalog.toml`.
+Marathon advertises those capabilities to Codex, so `/model` opens the native effort picker and applies the selected level to the active thread without restarting the model.
+Qwen 3.8 includes a `None` option that disables thinking for the next turn without reloading the model or discarding the active context.
+For llama.cpp backends, Marathon translates the selected effort into the model's reasoning chat-template variables and rejects unsupported values before inference.
 The DS4 backend exposes high or disabled thinking rather than a fixed native
 token budget, so its shipped profile relies on the model-agnostic response cap
 and stalled-response recovery instead of advertising a budget it cannot honor.
@@ -280,11 +284,12 @@ the protocol guard and its bounded recovery.
 The Marathon Codex patch removes stock Codex's fixed 12K display normalization, so the visible percentage is the backend-reported active tokens divided by that loaded window.
 It also adds a `tokens-per-second` footer item that updates during each model response and keeps the aggregate result for the completed turn.
 Live values use streamed output and carry a `~` prefix because they are estimates; each response completion replaces that estimate with the API's exact output-token count divided by active generation time, excluding pauses while tools run.
-Marathon adds the item to its status line automatically without changing the user's saved Codex configuration.
+Marathon adds the item to its status line automatically without changing the user's saved Codex configuration, and displays the active reasoning effort beside the model name.
 The item is ordered immediately after the model so narrow terminals retain it before lower-priority context details.
 Custom status lines outside Marathon can select it through `/statusline`.
 No additional backend endpoint is required because Codex already receives exact per-response usage notifications.
 `marathon build-codex` performs a release build in a temporary target directory, installs only the resulting binary, and removes build output.
+Direct `scripts/test_codex_patches.sh` runs also use disposable Cargo output with incremental compilation and debug symbols disabled unless a caller explicitly supplies a target directory.
 `marathon update-codex` explicitly fetches current upstream, preflights the patches in a throwaway worktree, runs the focused Codex and complete Marathon test suites, smoke-checks the CLI, and then atomically promotes the release binary.
 The previous binary remains beside it as `codex.previous`.
 Ordinary Marathon startup does not fetch, compile, or replace Codex.

@@ -33,6 +33,17 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_router_state_reports_empty_profile_catalog(self) -> None:
+        with mock.patch.object(router_module, "_available_profiles", return_value={}):
+            with self.assertRaisesRegex(
+                RuntimeError, "no available local model profiles found"
+            ):
+                router_module.RouterState(
+                    "missing-model",
+                    Path("/tmp/marathon-test-state"),
+                    Path("/tmp/marathon-test-logs"),
+                )
+
     def test_closed_client_transport_is_not_a_backend_error(self) -> None:
         self.assertTrue(
             router_module._is_client_disconnect(
@@ -60,6 +71,29 @@ class RouterContextTests(unittest.TestCase):
         self.assertFalse(profile.supports_slots)
         self.assertTrue(profile.supervised)
         self.assertEqual(profile.temperature, 0.0)
+
+    def test_custom_profile_loads_reasoning_capabilities(self) -> None:
+        environment = {
+            "MARATHON_MODEL_PATH": "/tmp/model.gguf",
+            "MARATHON_MODEL_DEFAULT_REASONING_LEVEL": "xhigh",
+            "MARATHON_MODEL_REASONING_LEVELS": json.dumps(
+                [
+                    {"effort": "low", "description": "Fast"},
+                    {"effort": "medium", "description": "Balanced"},
+                    {"effort": "xhigh", "description": "Deep"},
+                ]
+            ),
+        }
+        with mock.patch.dict(router_module.os.environ, environment, clear=True):
+            profile = router_module._custom_model_profile(ROOT_DIR)
+
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertEqual(profile.default_reasoning_level, "xhigh")
+        self.assertEqual(
+            profile.supported_reasoning_levels,
+            (("low", "Fast"), ("medium", "Balanced"), ("xhigh", "Deep")),
+        )
 
     def test_catalog_advertises_full_dynamic_context_window(self) -> None:
         profile = fixture_profile()
@@ -90,6 +124,135 @@ class RouterContextTests(unittest.TestCase):
             model = state.model_catalog()["models"][0]
 
         self.assertTrue(model["supports_parallel_tool_calls"])
+
+    def test_catalog_advertises_profile_reasoning_levels(self) -> None:
+        profile = replace(
+            fixture_profile(),
+            default_reasoning_level="xhigh",
+            supported_reasoning_levels=(
+                ("low", "Fast"),
+                ("medium", "Balanced"),
+                ("xhigh", "Deep"),
+            ),
+        )
+        state = object.__new__(router_module.RouterState)
+        state.available_profiles = {profile.slug: profile}
+        state._refresh_profiles = lambda: state.available_profiles
+
+        with mock.patch.object(router_module, "_base_instructions", return_value="prompt"):
+            model = state.model_catalog()["models"][0]
+
+        self.assertEqual(model["default_reasoning_level"], "xhigh")
+        self.assertEqual(
+            model["supported_reasoning_levels"],
+            [
+                {"effort": "low", "description": "Fast"},
+                {"effort": "medium", "description": "Balanced"},
+                {"effort": "xhigh", "description": "Deep"},
+            ],
+        )
+
+    def test_native_reasoning_effort_reaches_llama_template(self) -> None:
+        profile = replace(
+            fixture_profile(),
+            default_reasoning_level="xhigh",
+            supported_reasoning_levels=(
+                ("low", "Fast"),
+                ("medium", "Balanced"),
+                ("xhigh", "Deep"),
+            ),
+        )
+        request = {
+            "input": [],
+            "reasoning": {"effort": "low"},
+            "chat_template_kwargs": {
+                "preserve_reasoning": True,
+                "enable_thinking": False,
+            },
+        }
+
+        normalized = router_module.normalize_responses_request(request, profile)
+
+        self.assertEqual(
+            normalized["chat_template_kwargs"],
+            {
+                "preserve_reasoning": True,
+                "enable_thinking": True,
+                "reasoning_effort": "low",
+            },
+        )
+
+    def test_no_reasoning_disables_thinking_and_clears_effort(self) -> None:
+        profile = replace(
+            fixture_profile(),
+            default_reasoning_level="xhigh",
+            supported_reasoning_levels=(
+                ("none", "Direct"),
+                ("low", "Fast"),
+                ("xhigh", "Deep"),
+            ),
+        )
+        request = {
+            "input": [],
+            "reasoning": {"effort": "none"},
+            "chat_template_kwargs": {
+                "preserve_reasoning": True,
+                "enable_thinking": True,
+                "reasoning_effort": "xhigh",
+            },
+        }
+
+        normalized = router_module.normalize_responses_request(request, profile)
+
+        self.assertEqual(
+            normalized["chat_template_kwargs"],
+            {"preserve_reasoning": True, "enable_thinking": False},
+        )
+
+    def test_unsupported_reasoning_effort_is_rejected(self) -> None:
+        profile = replace(
+            fixture_profile(),
+            default_reasoning_level="xhigh",
+            supported_reasoning_levels=(("low", "Fast"), ("xhigh", "Deep")),
+        )
+
+        with self.assertRaisesRegex(ValueError, "choose one of: low, xhigh"):
+            router_module.normalize_responses_request(
+                {"input": [], "reasoning": {"effort": "ultra"}}, profile
+            )
+
+    def test_http_rejects_unsupported_reasoning_effort_as_bad_request(self) -> None:
+        profile = replace(
+            fixture_profile(),
+            default_reasoning_level="xhigh",
+            supported_reasoning_levels=(("low", "Fast"), ("xhigh", "Deep")),
+        )
+        state = object.__new__(router_module.RouterState)
+        state.debug = False
+        state.telemetry = mock.Mock()
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+
+        class Request:
+            app = {"state": state}
+            path = "/v1/responses"
+            method = "POST"
+            headers: dict[str, str] = {}
+
+            async def read(self) -> bytes:
+                return json.dumps(
+                    {
+                        "model": profile.slug,
+                        "input": [],
+                        "reasoning": {"effort": "ultra"},
+                    }
+                ).encode()
+
+        response = asyncio.run(router_module.handle_http_proxy(Request()))
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(payload["error"]["type"], "invalid_request_error")
+        self.assertIn("choose one of: low, xhigh", payload["error"]["message"])
 
     def test_managed_tool_loop_reports_final_context_not_cumulative_usage(self) -> None:
         profile = fixture_profile(131_072)
