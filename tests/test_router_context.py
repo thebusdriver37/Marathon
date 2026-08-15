@@ -504,6 +504,28 @@ class RouterContextTests(unittest.TestCase):
                 stalled, stalled["output"], 8192
             )
         )
+        self.assertTrue(
+            router_module._response_stalled_at_output_limit(
+                stalled,
+                [{"type": "message", "role": "assistant", "content": []}],
+                8192,
+            )
+        )
+        self.assertFalse(
+            router_module._response_stalled_at_output_limit(
+                stalled,
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "A complete answer."}
+                        ],
+                    }
+                ],
+                8192,
+            )
+        )
         self.assertFalse(
             router_module._response_stalled_at_output_limit(
                 stalled,
@@ -511,6 +533,42 @@ class RouterContextTests(unittest.TestCase):
                 8192,
             )
         )
+
+    def test_backend_malformed_tool_call_http_error_is_recoverable(self) -> None:
+        profile = fixture_profile(65_536)
+
+        class Response:
+            status = 500
+
+            async def text(self) -> str:
+                return (
+                    '{"error":{"message":"Failed to parse tool call arguments '
+                    'as JSON: missing closing quote"}}'
+                )
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class Client:
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+        state = object.__new__(router_module.RouterState)
+        state.http_client = Client()
+
+        with self.assertRaisesRegex(
+            router_module.ToolProtocolError,
+            "malformed or truncated tool-call arguments",
+        ):
+            asyncio.run(
+                state._request_responses_stream(
+                    profile,
+                    {"input": [], "tools": []},
+                )
+            )
 
     def test_stalled_response_recovers_with_required_tool_action(self) -> None:
         profile = fixture_profile(65_536)

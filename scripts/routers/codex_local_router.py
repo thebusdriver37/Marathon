@@ -148,6 +148,22 @@ class ToolProtocolError(RuntimeError):
     """The backend stopped making valid, bounded tool-call progress."""
 
 
+def _backend_tool_protocol_error_reason(status: int, body: str) -> str | None:
+    """Classify backend HTTP errors caused by malformed generated tool calls."""
+
+    if status < 400:
+        return None
+    normalized = body.casefold()
+    markers = (
+        "failed to parse tool call arguments as json",
+        "failed to parse function arguments as json",
+        "invalid tool call arguments",
+    )
+    if any(marker in normalized for marker in markers):
+        return "the backend received malformed or truncated tool-call arguments"
+    return None
+
+
 def _is_client_disconnect(error: Exception) -> bool:
     """Return whether a downstream client closed an otherwise valid response."""
 
@@ -449,8 +465,15 @@ def _response_stalled_at_output_limit(
     output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
     if not isinstance(output_tokens, int) or output_tokens < output_limit:
         return False
-    actionable_types = {"message", "function_call", "custom_tool_call", "local_shell_call"}
-    return not any(item.get("type") in actionable_types for item in items)
+    actionable_types = {"function_call", "custom_tool_call", "local_shell_call"}
+    for item in items:
+        if item.get("type") in actionable_types:
+            return False
+        if _is_assistant_message_item(item) and not _is_ellipsis_filler_text(
+            _assistant_message_text(item)
+        ):
+            return False
+    return True
 
 
 def _stalled_recovery_message() -> dict[str, Any]:
@@ -1738,6 +1761,12 @@ class RouterState:
                 async with self.http_client.request(method, url, json=payload) as response:
                     text = await response.text()
                     if response.status >= 400:
+                        protocol_error = _backend_tool_protocol_error_reason(
+                            response.status,
+                            text,
+                        )
+                        if protocol_error:
+                            raise ToolProtocolError(protocol_error)
                         raise RuntimeError(f"backend {method} {path} failed: {response.status} {text}")
                     try:
                         return json.loads(text) if text else {}
@@ -1853,6 +1882,12 @@ class RouterState:
         async with self.http_client.post(url, json=request) as response:
             if response.status >= 400:
                 text = await response.text()
+                protocol_error = _backend_tool_protocol_error_reason(
+                    response.status,
+                    text,
+                )
+                if protocol_error:
+                    raise ToolProtocolError(protocol_error)
                 raise RuntimeError(f"backend POST /v1/responses failed: {response.status} {text}")
 
             # llama.cpp can remain wire-silent while it builds one structured
