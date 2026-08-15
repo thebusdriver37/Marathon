@@ -19,6 +19,15 @@ from .codex_telemetry import snapshot_sessions, summarize_session_changes
 from .runtime import Runtime
 
 
+MARATHON_STATUS_LINE = [
+    "model-name",
+    "tokens-per-second",
+    "context-remaining",
+    "context-window-size",
+    "context-tokens",
+]
+
+
 def _restore_sigint() -> None:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -38,6 +47,18 @@ def _hermes_binary() -> str:
     return os.environ.get("MARATHON_HERMES_BIN") or "hermes"
 
 
+def _codex_features(binary: str) -> set[str]:
+    marker = Path(f"{binary}.features")
+    try:
+        return {
+            line.strip()
+            for line in marker.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+    except OSError:
+        return set()
+
+
 def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list[str]:
     binary = _codex_binary()
     provider = (
@@ -55,6 +76,10 @@ def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list
         "-c", f"model_catalog_json={json.dumps(str(runtime.catalog_file))}",
         "-c", 'web_search="cached"',
     ]
+    if "tokens-per-second" in _codex_features(binary):
+        command.extend(
+            ["-c", f"tui.status_line={json.dumps(MARATHON_STATUS_LINE)}"]
+        )
     command.extend(extra_args or [])
     return command
 

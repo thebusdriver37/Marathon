@@ -30,21 +30,27 @@ git -C "$CODEX_DIR" fetch origin
 LOCAL_SHA="$(git -C "$CODEX_DIR" rev-parse HEAD)"
 UPSTREAM_SHA="$(git -C "$CODEX_DIR" rev-parse "$UPSTREAM_BRANCH")"
 
-if [[ "$LOCAL_SHA" == "$UPSTREAM_SHA" ]]; then
-  installed_sha="$(cat "$INSTALL_BIN.source" 2>/dev/null || true)"
-  if [[ -x "$INSTALL_BIN" && "$installed_sha" == "$UPSTREAM_SHA" \
-    && "${MARATHON_FORCE_CODEX_REBUILD:-0}" != "1" ]]; then
-    echo "Codex is current and verified at ${UPSTREAM_SHA:0:8}."
-    exit 0
-  fi
-  echo "Codex source is at ${UPSTREAM_SHA:0:8}; rebuilding and validating patches."
-else
-  echo "-> Codex ${LOCAL_SHA:0:8} -> ${UPSTREAM_SHA:0:8}"
-fi
-
 shopt -s nullglob
 patches=("$PATCHES_DIR"/*.patch)
 shopt -u nullglob
+patch_manifest="$({
+  for patch in "${patches[@]}"; do
+    printf '%s %s\n' "$(basename "$patch")" "$(git hash-object "$patch")"
+  done
+} | git hash-object --stdin)"
+expected_build="$UPSTREAM_SHA:$patch_manifest"
+
+if [[ "$LOCAL_SHA" == "$UPSTREAM_SHA" ]]; then
+  installed_build="$(cat "$INSTALL_BIN.source" 2>/dev/null || true)"
+  if [[ -x "$INSTALL_BIN" && "$installed_build" == "$expected_build" \
+    && "${MARATHON_FORCE_CODEX_REBUILD:-0}" != "1" ]]; then
+    echo "Codex source and Marathon patches are current at ${UPSTREAM_SHA:0:8}."
+    exit 0
+  fi
+  echo "Codex source is at ${UPSTREAM_SHA:0:8}; rebuilding changed Marathon patches."
+else
+  echo "-> Codex ${LOCAL_SHA:0:8} -> ${UPSTREAM_SHA:0:8}"
+fi
 
 # Preflight: verify every patch applies cleanly on the new upstream
 # before we mutate the submodule. Uses a throwaway worktree at the

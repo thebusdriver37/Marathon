@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEX_DIR="${MARATHON_CODEX_DIR:-$ROOT_DIR/codex}"
+PATCH_DIR="${MARATHON_PATCH_DIR:-$ROOT_DIR/patches/codex}"
 PATCH_IN_PLACE="${MARATHON_PATCH_IN_PLACE:-0}"
 BUILD_CODEX_DIR="$CODEX_DIR"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -10,6 +11,7 @@ INSTALL_BIN="${MARATHON_PATCHED_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
 BUILD_PROFILE="${MARATHON_CODEX_BUILD_PROFILE:-release}"
 TEMP_TARGET=""
 INSTALL_TMP=""
+FEATURES_TMP=""
 
 if [[ "$PATCH_IN_PLACE" != "1" ]]; then
   BUILD_CODEX_DIR="${MARATHON_PATCHED_CODEX_DIR:-$ROOT_DIR/.marathon/codex-patched}"
@@ -27,6 +29,7 @@ fi
 
 cleanup() {
   [[ -z "$INSTALL_TMP" ]] || rm -f "$INSTALL_TMP"
+  [[ -z "$FEATURES_TMP" ]] || rm -f "$FEATURES_TMP"
   [[ -z "$TEMP_TARGET" ]] || rm -rf "$TEMP_TARGET"
 }
 trap cleanup EXIT
@@ -62,16 +65,34 @@ if [[ -x "$INSTALL_BIN" ]]; then
   if [[ -f "$INSTALL_BIN.source" ]]; then
     cp -f "$INSTALL_BIN.source" "$INSTALL_BIN.previous.source"
   fi
+  if [[ -f "$INSTALL_BIN.features" ]]; then
+    cp -f "$INSTALL_BIN.features" "$INSTALL_BIN.previous.features"
+  fi
 fi
 
 mv -f "$INSTALL_TMP" "$INSTALL_BIN"
 INSTALL_TMP=""
 
+shopt -s nullglob
+patches=("$PATCH_DIR"/*.patch)
+shopt -u nullglob
+patch_manifest="$({
+  for patch in "${patches[@]}"; do
+    printf '%s %s\n' "$(basename "$patch")" "$(git hash-object "$patch")"
+  done
+} | git hash-object --stdin)"
 source_tmp="$(mktemp "$install_dir/.codex.source.XXXXXX")"
-git -C "$CODEX_DIR" rev-parse HEAD >"$source_tmp"
+printf '%s:%s\n' "$(git -C "$CODEX_DIR" rev-parse HEAD)" "$patch_manifest" >"$source_tmp"
 mv -f "$source_tmp" "$INSTALL_BIN.source"
+
+FEATURES_TMP="$(mktemp "$install_dir/.codex.features.XXXXXX")"
+if rg -q 'tokens-per-second' "$BUILD_CODEX_DIR/codex-rs/tui/src"; then
+  printf 'tokens-per-second\n' >"$FEATURES_TMP"
+fi
+mv -f "$FEATURES_TMP" "$INSTALL_BIN.features"
+FEATURES_TMP=""
 
 echo
 echo "Codex source: $BUILD_CODEX_DIR"
 echo "Codex binary: $INSTALL_BIN"
-echo "Codex commit: $(cat "$INSTALL_BIN.source")"
+echo "Codex build: $(cat "$INSTALL_BIN.source")"

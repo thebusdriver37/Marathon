@@ -88,10 +88,20 @@ class CatalogTests(unittest.TestCase):
             path.write_bytes(b"model")
             model = catalog.discover_models(root)[0]
 
-        profile = catalog.find_profile(model, "balanced", "codex")
+        profile = catalog.find_profile(model, None, "codex")
         self.assertEqual(model.family.id, "qwen3.8-27b")
         self.assertEqual(model.quant, "Q8_0")
+        self.assertEqual(profile.id, "native-256k")
+        self.assertEqual(profile.context, 262_144)
         self.assertEqual(profile.tool_thinking_budget, 2_048)
+
+        backend = catalog.Backend("test", "Test backend", TEST_EXECUTABLE)
+        command = catalog.server_command(model, profile, backend)
+        self.assertEqual(command[command.index("--ctx-size") + 1], "262144")
+        self.assertEqual(command[command.index("--tensor-split") + 1], "1,1,1,1")
+        self.assertEqual(command[command.index("--cache-type-k") + 1], "q8_0")
+        self.assertEqual(command[command.index("--cache-type-v") + 1], "q8_0")
+        self.assertEqual(command[command.index("--fit") + 1], "off")
 
     def test_quick_profile_rejects_codex(self) -> None:
         model = fixture_model()
@@ -438,6 +448,32 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("model_context_window=262144", command)
         self.assertIn("model_auto_compact_token_limit=229376", command)
         self.assertNotIn("--ignore-user-config", command)
+
+    def test_patched_codex_enables_turn_throughput_status_item(self) -> None:
+        model = fixture_model()
+        profile = catalog.find_profile(model, "balanced", "codex")
+        runtime = Runtime(model, profile)
+
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "marathon" / "bin" / "codex"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            binary.chmod(0o755)
+            Path(f"{binary}.features").write_text(
+                "tokens-per-second\n", encoding="utf-8"
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"XDG_DATA_HOME": directory},
+                clear=True,
+            ):
+                command = codex_command(runtime)
+
+        self.assertIn(
+            'tui.status_line=["model-name", "tokens-per-second", '
+            '"context-remaining", "context-window-size", "context-tokens"]',
+            command,
+        )
 
     def test_hermes_uses_selected_model_without_ignoring_user_config(self) -> None:
         model = fixture_model()

@@ -226,9 +226,8 @@ Marathon prefers its small patched Codex binary at
 `$XDG_DATA_HOME/marathon/bin/codex` and falls back to the installed stock
 `codex` command. It leaves `CODEX_HOME` untouched, so global configuration,
 installed skills, plugins, session history, and normal global/repository/nested
-`AGENTS.md` discovery work as they do in Codex itself. Marathon supplies only
-per-invocation overrides for its local provider, selected model, context window,
-and generated model catalog.
+`AGENTS.md` discovery work as they do in Codex itself.
+Marathon supplies only per-invocation overrides for its local provider, selected model, context window, generated model catalog, and the managed status line exposed by its patched binary.
 
 The selected profile requests the backend's context allocation, but Marathon
 does not assume that request became the loaded size. After startup it reads the
@@ -281,7 +280,9 @@ the protocol guard and its bounded recovery.
 The Marathon Codex patch removes stock Codex's fixed 12K display normalization, so the visible percentage is the backend-reported active tokens divided by that loaded window.
 It also adds a `tokens-per-second` footer item that updates during each model response and keeps the aggregate result for the completed turn.
 Live values use streamed output and carry a `~` prefix because they are estimates; each response completion replaces that estimate with the API's exact output-token count divided by active generation time, excluding pauses while tools run.
-Marathon adds the item to its managed status line automatically, while custom status lines can select it through `/statusline`.
+Marathon adds the item to its status line automatically without changing the user's saved Codex configuration.
+The item is ordered immediately after the model so narrow terminals retain it before lower-priority context details.
+Custom status lines outside Marathon can select it through `/statusline`.
 No additional backend endpoint is required because Codex already receives exact per-response usage notifications.
 `marathon build-codex` performs a release build in a temporary target directory, installs only the resulting binary, and removes build output.
 `marathon update-codex` explicitly fetches current upstream, preflights the patches in a throwaway worktree, runs the focused Codex and complete Marathon test suites, smoke-checks the CLI, and then atomically promotes the release binary.
