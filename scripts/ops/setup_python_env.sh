@@ -32,7 +32,7 @@ fi
 
 if [[ "$force" == "1" && -d "$VENV_DIR" ]]; then
   echo "removing existing venv at $VENV_DIR" >&2
-  rm -rf "$VENV_DIR"
+  rm -r -- "$VENV_DIR"
 fi
 
 if [[ ! -d "$VENV_DIR" ]]; then
@@ -43,12 +43,13 @@ fi
 PIP="$VENV_DIR/bin/pip"
 "$PIP" install --quiet --upgrade pip
 "$PIP" install --quiet -r "$REQUIREMENTS"
+cksum "$REQUIREMENTS" > "$VENV_DIR/.marathon-requirements"
 
 echo
 echo "Marathon venv ready at $VENV_DIR"
 "$VENV_DIR/bin/python3" -c '
 import importlib.metadata as m
-for pkg in ("trafilatura", "aiohttp", "rich", "prompt-toolkit"):
+for pkg in ("trafilatura", "aiohttp", "rich", "prompt-toolkit", "huggingface-hub"):
     try:
         print(f"  {pkg}: {m.version(pkg)}")
     except m.PackageNotFoundError:

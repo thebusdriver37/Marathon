@@ -2,15 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AI_ROOT="${MARATHON_AI_ROOT:-$HOME/AI}"
 
 default_llamacpp_dir() {
-  if [[ -d "$ROOT_DIR/third_party/llama.cpp/.git" ]]; then
-    printf '%s\n' "$ROOT_DIR/third_party/llama.cpp"
-  elif [[ -d "$ROOT_DIR/../vLLM_inference/third_party/llama.cpp/.git" ]]; then
-    printf '%s\n' "$ROOT_DIR/../vLLM_inference/third_party/llama.cpp"
-  else
-    printf '%s\n' "$ROOT_DIR/third_party/llama.cpp"
-  fi
+  printf '%s\n' "$AI_ROOT/backends/llama.cpp-current"
 }
 
 bash "$ROOT_DIR/scripts/build_codex.sh"

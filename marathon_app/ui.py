@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from prompt_toolkit.application import Application
@@ -20,6 +23,8 @@ from rich.table import Table
 from .catalog import (
     Model,
     Profile,
+    ROOT_DIR,
+    backend_for,
     backends,
     discover_models,
     find_model,
@@ -29,7 +34,13 @@ from .catalog import (
     settings,
 )
 from .dyno import OBJECTIVES, candidate_profiles, run_tuning
-from .frontends import direct_chat, run_codex, run_hermes
+from .frontends import _codex_binary, direct_chat, run_codex, run_hermes
+from .model_library import (
+    RECOMMENDED_QWEN_REPOSITORY,
+    download_huggingface_gguf,
+    list_huggingface_ggufs,
+    register_model_root,
+)
 from .remote import (
     RemoteRuntime,
     fetch_remote_catalog,
@@ -214,6 +225,307 @@ def _profile_items(model: Model) -> list[MenuItem]:
         )
         for profile in profiles_for_model(model)
     ]
+
+
+def _choose_installed_model(console: Console, models: list[Model]) -> Selection | None:
+    chosen = _arrow_menu(
+        console,
+        "Choose your model",
+        "Marathon will choose the safest compatible runtime profile.",
+        _model_items(models),
+        0,
+        context=("Installed GGUF models", f"{len(models)} found"),
+    )
+    if chosen is None:
+        return None
+    model = models[chosen]
+    try:
+        profile = find_profile(model, None, "codex")
+    except ValueError:
+        compatible = [
+            profile for profile in profiles_for_model(model) if profile.supports("codex")
+        ]
+        if not compatible:
+            raise ValueError(f"{model.display_name} has no Codex-compatible profile")
+        profile = compatible[0]
+    return Selection(model, profile, "codex")
+
+
+def _download_gguf(console: Console, repository: str) -> Path | None:
+    try:
+        with console.status(
+            f"[bold magenta]Reading {repository} from Hugging Face...[/bold magenta]",
+            spinner="dots",
+        ):
+            files = list_huggingface_ggufs(repository)
+    except Exception as error:
+        console.print(Panel(str(error), title="Cannot read repository", border_style="red"))
+        Prompt.ask("Press Enter to continue", default="")
+        return None
+    if not files:
+        console.print(Panel("No single-file GGUF models were found.", border_style="yellow"))
+        Prompt.ask("Press Enter to continue", default="")
+        return None
+
+    common_quants = ("Q4_K_M", "UD-Q4_K_XL", "Q5_K_M", "Q6_K", "Q8_0")
+    primary = [
+        next((item for item in files if item.quant == quant), None)
+        for quant in common_quants
+    ]
+    primary = [item for item in primary if item is not None]
+    remaining = [item for item in files if item not in primary]
+    items = [
+        MenuItem(
+            item.quant,
+            item.filename,
+            str(index),
+            (
+                f"{format_size(item.size_bytes)} · recommended"
+                if item.size_bytes is not None and item.quant == "Q4_K_M"
+                else format_size(item.size_bytes)
+                if item.size_bytes is not None
+                else "size unknown"
+            ),
+        )
+        for item in primary
+    ]
+    if remaining:
+        items.append(
+            MenuItem(
+                "Another quant",
+                "Enter an exact quant or GGUF filename from this repository.",
+                "other",
+                f"{len(remaining)} more",
+            )
+        )
+    chosen = _arrow_menu(
+        console,
+        "Choose a quant",
+        "Q4_K_M is the best starting point for most systems.",
+        items,
+        0,
+        context=(repository, "The exact repository revision will be recorded"),
+    )
+    if chosen is None:
+        return None
+    if chosen < len(primary):
+        selected = primary[chosen]
+    else:
+        console.clear()
+        table = Table(title=f"Other GGUF files in {repository}")
+        table.add_column("Quant", style="cyan")
+        table.add_column("Size", justify="right")
+        table.add_column("Filename", style="dim")
+        for item in remaining:
+            table.add_row(
+                item.quant,
+                format_size(item.size_bytes) if item.size_bytes is not None else "unknown",
+                item.filename,
+            )
+        console.print(table)
+        value = Prompt.ask("Exact quant or GGUF filename").strip().lower()
+        matches = [
+            item
+            for item in remaining
+            if value in {item.quant.lower(), item.filename.lower()}
+        ]
+        if len(matches) != 1:
+            console.print("[bold red]Enter one exact quant or filename from the table.[/bold red]")
+            Prompt.ask("Press Enter to continue", default="")
+            return None
+        selected = matches[0]
+    console.clear()
+    console.print(
+        f"[bold magenta]Downloading {selected.filename}[/bold magenta]\n"
+        f"[dim]{selected.repository} at {selected.revision[:12]}[/dim]\n"
+    )
+    try:
+        downloaded = download_huggingface_gguf(selected, settings().model_root)
+    except Exception as error:
+        console.print(Panel(str(error), title="Download failed", border_style="red"))
+        Prompt.ask("Press Enter to continue", default="")
+        return None
+    console.print(f"\n[green]Downloaded:[/green] {downloaded}")
+    return downloaded
+
+
+def _setup_model_selection(console: Console) -> Selection | None:
+    while True:
+        models = discover_models()
+        items: list[MenuItem] = []
+        if models:
+            items.append(
+                MenuItem(
+                    "Use an installed model",
+                    "Choose from compatible GGUF files Marathon already found.",
+                    "installed",
+                    f"{len(models)} found",
+                )
+            )
+        items.extend(
+            [
+                MenuItem(
+                    "Download Qwen 3.8 27B",
+                    "Choose a quant from the curated Unsloth GGUF repository.",
+                    "recommended",
+                    "recommended",
+                ),
+                MenuItem(
+                    "Add an existing model folder",
+                    "Use GGUF files in place without copying or moving them.",
+                    "folder",
+                ),
+                MenuItem(
+                    "Use another Hugging Face repository",
+                    "Enter an owner/name repository and choose its GGUF file.",
+                    "repository",
+                    "advanced",
+                ),
+                MenuItem("Exit setup", "Leave the system unchanged.", "quit"),
+            ]
+        )
+        chosen = _arrow_menu(
+            console,
+            "Set up your model",
+            "Use what you already have or let Marathon download one.",
+            items,
+            0,
+            allow_back=False,
+            context=("First-run setup", str(settings().model_root)),
+        )
+        assert chosen is not None
+        action = items[chosen].value
+        if action == "quit":
+            return None
+        if action == "installed":
+            selection = _choose_installed_model(console, models)
+            if selection is not None:
+                return selection
+            continue
+        if action == "folder":
+            console.clear()
+            value = Prompt.ask("Folder containing GGUF models").strip()
+            if not value:
+                continue
+            candidate = Path(value).expanduser()
+            if candidate.is_file() and candidate.suffix.lower() == ".gguf":
+                candidate = candidate.parent
+            try:
+                root = register_model_root(candidate)
+            except ValueError as error:
+                console.print(f"[bold red]{error}[/bold red]")
+                Prompt.ask("Press Enter to continue", default="")
+                continue
+            found = discover_models(root)
+            if not found:
+                console.print(f"[yellow]No GGUF models found under {root}.[/yellow]")
+                Prompt.ask("Press Enter to continue", default="")
+                continue
+            selection = _choose_installed_model(console, discover_models())
+            if selection is not None:
+                return selection
+            continue
+        repository = RECOMMENDED_QWEN_REPOSITORY
+        if action == "repository":
+            console.clear()
+            repository = Prompt.ask("Hugging Face repository (owner/name)").strip()
+            if not repository:
+                continue
+        downloaded = _download_gguf(console, repository)
+        if downloaded is None:
+            continue
+        refreshed = discover_models()
+        selected = next(
+            (model for model in refreshed if model.path.resolve() == downloaded.resolve()),
+            None,
+        )
+        if selected is None:
+            console.print("[bold red]The downloaded GGUF could not be indexed.[/bold red]")
+            Prompt.ask("Press Enter to continue", default="")
+            continue
+        return Selection(selected, find_profile(selected, None, "codex"), "codex")
+
+
+def _confirm_install(console: Console, component: str, description: str) -> bool:
+    choice = _arrow_menu(
+        console,
+        f"Install {component}",
+        "This is a one-time setup step.",
+        [
+            MenuItem(f"Install {component}", description, "install", "recommended"),
+            MenuItem("Exit", "Leave the current installation unchanged.", "quit"),
+        ],
+        0,
+        allow_back=False,
+        context=("Marathon setup", component),
+    )
+    return choice == 0
+
+
+def _run_install_command(console: Console, label: str, command: list[str]) -> bool:
+    console.clear()
+    console.print(f"[bold magenta]{label}[/bold magenta]\n")
+    result = subprocess.run(command, cwd=ROOT_DIR, check=False)
+    if result.returncode == 0:
+        return True
+    console.print(
+        Panel(
+            f"The installer exited with status {result.returncode}.",
+            title=f"{label} did not finish",
+            border_style="red",
+        )
+    )
+    Prompt.ask("Press Enter to continue", default="")
+    return False
+
+
+def _ensure_local_tools(
+    console: Console, selection: Selection, frontend: str = "codex"
+) -> bool:
+    try:
+        backend_for(selection.model, selection.profile)
+    except ValueError as error:
+        backend_id = selection.profile.backend or selection.model.family.backend
+        if backend_id != "upstream":
+            console.print(Panel(str(error), title="Backend unavailable", border_style="red"))
+            return False
+        if not _confirm_install(
+            console,
+            "llama.cpp",
+            "Build the pinned local inference engine for this machine.",
+        ):
+            return False
+        if not _run_install_command(
+            console,
+            "Building llama.cpp",
+            [str(ROOT_DIR / "bin" / "marathon"), "setup-llama"],
+        ):
+            return False
+        try:
+            backend_for(selection.model, selection.profile)
+        except ValueError as install_error:
+            console.print(
+                Panel(str(install_error), title="Backend unavailable", border_style="red")
+            )
+            return False
+
+    if frontend != "codex":
+        return True
+
+    codex = _codex_binary()
+    if Path(codex).is_file() or shutil.which(codex):
+        return True
+    if not _confirm_install(
+        console,
+        "Marathon Codex",
+        "Build the pinned terminal agent with Marathon's local-model patches.",
+    ):
+        return False
+    return _run_install_command(
+        console,
+        "Building Marathon Codex",
+        [str(ROOT_DIR / "bin" / "marathon"), "build-codex"],
+    )
 
 
 def _choose_model_profile(
@@ -489,7 +801,7 @@ def _initial_selection(
     try:
         model = find_model(remembered.get("model", ""), models)
     except ValueError:
-        preferred = [item for item in models if item.family.id == "qwen3.6-27b"]
+        preferred = [item for item in models if item.family.id == "qwen3.8-27b"]
         model = preferred[0] if preferred else models[0]
     frontend = remembered.get("frontend", "codex")
     try:
@@ -541,6 +853,7 @@ def _run_runtime_dashboard(
     stopping_message: str,
     stopped_message: str,
     error_title: str,
+    ensure_local_tools: bool,
 ) -> int:
     preferred = initial_frontend
     while True:
@@ -572,6 +885,8 @@ def _run_runtime_dashboard(
             except Exception as error:
                 console.print(Panel(str(error), title="Dyno could not finish", border_style="red"))
                 Prompt.ask("Press Enter to return", default="")
+            continue
+        if ensure_local_tools and not _ensure_local_tools(console, selection, action):
             continue
         remember(selection.model, selection.profile, action)
         runtime = runtime_factory(selection)
@@ -617,12 +932,15 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
     console = Console()
     models = discover_models()
     if not models:
-        console.print("[bold red]No GGUF models found.[/bold red]")
-        console.print(f"Expected models under {settings().model_root}")
-        return 2
-    selection = _apply_initial_frontend(
-        _initial_selection(models), initial_frontend
-    )
+        selection = _setup_model_selection(console)
+        if selection is None:
+            return 0
+        selection = _apply_initial_frontend(selection, initial_frontend)
+        models = discover_models()
+    else:
+        selection = _apply_initial_frontend(
+            _initial_selection(models), initial_frontend
+        )
     return _run_runtime_dashboard(
         console,
         models,
@@ -637,7 +955,64 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
         stopping_message="[yellow]Stopping backend and freeing GPUs…[/yellow]",
         stopped_message="[green]Backend stopped. GPUs are free.[/green]",
         error_title="Marathon could not start",
+        ensure_local_tools=True,
     )
+
+
+def run_codex_default() -> int:
+    """Start the remembered model and Codex without an intermediate menu."""
+
+    console = Console()
+    models = discover_models()
+    if models:
+        selection = _apply_initial_frontend(_initial_selection(models), "codex")
+    else:
+        selection = _setup_model_selection(console)
+        if selection is None:
+            return 0
+    if not _ensure_local_tools(console, selection):
+        return 2
+    save_selection(selection.model, selection.profile, "codex")
+    runtime = Runtime(selection.model, selection.profile)
+    result = 0
+    try:
+        with console.status("[bold magenta]Preparing local Codex...[/bold magenta]", spinner="dots") as status:
+            runtime.start(lambda message: status.update(f"[magenta]{message}[/magenta]"))
+        _launch_frontend(console, runtime, "codex")
+    except KeyboardInterrupt:
+        runtime.record("runtime.interrupted", {}, level="error")
+        result = 130
+    except Exception as error:
+        runtime.record("runtime.error", {"error": str(error)}, level="error")
+        console.print(Panel(str(error), title="Marathon could not start", border_style="red"))
+        result = 2
+    finally:
+        with console.status("[yellow]Stopping backend and freeing GPUs...[/yellow]", spinner="dots"):
+            runtime.cleanup()
+    return result
+
+
+def run_setup_dashboard() -> int:
+    """Configure the local model library without starting a backend."""
+
+    console = Console()
+    selection = _setup_model_selection(console)
+    if selection is None:
+        return 0
+    if not _ensure_local_tools(console, selection):
+        return 2
+    save_selection(selection.model, selection.profile, "codex")
+    console.clear()
+    console.print(
+        Panel.fit(
+            f"[bold green]Marathon is ready[/bold green]\n"
+            f"{selection.model.display_name}\n"
+            f"{selection.profile.display_name} · {selection.profile.context:,} requested tokens\n\n"
+            "Run [bold]marathon[/bold] from the project you want Codex to edit.",
+            border_style="green",
+        )
+    )
+    return 0
 
 
 def run_remote_dashboard(host: str, initial_frontend: str | None = None) -> int:
@@ -682,6 +1057,7 @@ def run_remote_dashboard(host: str, initial_frontend: str | None = None) -> int:
         ),
         stopped_message=f"[green]Backend on {host} stopped. GPUs are free.[/green]",
         error_title="Remote Marathon could not start",
+        ensure_local_tools=False,
     )
 
 

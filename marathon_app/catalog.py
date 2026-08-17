@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .model_library import configured_model_roots, quant_from_filename
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CATALOG_PATH = Path(
@@ -20,6 +22,7 @@ CATALOG_PATH = Path(
 class Settings:
     ai_root: Path
     model_root: Path
+    model_roots: tuple[Path, ...]
     llama_host: str
     llama_port: int
     router_host: str
@@ -122,6 +125,7 @@ def settings(catalog: dict[str, Any] | None = None) -> Settings:
     return Settings(
         ai_root=ai_root,
         model_root=model_root,
+        model_roots=configured_model_roots(model_root),
         llama_host=os.environ.get("MARATHON_LLAMA_HOST", raw["llama_host"]),
         llama_port=int(os.environ.get("MARATHON_LLAMA_PORT", raw["llama_port"])),
         router_host=os.environ.get("MARATHON_PROXY_HOST", raw["router_host"]),
@@ -273,12 +277,7 @@ def _family_for(path: Path, known: tuple[Family, ...]) -> Family:
 
 
 def _quant(name: str) -> str:
-    normalized = re.sub(r"-\d{5}-of-\d{5}\.gguf$", "", name, flags=re.IGNORECASE)
-    matches = re.findall(
-        r"(?:UD-)?(?:IQ\d(?:_[A-Z0-9]+)+(?:-[A-Z0-9]+)?|Q\d(?:_[A-Z0-9]+)+(?:-[A-Z0-9]+)?)",
-        normalized.upper(),
-    )
-    return matches[-1] if matches else "GGUF"
+    return quant_from_filename(name)
 
 
 def _slug(value: str) -> str:
@@ -294,13 +293,25 @@ def _model_size(path: Path) -> int:
 
 
 def discover_models(model_root: Path | None = None) -> list[Model]:
-    root = model_root or settings().model_root
-    if not root.exists():
-        return []
+    roots = (model_root,) if model_root is not None else settings().model_roots
     known = families()
     result: list[Model] = []
     ids: dict[str, int] = {}
-    for path in sorted(root.rglob("*.gguf")):
+    paths: list[Path] = []
+    seen_files: set[tuple[int, int]] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.gguf"):
+            try:
+                identity = (path.stat().st_dev, path.stat().st_ino)
+            except OSError:
+                continue
+            if identity in seen_files:
+                continue
+            seen_files.add(identity)
+            paths.append(path)
+    for path in sorted(paths):
         if ".cache" in path.parts or path.name.lower().startswith("mmproj"):
             continue
         if _model_sidecar(path) or not _first_shard(path) or path.stat().st_size == 0:

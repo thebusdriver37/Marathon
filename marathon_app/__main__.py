@@ -14,14 +14,31 @@ from rich.table import Table
 
 from . import __version__
 from .catalog import discover_models, format_size, settings
+from .model_library import register_model_root
 from .runtime import SESSION_FILE, request_stop
 from .telemetry import resolve_run, summarize_run
 from .remote import run_remote_host_command
-from .ui import run_dashboard, run_dyno_dashboard, run_remote_dashboard
+from .ui import (
+    run_codex_default,
+    run_dashboard,
+    run_dyno_dashboard,
+    run_remote_dashboard,
+    run_setup_dashboard,
+)
 
 
-def _models() -> int:
+def _models(targets: list[str]) -> int:
     console = Console()
+    if targets:
+        if len(targets) != 2 or targets[0] != "add":
+            console.print("[bold red]Usage:[/bold red] marathon models [add <folder>]")
+            return 2
+        try:
+            root = register_model_root(Path(targets[1]))
+        except ValueError as error:
+            console.print(f"[bold red]{error}[/bold red]")
+            return 2
+        console.print(f"[green]Added model folder:[/green] {root}")
     models = discover_models()
     table = Table(title="Installed Marathon models")
     table.add_column("Model")
@@ -235,8 +252,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="marathon", description="One-command local AI runtime")
     parser.add_argument("--version", action="version", version=f"Marathon {__version__}")
     parser.add_argument(
-        "command", nargs="?", choices=("dashboard", "codex", "hermes", "direct", "remote", "remote-host", "tune", "models", "status", "stop", "report", "compare"),
-        default="dashboard",
+        "command", nargs="?", choices=("dashboard", "codex", "hermes", "direct", "remote", "remote-host", "tune", "setup", "models", "status", "stop", "report", "compare"),
+        default="codex",
     )
     parser.add_argument("targets", nargs="*")
     return parser
@@ -245,7 +262,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "models":
-        return _models()
+        return _models(args.targets)
     if args.command == "status":
         return _status()
     if args.command == "stop":
@@ -265,8 +282,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_remote_dashboard(args.targets[0])
     if args.command == "tune":
         return run_dyno_dashboard()
+    if args.command == "setup":
+        return run_setup_dashboard()
+    if args.command == "codex":
+        return run_codex_default()
     return run_dashboard(
-        args.command if args.command in {"codex", "hermes", "direct"} else None
+        args.command if args.command in {"hermes", "direct"} else None
     )
 
 

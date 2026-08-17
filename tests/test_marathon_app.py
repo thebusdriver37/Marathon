@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from marathon_app import catalog
+from marathon_app import model_library
 from marathon_app.frontends import (
     _codex_binary,
     _stream_chat,
@@ -26,7 +27,14 @@ from marathon_app.runtime import (
     _model_is_loaded,
     _props_context_window,
 )
-from marathon_app.ui import Selection, _home, _home_items
+from marathon_app.ui import (
+    Selection,
+    _ensure_local_tools,
+    _home,
+    _home_items,
+    _initial_selection,
+    run_codex_default,
+)
 from marathon_app.telemetry import EventWriter, read_events, summarize_run
 
 
@@ -103,17 +111,62 @@ class CatalogTests(unittest.TestCase):
             [level.effort for level in model.family.reasoning_levels],
             ["none", "low", "medium", "xhigh"],
         )
-        self.assertEqual(profile.id, "native-256k")
+        self.assertEqual(profile.id, "auto")
         self.assertEqual(profile.context, 262_144)
         self.assertEqual(profile.tool_thinking_budget, 2_048)
 
         backend = catalog.Backend("test", "Test backend", TEST_EXECUTABLE)
         command = catalog.server_command(model, profile, backend)
         self.assertEqual(command[command.index("--ctx-size") + 1], "262144")
-        self.assertEqual(command[command.index("--tensor-split") + 1], "1,1,1,1")
+        self.assertEqual(command[command.index("--n-gpu-layers") + 1], "auto")
+        self.assertNotIn("--tensor-split", command)
         self.assertEqual(command[command.index("--cache-type-k") + 1], "q8_0")
         self.assertEqual(command[command.index("--cache-type-v") + 1], "q8_0")
-        self.assertEqual(command[command.index("--fit") + 1], "off")
+        self.assertEqual(command[command.index("--fit") + 1], "on")
+        self.assertEqual(command[command.index("--fit-ctx") + 1], "32768")
+
+        exact = catalog.find_profile(model, "native-256k", "codex")
+        exact_command = catalog.server_command(model, exact, backend)
+        self.assertEqual(
+            exact_command[exact_command.index("--tensor-split") + 1], "1,1,1,1"
+        )
+        self.assertEqual(exact_command[exact_command.index("--fit") + 1], "off")
+
+    def test_registered_model_roots_are_discovered_without_copying(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            first = home / "existing-a"
+            second = home / "existing-b"
+            first.mkdir()
+            second.mkdir()
+            (first / "Qwen3.8-27B-Q4_K_M.gguf").write_bytes(b"first")
+            (second / "my-model-Q8_0.gguf").write_bytes(b"second")
+            library_file = home / "config" / "models.json"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": str(home),
+                    "MARATHON_AI_ROOT": str(home / "AI"),
+                    "MARATHON_MODEL_LIBRARY_FILE": str(library_file),
+                },
+                clear=False,
+            ):
+                model_library.register_model_root(first)
+                model_library.register_model_root(second)
+                models = catalog.discover_models()
+                registered = model_library.load_registered_model_roots(library_file)
+
+        self.assertEqual({model.path.parent for model in models}, {first, second})
+        self.assertEqual(registered, (first, second))
+
+    def test_generic_automatic_profile_uses_conservative_context(self) -> None:
+        model = fixture_model("generic")
+
+        profile = catalog.find_profile(model, None, "codex")
+
+        self.assertEqual(profile.id, "auto")
+        self.assertEqual(profile.context, 32_768)
+        self.assertEqual(profile.extra_args, ("--fit", "on", "--fit-ctx", "8192"))
 
     def test_quick_profile_rejects_codex(self) -> None:
         model = fixture_model()
@@ -814,6 +867,53 @@ class TelemetryTests(unittest.TestCase):
 
 
 class UiTests(unittest.TestCase):
+    def test_direct_frontend_does_not_require_codex(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        console = mock.Mock()
+        with (
+            mock.patch("marathon_app.ui.backend_for"),
+            mock.patch("marathon_app.ui._codex_binary") as codex_binary,
+        ):
+            ready = _ensure_local_tools(
+                console, Selection(model, model.family.profiles[0], "direct"), "direct"
+            )
+
+        self.assertTrue(ready)
+        codex_binary.assert_not_called()
+
+    def test_initial_selection_prefers_qwen38(self) -> None:
+        older = fixture_model("qwen3.6-27b")
+        current = fixture_model("qwen3.8-27b")
+
+        selection = _initial_selection([older, current], remembered={})
+
+        self.assertEqual(selection.model.family.id, "qwen3.8-27b")
+        self.assertEqual(selection.profile.id, "auto")
+
+    def test_default_launch_opens_codex_without_home_menu(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        runtime = mock.Mock()
+        console = mock.MagicMock()
+        console.status.return_value.__enter__.return_value = mock.Mock()
+        with (
+            mock.patch("marathon_app.ui.Console", return_value=console),
+            mock.patch("marathon_app.ui.discover_models", return_value=[model]),
+            mock.patch("marathon_app.ui.load_selection", return_value={}),
+            mock.patch("marathon_app.ui._ensure_local_tools", return_value=True),
+            mock.patch("marathon_app.ui.save_selection") as save,
+            mock.patch("marathon_app.ui.Runtime", return_value=runtime),
+            mock.patch("marathon_app.ui._launch_frontend") as launch,
+            mock.patch("marathon_app.ui._home") as home,
+        ):
+            result = run_codex_default()
+
+        self.assertEqual(result, 0)
+        home.assert_not_called()
+        runtime.start.assert_called_once()
+        launch.assert_called_once_with(console, runtime, "codex")
+        runtime.cleanup.assert_called_once()
+        self.assertEqual(save.call_args.args[2], "codex")
+
     def test_warm_model_change_returns_to_runtime_supervisor(self) -> None:
         model = fixture_model()
         models = [model]

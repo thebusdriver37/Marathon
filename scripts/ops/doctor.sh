@@ -138,7 +138,7 @@ else
 fi
 
 if [[ -x "$ROOT_DIR/.marathon/venv/bin/python3" ]]; then
-  if PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" -c 'import aiohttp, prompt_toolkit, rich, marathon_app' 2>/dev/null; then
+  if PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" -c 'import aiohttp, huggingface_hub, prompt_toolkit, rich, marathon_app' 2>/dev/null; then
     pass "private router/UI Python environment is ready"
   else
     fail "private Python environment is incomplete; run: marathon setup-deps"
@@ -173,12 +173,25 @@ else
   warn "nvidia-smi not found; GPU health cannot be checked"
 fi
 
-model_count="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" -c 'from marathon_app.catalog import discover_models; print(len(discover_models()))' 2>/dev/null || printf 0)"
+model_report="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" - <<'PY' 2>/dev/null || printf '0\n'
+from marathon_app.catalog import discover_models, settings
+
+print(len(discover_models()))
+for root in settings().model_roots:
+    print(root)
+PY
+)"
+mapfile -t model_lines <<<"$model_report"
+model_count="${model_lines[0]:-0}"
+model_root_count=$(( ${#model_lines[@]} - 1 ))
 if [[ "$model_count" =~ ^[0-9]+$ ]] && (( model_count > 0 )); then
-  pass "$model_count centralized GGUF model(s) found under $MODELS_DIR"
+  pass "$model_count GGUF model(s) discovered across $model_root_count configured folder(s)"
 else
-  fail "no GGUF models discovered under $MODELS_DIR"
+  fail "no GGUF models discovered across $model_root_count configured folder(s)"
 fi
+for ((index = 1; index < ${#model_lines[@]}; index++)); do
+  info "model folder: ${model_lines[$index]}"
+done
 
 backend_inventory="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" - <<'PY' 2>/dev/null || true
 from marathon_app.catalog import backend_environment, backends, discover_models

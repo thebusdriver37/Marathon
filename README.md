@@ -1,50 +1,57 @@
 # Marathon
 
-Marathon is a one-command, terminal-first local AI runtime. It discovers GGUF
-models in the centralized AI directory, starts the model's configured local
-backend and Marathon's API router in the foreground, then opens Codex, Hermes,
-or a clean Direct Chat. Shipped profiles currently cover upstream llama.cpp,
-DeepSeek V4's optimized long-context llama.cpp fork, and the legacy four-GPU
-DwarfStar pipeline.
+Marathon is a one-command, terminal-first local Codex runtime.
+It discovers existing GGUF models without moving them, can download a selected GGUF from Hugging Face, starts the appropriate local backend, and opens Codex directly.
+Advanced model profiles, Direct Chat, Hermes compatibility, remote execution, and machine tuning remain available through explicit commands.
+Shipped profiles currently cover upstream llama.cpp, DeepSeek V4's optimized long-context llama.cpp fork, and the legacy four-GPU DwarfStar pipeline.
 
 Planned work that is intentionally not current behavior is tracked in
 [`docs/FUTURE_UPDATES.md`](docs/FUTURE_UPDATES.md).
 
-The process showing the Marathon dashboard owns the backend. Exiting Marathon
-stops its router and every backend process group and frees the GPUs. This lifecycle
-works through an ordinary SSH shell; no exposed daemon or web UI is required.
+The foreground Marathon process owns the backend.
+Exiting Marathon stops its router and every backend process group and frees the GPUs.
+This lifecycle works through an ordinary SSH shell; no exposed daemon or web UI is required.
 Marathon also has a native remote-client mode: Codex or Hermes and its tools run
 on a client machine while inference runs on a Linux GPU host through an SSH tunnel.
 
 ## Quick Start
 
 ```bash
-git clone --recurse-submodules https://github.com/thebusdriver37/Marathon.git
+git clone https://github.com/thebusdriver37/Marathon.git
 cd Marathon
-./bin/marathon install        # makes `marathon` available from any repo
-marathon setup-deps           # private router/UI Python environment
-marathon search up            # optional local web search
-marathon doctor
+./bin/marathon
 ```
 
-Run Marathon from the project directory you want Codex to edit:
+That first launch performs the required setup interactively.
+It creates Marathon's private Python environment, installs the global launcher when possible, searches registered model folders, and offers these model choices:
+
+- Use an existing GGUF that Marathon found.
+- Add another folder without copying or moving its models.
+- Download Qwen 3.8 27B from the curated Unsloth repository and choose the exact quant.
+- Enter another Hugging Face `owner/repository` and choose one of its single-file GGUFs.
+
+Downloads are resumable, pinned to the repository revision selected during setup, and recorded beside the GGUF.
+Q4_K_M is recommended for most systems, while Q8_0 is available for machines with more memory.
+Marathon requests the model's full supported context and lets llama.cpp fit GPU placement and context to the available hardware.
+The backend's actual loaded context is then propagated to Codex.
+
+If llama.cpp or Marathon Codex is missing, setup offers to build the pinned version locally.
+The source build requires `git`, CMake, a C++ compiler, and Rust Cargo.
+CUDA acceleration is enabled automatically when `nvcc` is available; otherwise Marathon builds a CPU backend.
+
+After setup, run Marathon from the project directory Codex should edit:
 
 ```bash
 cd /path/to/your/repo
 marathon
 ```
 
-The remembered model, profile, and frontend are preselected. Use the arrow keys
-and press Enter to load the highlighted setup. Model selection drills directly
-into that model's profiles. When a frontend exits, Marathon returns to its
-dashboard with the model still warm. Reopen Codex or Hermes, enter Direct Chat, switch
-models, or quit and unload the backend.
+Marathon starts the remembered model and opens Codex without an intermediate menu.
+Exiting Codex stops the router and backend and frees the GPUs.
+Run `marathon dashboard` when you explicitly want model profiles, frontend selection, warm-backend reuse, or Dyno tuning.
 
 ```text
-marathon  →  Enter  →  model loads  →  Codex
-                                      ↓ exit
-                         Marathon dashboard
-                  Codex · Hermes · Direct Chat · switch · quit
+marathon  →  model loads  →  Codex  →  exit  →  GPUs freed
 ```
 
 ## Native Mac client with Linux GPUs
@@ -99,6 +106,16 @@ By default Marathon recursively discovers models under:
 Set `MARATHON_AI_ROOT` to move the entire model, backend, and cache hierarchy,
 or `MARATHON_MODELS_DIR` to override only model discovery. Model families and
 selectable profiles are defined in `config/runtime_catalog.toml`.
+
+Register any number of existing model folders without moving their files:
+
+```bash
+marathon models add /mnt/models
+marathon models add ~/Downloads/gguf
+```
+
+Registered folders are saved in `~/.config/marathon/models.json` and scanned together with the default model directory.
+Set `MARATHON_MODEL_DIRS` to an OS-path-separated list when an ephemeral environment override is preferable.
 
 ```bash
 MARATHON_AI_ROOT=/mnt/local-ai marathon       # move the complete hierarchy
@@ -165,13 +182,16 @@ together. `MARATHON_DS4_GPUS` overrides its catalog `0,1,2,3` GPU mapping.
 ## Commands
 
 ```bash
-marathon                  # dashboard; Enter starts the remembered setup
-marathon codex            # dashboard with Codex selected
+marathon                  # start the remembered model and open Codex
+marathon setup            # find, add, or download a model
+marathon dashboard        # advanced model/profile/frontend controls
+marathon codex            # explicit form of the default command
 marathon hermes           # dashboard with Hermes Agent selected
 marathon direct           # dashboard with clean Direct Chat selected
+marathon models add PATH  # register an existing GGUF folder
 marathon remote HOST      # local frontend, remote Linux GPUs over secure SSH
 marathon tune             # open Dyno directly
-marathon models           # list installed centralized GGUF models
+marathon models           # list discovered GGUF models
 marathon status           # inspect an active foreground runtime
 marathon stop             # emergency stop request from another SSH shell
 marathon report           # post-mortem for the latest run
@@ -181,8 +201,8 @@ marathon doctor           # diagnose setup, GPUs, models, and ports
 marathon search up        # optional local SearXNG for Codex web tools
 ```
 
-The old `marathon backend ...` commands remain temporarily for compatibility,
-but the dashboard does not use their detached-process lifecycle.
+The old `marathon backend ...` commands remain temporarily for compatibility.
+The normal foreground runtime does not use their detached-process lifecycle.
 
 ## Dyno machine tuning
 
@@ -376,8 +396,7 @@ rather than inventing a quality score.
 ## Diagnostics and Model Checks
 
 Use `marathon doctor` when setting up a new machine or debugging a failed run.
-It checks Codex, the backends required by installed models, centralized models,
-Marathon's private Python environment, GPU visibility, ports, and optional SearXNG.
+It checks Codex, the backends required by installed models, every configured model folder, Marathon's private Python environment, GPU visibility, ports, and optional SearXNG.
 
 ## Prompt Cache Snapshots
 
@@ -444,9 +463,8 @@ default the router retains at most 64 turns for one hour.
 Python 3.10+ on the host.
 
 ```bash
-./bin/marathon setup-deps       # one-time: create .marathon/venv for the router
 ./bin/marathon search up        # one-time: pull image, generate secret, start SearXNG
-./bin/marathon                  # launch — router wires the web tools
+./bin/marathon                  # launch; dependencies refresh automatically
 ```
 
 The first `search up` writes `docker/searxng/.env` from `.env.example`,

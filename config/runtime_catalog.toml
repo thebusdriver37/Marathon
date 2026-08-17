@@ -189,7 +189,7 @@ id = "qwen3.8-27b"
 display_name = "Qwen 3.8 27B Dense"
 patterns = ["qwen3.8-27b", "qwen3_8-27b"]
 backend = "upstream"
-default_profile = "native-256k"
+default_profile = "auto"
 default_reasoning_level = "xhigh"
 reasoning_levels = [
   { effort = "none", description = "Disable reasoning for direct responses." },
@@ -197,6 +197,23 @@ reasoning_levels = [
   { effort = "medium", description = "Balanced reasoning for most coding work." },
   { effort = "xhigh", description = "Deep reasoning for difficult tasks and careful validation." },
 ]
+
+[[families.profiles]]
+id = "auto"
+display_name = "Automatic"
+description = "Use available GPUs and fit the largest practical context automatically."
+context = 262144
+batch = 2048
+ubatch = 512
+parallel = 1
+gpu_layers = "auto"
+split_mode = "layer"
+cache_k = "q8_0"
+cache_v = "q8_0"
+extra_args = ["--fit", "on", "--fit-ctx", "32768"]
+tool_thinking_budget = 2048
+confidence = "recommended"
+frontends = ["codex", "direct"]
 
 [[families.profiles]]
 id = "native-256k"
@@ -289,7 +306,23 @@ id = "generic"
 display_name = "Other GGUF"
 patterns = []
 backend = "upstream"
-default_profile = "balanced"
+default_profile = "auto"
+
+[[families.profiles]]
+id = "auto"
+display_name = "Automatic"
+description = "Use available GPUs and fit a practical context automatically."
+context = 32768
+batch = 1024
+ubatch = 256
+parallel = 1
+gpu_layers = "auto"
+split_mode = "layer"
+cache_k = "q8_0"
+cache_v = "q8_0"
+extra_args = ["--fit", "on", "--fit-ctx", "8192"]
+confidence = "recommended"
+frontends = ["codex", "direct"]
 
 [[families.profiles]]
 id = "balanced"

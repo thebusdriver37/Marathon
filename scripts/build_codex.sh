@@ -13,6 +13,21 @@ TEMP_TARGET=""
 INSTALL_TMP=""
 FEATURES_TMP=""
 
+if [[ ! -f "$CODEX_DIR/codex-rs/Cargo.toml" ]]; then
+  if [[ "$CODEX_DIR" != "$ROOT_DIR/codex" ]]; then
+    echo "error: Codex source is missing at $CODEX_DIR" >&2
+    exit 1
+  fi
+  echo "-> Initializing the pinned Codex source..."
+  git -C "$ROOT_DIR" submodule update --init --depth 1 codex
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "error: Rust cargo is required to build Marathon Codex" >&2
+  echo "install Rust from https://rustup.rs, then rerun 'marathon build-codex'" >&2
+  exit 1
+fi
+
 if [[ "$PATCH_IN_PLACE" != "1" ]]; then
   BUILD_CODEX_DIR="${MARATHON_PATCHED_CODEX_DIR:-$ROOT_DIR/.marathon/codex-patched}"
 fi
