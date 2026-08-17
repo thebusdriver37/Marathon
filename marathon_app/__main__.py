@@ -252,7 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="marathon", description="One-command local AI runtime")
     parser.add_argument("--version", action="version", version=f"Marathon {__version__}")
     parser.add_argument(
-        "command", nargs="?", choices=("dashboard", "codex", "hermes", "direct", "remote", "remote-host", "tune", "setup", "models", "status", "stop", "report", "compare"),
+        "command", nargs="?", choices=("dashboard", "codex", "hermes", "direct", "remote", "remote-host", "tune", "setup", "models", "status", "stop", "report", "compare", "resume", "fork"),
         default="codex",
     )
     parser.add_argument("targets", nargs="*")
@@ -284,6 +284,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_dyno_dashboard()
     if args.command == "setup":
         return run_setup_dashboard()
+    if args.command in {"resume", "fork"}:
+        return run_codex_default([args.command, *args.targets])
     if args.command == "codex":
         return run_codex_default()
     return run_dashboard(

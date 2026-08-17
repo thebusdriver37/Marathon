@@ -45,6 +45,7 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   cargo test -p codex-tui \
     status_line_tokens_per_second_renders_completed_turn_rate_snapshot
   cargo test -p codex-tui distinguishes_unset_from_disabled
+  cargo test -p codex-tui ignores_sqlite_candidate_from_another_provider
 )
 
 PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" \

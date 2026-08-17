@@ -17,6 +17,7 @@ from marathon_app.frontends import (
     _stream_chat,
     codex_command,
     hermes_command,
+    run_codex,
     run_hermes,
 )
 from marathon_app.codex_telemetry import snapshot_sessions, summarize_session_changes
@@ -514,6 +515,23 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("model_auto_compact_token_limit=229376", command)
         self.assertNotIn("--ignore-user-config", command)
 
+    def test_codex_child_uses_marathon_resume_command(self) -> None:
+        model = fixture_model()
+        runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"))
+        completed = subprocess.CompletedProcess([], 0)
+
+        with (
+            mock.patch("marathon_app.frontends.subprocess.run", return_value=completed) as run,
+            mock.patch("marathon_app.frontends.snapshot_sessions", return_value={}),
+            mock.patch("marathon_app.frontends.summarize_session_changes", return_value=[]),
+            mock.patch("marathon_app.frontends.shutil.which", return_value="/usr/bin/marathon"),
+        ):
+            code = run_codex(runtime, ["resume", "session-id"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_CLI_NAME"], "marathon")
+        self.assertEqual(run.call_args.args[0][-2:], ["resume", "session-id"])
+
     def test_patched_codex_enables_turn_throughput_status_item(self) -> None:
         model = fixture_model()
         profile = catalog.find_profile(model, "balanced", "codex")
@@ -910,7 +928,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(result, 0)
         home.assert_not_called()
         runtime.start.assert_called_once()
-        launch.assert_called_once_with(console, runtime, "codex")
+        launch.assert_called_once_with(console, runtime, "codex", None)
         runtime.cleanup.assert_called_once()
         self.assertEqual(save.call_args.args[2], "codex")
 

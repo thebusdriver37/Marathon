@@ -813,13 +813,20 @@ def _initial_selection(
 
 
 def _launch_frontend(
-    console: Console, runtime: Runtime | RemoteRuntime, frontend: str
+    console: Console,
+    runtime: Runtime | RemoteRuntime,
+    frontend: str,
+    extra_args: list[str] | None = None,
 ) -> None:
     console.clear()
     if frontend == "direct":
         direct_chat(runtime, console)
         return
-    code = run_hermes(runtime) if frontend == "hermes" else run_codex(runtime)
+    code = (
+        run_hermes(runtime, extra_args)
+        if frontend == "hermes"
+        else run_codex(runtime, extra_args)
+    )
     if code not in (0, 130):
         console.print(
             f"[yellow]{FRONTEND_NAMES[frontend]} exited with status {code}.[/yellow]"
@@ -959,7 +966,7 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
     )
 
 
-def run_codex_default() -> int:
+def run_codex_default(codex_args: list[str] | None = None) -> int:
     """Start the remembered model and Codex without an intermediate menu."""
 
     console = Console()
@@ -978,7 +985,7 @@ def run_codex_default() -> int:
     try:
         with console.status("[bold magenta]Preparing local Codex...[/bold magenta]", spinner="dots") as status:
             runtime.start(lambda message: status.update(f"[magenta]{message}[/magenta]"))
-        _launch_frontend(console, runtime, "codex")
+        _launch_frontend(console, runtime, "codex", codex_args)
     except KeyboardInterrupt:
         runtime.record("runtime.interrupted", {}, level="error")
         result = 130

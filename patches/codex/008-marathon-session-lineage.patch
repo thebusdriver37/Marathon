@@ -1,0 +1,138 @@
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -658,7 +658,21 @@ async fn lookup_session_target_with_app_server(
+             .thread_read(thread_id, /*include_turns*/ false)
+             .await
+         {
+-            Ok(thread) => Ok(session_target_from_app_server_thread(thread)),
++            Ok(thread)
++                if app_server.uses_remote_workspace()
++                    || thread.model_provider == config.model_provider_id =>
++            {
++                Ok(session_target_from_app_server_thread(thread))
++            }
++            Ok(thread) => {
++                warn!(
++                    session = id_or_name,
++                    expected_provider = %config.model_provider_id,
++                    actual_provider = %thread.model_provider,
++                    "Refusing to open a session from another model provider"
++                );
++                Ok(None)
++            }
+             Err(err) => {
+                 warn!(
+                     session = id_or_name,
+diff --git a/codex-rs/tui/src/named_session_lookup.rs b/codex-rs/tui/src/named_session_lookup.rs
+--- a/codex-rs/tui/src/named_session_lookup.rs
++++ b/codex-rs/tui/src/named_session_lookup.rs
+@@ -39,6 +39,7 @@ pub(super) struct NamedSessionCandidate {
+ pub(super) struct NamedSessionCandidates<'a> {
+     name: &'a str,
+     codex_home: &'a Path,
++    model_provider: Option<String>,
+     collection: SessionCollection,
+     mode: SessionNameLookupMode,
+     search_term: Option<&'a str>,
+@@ -161,6 +162,9 @@ async fn lookup_from_app_server(
+         mode,
+         Some(name),
+     );
++    if !app_server.uses_remote_workspace() {
++        candidates = candidates.with_model_provider(config.model_provider_id.clone());
++    }
+     while let Some(candidate) = candidates.next(app_server).await? {
+         if let Some(session_meta) = candidate.session_meta
+             && (!RESUME_SESSION_SOURCES.contains(&session_meta.source)
+@@ -200,6 +204,7 @@ impl<'a> NamedSessionCandidates<'a> {
+         Self {
+             name,
+             codex_home,
++            model_provider: None,
+             collection,
+             mode,
+             search_term,
+@@ -209,6 +214,11 @@ impl<'a> NamedSessionCandidates<'a> {
+         }
+     }
+ 
++    fn with_model_provider(mut self, model_provider: String) -> Self {
++        self.model_provider = Some(model_provider);
++        self
++    }
++
+     /// Returns the next exact-name match, advancing through server pages as needed.
+     ///
+     /// Local candidates must have a rollout in the requested collection with a matching session
+@@ -273,7 +283,7 @@ impl<'a> NamedSessionCandidates<'a> {
+                     limit: Some(100),
+                     sort_key: Some(sort_key),
+                     sort_direction: None,
+-                    model_providers: None,
++                    model_providers: self.model_provider.clone().map(|provider| vec![provider]),
+                     source_kinds: Some(super::resume_source_kinds(
+                         /*include_non_interactive*/ false,
+                     )),
+diff --git a/codex-rs/tui/src/named_session_lookup_tests.rs b/codex-rs/tui/src/named_session_lookup_tests.rs
+--- a/codex-rs/tui/src/named_session_lookup_tests.rs
++++ b/codex-rs/tui/src/named_session_lookup_tests.rs
+@@ -299,6 +299,39 @@ async fn validates_sqlite_candidate_filters_against_rollout() -> color_eyre::Res
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn ignores_sqlite_candidate_from_another_provider() -> color_eyre::Result<()> {
++    let temp_dir = TempDir::new()?;
++    let config = build_config(&temp_dir).await?;
++    let runtime = state_runtime(&config).await?;
++    let thread_id = ThreadId::new();
++    let mut other_provider_config = config.clone();
++    other_provider_config.model_provider_id = "other-provider".to_string();
++    let rollout_path = write_rollout(
++        &other_provider_config,
++        thread_id,
++        "2025-02-01T10:00:00Z",
++        "preview",
++        SessionSource::Cli,
++        ThreadHistoryMode::Legacy,
++    )?;
++    upsert_thread(
++        &runtime,
++        thread_metadata(
++            &other_provider_config,
++            thread_id,
++            rollout_path,
++            "saved-session",
++        ),
++    )
++    .await?;
++
++    let target = lookup_name(&config, "saved-session").await?;
++
++    assert!(target.is_none());
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn recovers_legacy_index_name_without_requiring_sidecar_rewrite() -> color_eyre::Result<()> {
+     let temp_dir = TempDir::new()?;
+diff --git a/codex-rs/utils/cli/src/resume_command.rs b/codex-rs/utils/cli/src/resume_command.rs
+--- a/codex-rs/utils/cli/src/resume_command.rs
++++ b/codex-rs/utils/cli/src/resume_command.rs
+@@ -42,9 +42,12 @@ pub fn cli_command_for_action(action: &str) -> String {
+ pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+     let thread_id = thread_id?;
+     match thread_name.filter(|name| !name.is_empty()) {
+-        Some(thread_name) => Some(format!(
+-            "codex resume, then select {thread_name} ({thread_id})"
+-        )),
++        Some(thread_name) => {
++            let command = cli_command_for_action("resume");
++            Some(format!(
++                "{command}, then select {thread_name} ({thread_id})"
++            ))
++        }
+         None => resume_command(/*thread_name*/ None, Some(thread_id)),
+     }
+ }

@@ -30,8 +30,8 @@ Commands:
   backend <sub>   Manage the local router and llama.cpp backend
   doctor          Check local setup, backend health, models, ports, GPU, and cache usage
   eval coding     Run a temporary Codex-style coding gauntlet against the active backend
-  resume          Resume a previous Marathon interactive session
-  fork            Fork a previous Marathon interactive session
+  resume [ID]     Resume a Marathon session or open its session picker
+  fork [ID]       Fork a Marathon session or open its session picker
   exec            Run headless Codex exec against the default local model
   install         Install the marathon command into ~/.local/bin
   search <sub>    Manage the SearXNG container (up | down | status | logs | url | restart | pull)
@@ -99,7 +99,7 @@ case "$cmd" in
   dashboard|chat)
     run_app dashboard "$@"
     ;;
-  codex|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare)
+  codex|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare|resume|fork)
     run_app "$cmd" "$@"
     ;;
   backend)
@@ -130,12 +130,6 @@ USAGE
         exit 1
         ;;
     esac
-    ;;
-  resume)
-    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" resume "$@"
-    ;;
-  fork)
-    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" fork "$@"
     ;;
   exec)
     exec "$ROOT_DIR/scripts/launchers/start_codex.sh" exec "$@"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -47,6 +48,15 @@ def _hermes_binary() -> str:
     return os.environ.get("MARATHON_HERMES_BIN") or "hermes"
 
 
+def _marathon_cli_name() -> str:
+    configured = os.environ.get("CODEX_CLI_NAME")
+    if configured and configured.strip():
+        return configured.strip()
+    if shutil.which("marathon"):
+        return "marathon"
+    return str(Path(__file__).resolve().parents[1] / "bin" / "marathon")
+
+
 def _codex_features(binary: str) -> set[str]:
     marker = Path(f"{binary}.features")
     try:
@@ -87,6 +97,7 @@ def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list
 def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
     command = codex_command(runtime, extra_args)
     environment = os.environ.copy()
+    environment.setdefault("CODEX_CLI_NAME", _marathon_cli_name())
     before = snapshot_sessions()
     started = time.monotonic()
     runtime.record(
