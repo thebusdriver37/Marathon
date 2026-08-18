@@ -16,6 +16,16 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 CATALOG_PATH = Path(
     os.environ.get("MARATHON_CATALOG", ROOT_DIR / "config" / "runtime_catalog.toml")
 ).expanduser()
+USER_CATALOG_PATH = Path(
+    os.environ.get(
+        "MARATHON_USER_CATALOG",
+        os.path.join(
+            os.environ.get("XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config")),
+            "marathon",
+            "catalog.toml",
+        ),
+    )
+).expanduser()
 
 
 @dataclass(frozen=True)
@@ -106,9 +116,46 @@ class Model:
         return self.id
 
 
+def _merge_catalog(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge a user catalog over the base, keeping settings, backends, and
+    families keyed by id while appending user-defined profiles to families."""
+
+    merged = dict(base)
+    for key, value in override.items():
+        if key in {"backends", "families"} and isinstance(merged.get(key), list) and isinstance(value, list):
+            merged[key] = _merge_keyed_list(merged[key], value)
+        elif key in {"settings",} and isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_keyed_list(base_items: list[dict[str, Any]], override_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = [dict(item) for item in base_items]
+    for override_item in override_items:
+        item_id = override_item.get("id")
+        for position, existing in enumerate(result):
+            if existing.get("id") == item_id:
+                merged_item = {**existing, **override_item}
+                for table in ("profiles",):
+                    if isinstance(existing.get(table), list) and isinstance(override_item.get(table), list):
+                        merged_item[table] = _merge_keyed_list(existing[table], override_item[table])
+                result[position] = merged_item
+                break
+        else:
+            result.append(dict(override_item))
+    return result
+
+
 def load_catalog(path: Path | None = None) -> dict[str, Any]:
-    with (path or CATALOG_PATH).open("rb") as handle:
-        return tomllib.load(handle)
+    base = CATALOG_PATH if path is None else path
+    with base.open("rb") as handle:
+        merged = tomllib.load(handle)
+    if path is None and USER_CATALOG_PATH.exists():
+        with USER_CATALOG_PATH.open("rb") as handle:
+            merged = _merge_catalog(merged, tomllib.load(handle))
+    return merged
 
 
 def _resolve_ai_path(value: str | os.PathLike[str], ai_root: Path) -> Path:

@@ -172,10 +172,15 @@ Useful storage locations:
 | Models and backends | `~/AI/` |
 | Registered model folders | `~/.config/marathon/models.json` |
 | Remembered selection | `~/.config/marathon/selection.json` |
+| Personal catalog overrides | `~/.config/marathon/catalog.toml` |
 | Runtime traces | `~/.local/state/marathon/runs/` |
 | Runtime logs | `~/.local/state/marathon/logs/` |
 
 Set `MARATHON_AI_ROOT` to move the complete models, backends, and cache hierarchy.
+
+Personal runtime profiles and catalog edits belong in `~/.config/marathon/catalog.toml`.
+That file is merged over the repository's `config/runtime_catalog.toml`, so machine-specific families, backends, and profiles never need to be committed.
+Set `MARATHON_USER_CATALOG` to point the override elsewhere.
 
 ## Runtime Safety
 

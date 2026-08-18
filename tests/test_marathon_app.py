@@ -56,6 +56,62 @@ def fixture_model(family_id: str = "qwen3.6-27b") -> catalog.Model:
 
 
 class CatalogTests(unittest.TestCase):
+    def test_user_catalog_merges_profiles_over_base(self) -> None:
+        base = {
+            "settings": {"ai_root": "~/AI"},
+            "backends": [{"id": "upstream", "server": "backends/llama-server"}],
+            "families": [
+                {
+                    "id": "qwen",
+                    "display_name": "Qwen",
+                    "patterns": ["qwen"],
+                    "backend": "upstream",
+                    "default_profile": "base",
+                    "profiles": [
+                        {
+                            "id": "base",
+                            "display_name": "Base",
+                            "context": 1024,
+                            "split_mode": "layer",
+                            "tensor_split": "1,1,1,1",
+                        }
+                    ],
+                }
+            ],
+        }
+        override = {
+            "families": [
+                {
+                    "id": "qwen",
+                    "profiles": [
+                        {
+                            "id": "two-gpu",
+                            "display_name": "Two GPU",
+                            "context": 262144,
+                            "split_mode": "layer",
+                            "tensor_split": "1,1",
+                            "gpus": [0, 1],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        merged = catalog._merge_catalog(base, override)
+        family = merged["families"][0]
+
+        self.assertEqual(
+            [profile["id"] for profile in family["profiles"]],
+            ["base", "two-gpu"],
+        )
+        two_gpu = family["profiles"][1]
+        self.assertEqual(two_gpu["tensor_split"], "1,1")
+        self.assertEqual(two_gpu["gpus"], [0, 1])
+        # Base profile and base backend survive the merge untouched.
+        self.assertEqual(family["profiles"][0]["tensor_split"], "1,1,1,1")
+        self.assertEqual(merged["backends"], base["backends"])
+        self.assertEqual(merged["settings"], base["settings"])
+
     def test_reasoning_catalog_requires_structured_levels(self) -> None:
         loaded = catalog.load_catalog()
         loaded["families"][0]["reasoning_levels"] = "low"
