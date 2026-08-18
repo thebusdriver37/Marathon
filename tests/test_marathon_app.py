@@ -133,6 +133,29 @@ class CatalogTests(unittest.TestCase):
         )
         self.assertEqual(exact_command[exact_command.index("--fit") + 1], "off")
 
+    def test_qwen38_two_gpu_profile_pins_gpus_and_split(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "Qwen3.8-27B-Q8_0.gguf"
+            path.write_bytes(b"model")
+            model = catalog.discover_models(root)[0]
+
+        profile = catalog.find_profile(model, "two-gpu-256k", "codex")
+        self.assertEqual(model.family.id, "qwen3.8-27b")
+        self.assertEqual(profile.gpus, (0, 1))
+        self.assertEqual(profile.tensor_split, "1,1")
+        self.assertEqual(profile.gpu_layers, "999")
+        self.assertEqual(profile.context, 262_144)
+        self.assertEqual(profile.cache_k, "q8_0")
+        self.assertEqual(profile.cache_v, "q8_0")
+
+        backend = catalog.Backend("test", "Test backend", TEST_EXECUTABLE)
+        command = catalog.server_command(model, profile, backend)
+        self.assertEqual(command[command.index("--ctx-size") + 1], "262144")
+        self.assertEqual(command[command.index("--n-gpu-layers") + 1], "999")
+        self.assertEqual(command[command.index("--tensor-split") + 1], "1,1")
+        self.assertEqual(command[command.index("--fit") + 1], "off")
+
     def test_registered_model_roots_are_discovered_without_copying(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -395,6 +418,30 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(
             dict(specs[0].environment)["DSV4_MTP_GGUF"], "/tmp/mtp.gguf"
         )
+
+    def test_llama_backend_pins_profile_gpus(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        profile = catalog.find_profile(model, "two-gpu-256k", "codex")
+        runtime = Runtime(model, profile)
+        backend = catalog.Backend("test", "Test", TEST_EXECUTABLE)
+
+        specs = runtime._backend_specs(backend, Path("/tmp/slots"))
+
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0].name, "llama")
+        self.assertEqual(
+            dict(specs[0].environment)["CUDA_VISIBLE_DEVICES"], "0,1"
+        )
+
+    def test_llama_backend_without_gpus_leaves_devices_unpinned(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        profile = catalog.find_profile(model, "native-256k", "codex")
+        runtime = Runtime(model, profile)
+        backend = catalog.Backend("test", "Test", TEST_EXECUTABLE)
+
+        specs = runtime._backend_specs(backend, Path("/tmp/slots"))
+
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", dict(specs[0].environment))
 
     def test_model_readiness_accepts_llama_models_shape(self) -> None:
         payload = {"models": [{"name": "local-model"}]}

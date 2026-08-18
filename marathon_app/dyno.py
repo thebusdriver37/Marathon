@@ -222,6 +222,7 @@ def _profile_from_dict(raw: dict[str, object]) -> Profile:
             if raw.get("temperature") is not None
             else None
         ),
+        gpus=tuple(int(gpu) for gpu in raw.get("gpus", [])),
     )
 
 

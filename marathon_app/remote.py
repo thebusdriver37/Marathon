@@ -114,6 +114,7 @@ def _profile_from_payload(payload: dict[str, object]) -> Profile:
             if payload.get("temperature") is not None
             else None
         ),
+        gpus=tuple(int(gpu) for gpu in payload.get("gpus", [])),
     )
 
 

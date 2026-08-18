@@ -68,6 +68,7 @@ class Profile:
     parallel_tool_calls: bool = False
     backend: str | None = None
     temperature: float | None = None
+    gpus: tuple[int, ...] = ()
 
     def supports(self, frontend: str) -> bool:
         return frontend in self.frontends
@@ -239,6 +240,7 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                     if item.get("temperature") is not None
                     else None
                 ),
+                gpus=tuple(int(gpu) for gpu in item.get("gpus", [])),
             )
             for item in raw.get("profiles", [])
         )

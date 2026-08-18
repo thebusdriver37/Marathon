@@ -401,6 +401,10 @@ class Runtime:
             command = server_command(self.model, self.profile, backend)
             command.extend(["--slot-save-path", str(slot_path)])
             environment = backend_environment(self.model, backend)
+            if self.profile.gpus:
+                environment["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    str(gpu) for gpu in self.profile.gpus
+                )
             return [
                 BackendProcessSpec(
                     "llama", tuple(command), tuple(environment.items())
