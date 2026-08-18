@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -190,11 +191,41 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(exact_command[exact_command.index("--fit") + 1], "off")
 
     def test_qwen38_two_gpu_profile_pins_gpus_and_split(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = root / "Qwen3.8-27B-Q8_0.gguf"
-            path.write_bytes(b"model")
-            model = catalog.discover_models(root)[0]
+        base = catalog.load_catalog(catalog.CATALOG_PATH)
+        override = {
+            "families": [
+                {
+                    "id": "qwen3.8-27b",
+                    "profiles": [
+                        {
+                            "id": "two-gpu-256k",
+                            "display_name": "Two GPU 256K",
+                            "context": 262_144,
+                            "gpu_layers": "999",
+                            "split_mode": "layer",
+                            "tensor_split": "1,1",
+                            "cache_k": "q8_0",
+                            "cache_v": "q8_0",
+                            "extra_args": ["--fit", "off"],
+                            "frontends": ["codex"],
+                            "gpus": [0, 1],
+                        }
+                    ],
+                }
+            ]
+        }
+        merged = catalog._merge_catalog(base, override)
+        family = next(
+            item for item in catalog.families(merged) if item.id == "qwen3.8-27b"
+        )
+        model = catalog.Model(
+            id="qwen3.8-27b-q8-0",
+            display_name="Qwen 3.8 27B Q8_0",
+            path=Path("/tmp/Qwen3.8-27B-Q8_0.gguf"),
+            size_bytes=27 * 1024**3,
+            family=family,
+            quant="Q8_0",
+        )
 
         profile = catalog.find_profile(model, "two-gpu-256k", "codex")
         self.assertEqual(model.family.id, "qwen3.8-27b")
@@ -477,7 +508,8 @@ class RuntimeTests(unittest.TestCase):
 
     def test_llama_backend_pins_profile_gpus(self) -> None:
         model = fixture_model("qwen3.8-27b")
-        profile = catalog.find_profile(model, "two-gpu-256k", "codex")
+        base_profile = catalog.find_profile(model, "native-256k", "codex")
+        profile = replace(base_profile, gpus=(0, 1), tensor_split="1,1")
         runtime = Runtime(model, profile)
         backend = catalog.Backend("test", "Test", TEST_EXECUTABLE)
 
