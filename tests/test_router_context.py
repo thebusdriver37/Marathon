@@ -481,6 +481,52 @@ class RouterContextTests(unittest.TestCase):
         )
         self.assertEqual(normalized["input"][0]["type"], "function_call_output")
 
+    def test_malformed_replayed_tool_pair_is_omitted(self) -> None:
+        malformed_call = {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "broken_call",
+            "arguments": '{"cmd":"unterminated',
+        }
+        malformed_output = {
+            "type": "function_call_output",
+            "call_id": "broken_call",
+            "output": "failed to parse function arguments",
+        }
+        valid_call = {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "valid_call",
+            "arguments": '{"cmd":"pwd"}',
+        }
+        valid_output = {
+            "type": "function_call_output",
+            "call_id": "valid_call",
+            "output": "/workspace",
+        }
+
+        normalized = router_module.normalize_responses_request(
+            {
+                "input": [
+                    malformed_call,
+                    malformed_output,
+                    valid_call,
+                    valid_output,
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "continue"}],
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(
+            [item.get("call_id") for item in normalized["input"][:2]],
+            ["valid_call", "valid_call"],
+        )
+        self.assertEqual(normalized["_marathon_malformed_tool_replay_drops"], 2)
+
     def test_completed_message_stays_commentary_when_tool_precedes_it(self) -> None:
         items = [
             {"type": "function_call", "name": "exec_command"},

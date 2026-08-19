@@ -349,6 +349,48 @@ def _bound_tool_output_item(item: dict[str, Any], limit: int) -> tuple[dict[str,
     return result, True
 
 
+def _function_call_arguments_are_valid(arguments: Any) -> bool:
+    """Return whether replayed function arguments form one JSON object."""
+
+    if isinstance(arguments, dict):
+        return True
+    if not isinstance(arguments, str):
+        return False
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict)
+
+
+def _malformed_function_call_keys(items: list[Any]) -> set[str]:
+    """Identify malformed replayed calls so their complete pair can be omitted."""
+
+    keys: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            continue
+        if _function_call_arguments_are_valid(item.get("arguments")):
+            continue
+        for key in (item.get("call_id"), item.get("id")):
+            if isinstance(key, str) and key:
+                keys.add(key)
+    return keys
+
+
+def _is_malformed_function_call(
+    item: dict[str, Any], malformed_call_keys: set[str]
+) -> bool:
+    if item.get("type") != "function_call":
+        return False
+    if not _function_call_arguments_are_valid(item.get("arguments")):
+        return True
+    return any(
+        isinstance(key, str) and key in malformed_call_keys
+        for key in (item.get("call_id"), item.get("id"))
+    )
+
+
 _UNIFIED_RANGE_HEADER = re.compile(
     r"^(?:@@\s*)?-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s*@@\s*$"
 )
@@ -1295,9 +1337,24 @@ def normalize_responses_request(
         1,
         _env_int("MARATHON_TOOL_OUTPUT_MAX_CHARS", DEFAULT_TOOL_OUTPUT_MAX_CHARS),
     )
+    malformed_call_keys = _malformed_function_call_keys(input_items)
+    malformed_tool_replay_drops = 0
     for item in input_items:
         if not isinstance(item, dict):
             normalized_input.append(item)
+            continue
+
+        if _is_malformed_function_call(item, malformed_call_keys):
+            input_changed = True
+            malformed_tool_replay_drops += 1
+            continue
+
+        if (
+            item.get("type") == "function_call_output"
+            and item.get("call_id") in malformed_call_keys
+        ):
+            input_changed = True
+            malformed_tool_replay_drops += 1
             continue
 
         bounded_item, bounded = _bound_tool_output_item(item, tool_output_limit)
@@ -1338,6 +1395,7 @@ def normalize_responses_request(
         data["input"] = normalized_input
     data["_marathon_lifted_instruction_count"] = len(lifted_messages)
     data["_marathon_tool_output_truncations"] = tool_output_truncations
+    data["_marathon_malformed_tool_replay_drops"] = malformed_tool_replay_drops
 
     return data
 
@@ -2901,6 +2959,9 @@ class RouterState:
         tool_output_truncations = int(
             request.pop("_marathon_tool_output_truncations", 0) or 0
         )
+        malformed_tool_replay_drops = int(
+            request.pop("_marathon_malformed_tool_replay_drops", 0) or 0
+        )
         current_instructions = request.get("instructions")
         current_instructions_text = (
             current_instructions if isinstance(current_instructions, str) else ""
@@ -2927,6 +2988,15 @@ class RouterState:
                         ),
                     ),
                 },
+            )
+        if malformed_tool_replay_drops:
+            self.telemetry.emit(
+                "router.tool_history.sanitized",
+                {
+                    "dropped_items": malformed_tool_replay_drops,
+                    "transport": "websocket",
+                },
+                level="warning",
             )
 
         delta_input = request.get("input")
@@ -3435,6 +3505,9 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
             tool_output_truncations = int(
                 data.pop("_marathon_tool_output_truncations", 0) or 0
             )
+            malformed_tool_replay_drops = int(
+                data.pop("_marathon_malformed_tool_replay_drops", 0) or 0
+            )
             if tool_output_truncations:
                 state.telemetry.emit(
                     "router.tool_output.truncated",
@@ -3449,6 +3522,15 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
                         ),
                         "transport": "http",
                     },
+                )
+            if malformed_tool_replay_drops:
+                state.telemetry.emit(
+                    "router.tool_history.sanitized",
+                    {
+                        "dropped_items": malformed_tool_replay_drops,
+                        "transport": "http",
+                    },
+                    level="warning",
                 )
             state.trace_request(
                 requested_model=requested_model,
