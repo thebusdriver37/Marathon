@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .model_library import configured_model_roots, quant_from_filename
+from .model_library import (
+    configured_model_roots,
+    is_model_sidecar,
+    quant_from_filename,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -312,9 +316,9 @@ def _first_shard(path: Path) -> bool:
 
 
 def _model_sidecar(path: Path) -> bool:
-    """Keep helper weights such as DeepSeek MTP drafts out of the model picker."""
+    """Keep speculative draft and multimodal helper weights out of the picker."""
 
-    return bool(re.search(r"(?:^|[-_.])mtp(?:[-_.]|$)", path.stem, re.IGNORECASE))
+    return is_model_sidecar(path.name)
 
 
 def _family_for(path: Path, known: tuple[Family, ...]) -> Family:

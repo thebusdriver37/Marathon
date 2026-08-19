@@ -132,18 +132,22 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(models[0].size_bytes, 24)
         self.assertEqual(models[0].quant, "Q2_K-XL")
 
-    def test_mtp_sidecar_is_not_offered_as_a_full_model(self) -> None:
+    def test_speculative_sidecars_are_not_offered_as_full_models(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "DeepSeek-V4-Flash-IQ2_XXS.gguf").write_bytes(b"model")
-            (root / "DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf").write_bytes(
-                b"draft"
-            )
+            for filename in (
+                "DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf",
+                "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+                "Qwen3.8-27B-DSpark-Q4_K_M.gguf",
+                "Qwen3.8-27B-Eagle3-Q4_K_M.gguf",
+            ):
+                (root / filename).write_bytes(b"draft")
 
             models = catalog.discover_models(root)
 
         self.assertEqual(len(models), 1)
-        self.assertNotIn("MTP", models[0].path.name)
+        self.assertEqual(models[0].path.name, "DeepSeek-V4-Flash-IQ2_XXS.gguf")
 
     def test_qwen_quant_and_family_are_detected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -427,6 +431,76 @@ class CatalogTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_gpu_processes_include_physical_gpu_index(self) -> None:
+        gpu_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="0, GPU-a\n1, GPU-b\n",
+            stderr="",
+        )
+        process_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="GPU-b, 123, llama-server, 4096\n",
+            stderr="",
+        )
+
+        with mock.patch(
+            "marathon_app.runtime.subprocess.run",
+            side_effect=[gpu_result, process_result],
+        ):
+            processes = runtime_module._gpu_processes()
+
+        self.assertEqual(processes[0]["gpu_index"], "1")
+        self.assertEqual(processes[0]["pid"], "123")
+
+    def test_pinned_profile_ignores_processes_on_other_gpus(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        profile = replace(
+            catalog.find_profile(model, "native-256k", "codex"),
+            gpus=(0, 1),
+        )
+        runtime = Runtime(model, profile)
+        processes = [
+            {
+                "gpu_uuid": "GPU-c",
+                "gpu_index": "2",
+                "pid": "123",
+                "name": "llama-server",
+                "memory_mib": "16000",
+            }
+        ]
+
+        with (
+            mock.patch("marathon_app.runtime._port_pid", return_value=None),
+            mock.patch("marathon_app.runtime._gpu_processes", return_value=processes),
+        ):
+            runtime._check_conflicts()
+
+    def test_pinned_profile_blocks_process_on_selected_gpu(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        profile = replace(
+            catalog.find_profile(model, "native-256k", "codex"),
+            gpus=(0, 1),
+        )
+        runtime = Runtime(model, profile)
+        processes = [
+            {
+                "gpu_uuid": "GPU-b",
+                "gpu_index": "1",
+                "pid": "123",
+                "name": "llama-server",
+                "memory_mib": "16000",
+            }
+        ]
+
+        with (
+            mock.patch("marathon_app.runtime._port_pid", return_value=None),
+            mock.patch("marathon_app.runtime._gpu_processes", return_value=processes),
+            self.assertRaisesRegex(RuntimeError, "GPU 1 PID 123"),
+        ):
+            runtime._check_conflicts()
+
     def test_loaded_context_uses_backend_runtime_value(self) -> None:
         payload = {
             "data": [

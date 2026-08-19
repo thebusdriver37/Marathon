@@ -172,9 +172,21 @@ def _cmdline(pid: int) -> str:
 
 def _gpu_processes() -> list[dict[str, str]]:
     try:
+        gpu_result = subprocess.run(
+            [
+                "nvidia-smi", "--query-gpu=index,uuid",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+        )
         result = subprocess.run(
             [
-                "nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+                "nvidia-smi",
+                "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
                 "--format=csv,noheader,nounits",
             ],
             text=True,
@@ -185,11 +197,24 @@ def _gpu_processes() -> list[dict[str, str]]:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
+    gpu_indexes: dict[str, str] = {}
+    for line in gpu_result.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",", 1)]
+        if len(parts) == 2 and parts[0].isdigit() and parts[1]:
+            gpu_indexes[parts[1]] = parts[0]
     processes: list[dict[str, str]] = []
     for line in result.stdout.splitlines():
-        parts = [part.strip() for part in line.split(",", 2)]
-        if len(parts) == 3 and parts[0].isdigit():
-            processes.append({"pid": parts[0], "name": parts[1], "memory_mib": parts[2]})
+        parts = [part.strip() for part in line.split(",", 3)]
+        if len(parts) == 4 and parts[1].isdigit():
+            processes.append(
+                {
+                    "gpu_uuid": parts[0],
+                    "gpu_index": gpu_indexes.get(parts[0], ""),
+                    "pid": parts[1],
+                    "name": parts[2],
+                    "memory_mib": parts[3],
+                }
+            )
     return processes
 
 
@@ -388,9 +413,19 @@ class Runtime:
             if pid:
                 raise RuntimeError(f"port {port} is still occupied by PID {pid}: {_cmdline(pid)}")
         processes = _gpu_processes()
+        if self.profile.gpus:
+            selected_gpus = {str(gpu) for gpu in self.profile.gpus}
+            processes = [
+                process
+                for process in processes
+                if not process.get("gpu_index")
+                or process["gpu_index"] in selected_gpus
+            ]
         if processes:
             detail = "; ".join(
-                f"PID {item['pid']} {item['name']} ({item['memory_mib']} MiB)" for item in processes
+                f"GPU {item.get('gpu_index') or '?'} PID {item['pid']} "
+                f"{item['name']} ({item['memory_mib']} MiB)"
+                for item in processes
             )
             raise RuntimeError(f"GPU compute processes are already active: {detail}")
 

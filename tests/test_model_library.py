@@ -27,6 +27,15 @@ class ModelLibraryTests(unittest.TestCase):
             types.SimpleNamespace(rfilename="Qwen3.8-27B-Q4_K_M.gguf", size=16),
             types.SimpleNamespace(rfilename="Qwen3.8-MTP-Q8_0.gguf", size=1),
             types.SimpleNamespace(
+                rfilename="Qwen3.8-27B-DFlash2-Q4_K_M.gguf", size=1
+            ),
+            types.SimpleNamespace(
+                rfilename="Qwen3.8-27B-DSpark-Q4_K_M.gguf", size=1
+            ),
+            types.SimpleNamespace(
+                rfilename="Qwen3.8-27B-Eagle3-Q4_K_M.gguf", size=1
+            ),
+            types.SimpleNamespace(
                 rfilename="Qwen3.8-27B-Q4-00001-of-00002.gguf", size=8
             ),
         ]

@@ -13,6 +13,18 @@ from pathlib import Path
 RECOMMENDED_QWEN_REPOSITORY = "unsloth/Qwen3.8-27B-GGUF"
 
 
+def is_model_sidecar(filename: str) -> bool:
+    """Return whether a GGUF is helper weights rather than a chat model."""
+
+    lowered = Path(filename).name.lower()
+    return lowered.startswith("mmproj") or bool(
+        re.search(
+            r"(?:^|[-_.])(?:mtp|dflash2?|dspark|eagle3)(?:[-_.]|$)",
+            lowered,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class HuggingFaceGguf:
     repository: str
@@ -128,7 +140,7 @@ def list_huggingface_ggufs(repository: str) -> list[HuggingFaceGguf]:
         lowered = Path(filename).name.lower()
         if not lowered.endswith(".gguf"):
             continue
-        if lowered.startswith("mmproj") or re.search(r"(?:^|[-_.])mtp(?:[-_.]|$)", lowered):
+        if is_model_sidecar(lowered):
             continue
         if re.search(r"-\d{5}-of-\d{5}\.gguf$", lowered):
             continue
