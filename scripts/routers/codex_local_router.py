@@ -191,6 +191,7 @@ class ModelProfile:
     temperature: float | None = None
     default_reasoning_level: str | None = None
     supported_reasoning_levels: tuple[tuple[str, str], ...] = ()
+    input_modalities: tuple[str, ...] = ("text",)
 
     @property
     def port(self) -> int:
@@ -347,6 +348,44 @@ def _bound_tool_output_item(item: dict[str, Any], limit: int) -> tuple[dict[str,
     result = copy.deepcopy(item)
     result["output"] = bounded
     return result, True
+
+
+def _backend_image_tool_output_items(
+    item: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """Adapt Codex image tool output to llama.cpp's Responses input shape."""
+
+    if item.get("type") != "function_call_output":
+        return None
+    output = item.get("output")
+    if not isinstance(output, list):
+        return None
+    images = [
+        copy.deepcopy(part)
+        for part in output
+        if isinstance(part, dict) and part.get("type") == "input_image"
+    ]
+    if not images:
+        return None
+    text_parts = [
+        copy.deepcopy(part)
+        for part in output
+        if isinstance(part, dict) and part.get("type") == "input_text"
+    ]
+    tool_output = copy.deepcopy(item)
+    tool_output["output"] = (
+        text_parts
+        if text_parts
+        else "Image attached in the following user message."
+    )
+    return [
+        tool_output,
+        {
+            "type": "message",
+            "role": "user",
+            "content": images,
+        },
+    ]
 
 
 def _function_call_arguments_are_valid(arguments: Any) -> bool:
@@ -570,6 +609,18 @@ def _env_str(name: str, default: str) -> str:
     return raw.strip()
 
 
+def _input_modalities_from_env() -> tuple[str, ...]:
+    values = [
+        value.strip().lower()
+        for value in _env_str("MARATHON_MODEL_INPUT_MODALITIES", "text").split(",")
+        if value.strip()
+    ]
+    supported = tuple(
+        dict.fromkeys(value for value in values if value in {"text", "image"})
+    )
+    return supported or ("text",)
+
+
 def _reasoning_config_from_env() -> tuple[str | None, tuple[tuple[str, str], ...]]:
     raw_levels = os.getenv("MARATHON_MODEL_REASONING_LEVELS", "[]")
     try:
@@ -652,6 +703,7 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         temperature=temperature,
         default_reasoning_level=default_reasoning_level,
         supported_reasoning_levels=supported_reasoning_levels,
+        input_modalities=_input_modalities_from_env(),
     )
 
 
@@ -1363,6 +1415,12 @@ def normalize_responses_request(
             input_changed = True
             tool_output_truncations += 1
 
+        image_items = _backend_image_tool_output_items(item)
+        if image_items is not None:
+            normalized_input.extend(image_items)
+            input_changed = True
+            continue
+
         if _is_apply_patch_custom_call(item):
             normalized_input.append(_apply_patch_custom_to_function_call(item))
             input_changed = True
@@ -1639,7 +1697,7 @@ class RouterState:
                     "auto_compact_token_limit": profile.auto_compact_token_limit,
                     "effective_context_window_percent": 100,
                     "experimental_supported_tools": [],
-                    "input_modalities": ["text"],
+                    "input_modalities": list(profile.input_modalities),
                     "supports_search_tool": True,
                 }
             )

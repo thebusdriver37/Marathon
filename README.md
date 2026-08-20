@@ -55,6 +55,9 @@ Unknown model families use a conservative 32K default.
 
 Downloads are resumable and pinned to the exact Hugging Face repository revision selected during setup.
 Marathon records the repository, filename, revision, size, and expected SHA-256 beside the downloaded GGUF.
+When a repository includes a compatible vision projector, Marathon downloads it beside the model and enables screenshot and image inspection automatically.
+Existing models get the same behavior when their matching `mmproj` or `vision-f16` GGUF is stored beside the main model.
+Because current llama.cpp does not support slot snapshots with vision, Marathon automatically replays conversation context for those models and keeps slot snapshots enabled for text-only models.
 
 ## Reasoning Control
 

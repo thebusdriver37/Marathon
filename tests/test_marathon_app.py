@@ -149,6 +149,33 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(len(models), 1)
         self.assertEqual(models[0].path.name, "DeepSeek-V4-Flash-IQ2_XXS.gguf")
 
+    def test_multimodal_projector_is_attached_to_model_and_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Qwen3.8-27B-Q8_0.gguf").write_bytes(b"model")
+            projector = root / "mmproj-F16.gguf"
+            projector.write_bytes(b"projector")
+
+            model = catalog.discover_models(root)[0]
+            profile = catalog.find_profile(model, "native-256k", "codex")
+            backend = catalog.Backend("test", "Test backend", TEST_EXECUTABLE)
+            command = catalog.server_command(model, profile, backend)
+
+        self.assertEqual(model.multimodal_projector, projector)
+        self.assertEqual(command[command.index("--mmproj") + 1], str(projector))
+
+    def test_named_vision_sidecar_is_not_offered_as_full_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Qwen3.8-27B-Uncensored-Q5_K_M.gguf").write_bytes(b"model")
+            projector = root / "Qwen3.8-27B-Uncensored-vision-f16.gguf"
+            projector.write_bytes(b"projector")
+
+            models = catalog.discover_models(root)
+
+        self.assertEqual(len(models), 1)
+        self.assertEqual(models[0].multimodal_projector, projector)
+
     def test_qwen_quant_and_family_are_detected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -579,6 +606,35 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(
             dict(specs[0].environment)["DSV4_MTP_GGUF"], "/tmp/mtp.gguf"
         )
+        self.assertEqual(
+            list(specs[0].command)[-2:],
+            ["--slot-save-path", "/tmp/slots"],
+        )
+
+    def test_multimodal_llama_backend_disables_unsupported_slot_api(self) -> None:
+        model = replace(
+            fixture_model("qwen3.8-27b"),
+            multimodal_projector=Path("/tmp/mmproj-F16.gguf"),
+        )
+        profile = catalog.find_profile(model, "native-256k", "codex")
+        runtime = Runtime(model, profile)
+        backend = catalog.Backend("test", "Test", TEST_EXECUTABLE)
+
+        specs = runtime._backend_specs(backend, Path("/tmp/slots"))
+
+        self.assertFalse(runtime_module._slot_api_enabled(model, backend))
+        self.assertNotIn("--slot-save-path", specs[0].command)
+
+    def test_backend_can_explicitly_disable_slot_api_for_text_model(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        backend = catalog.Backend(
+            "test",
+            "Test",
+            TEST_EXECUTABLE,
+            supports_slots=False,
+        )
+
+        self.assertFalse(runtime_module._slot_api_enabled(model, backend))
 
     def test_llama_backend_pins_profile_gpus(self) -> None:
         model = fixture_model("qwen3.8-27b")

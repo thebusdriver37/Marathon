@@ -17,12 +17,49 @@ def is_model_sidecar(filename: str) -> bool:
     """Return whether a GGUF is helper weights rather than a chat model."""
 
     lowered = Path(filename).name.lower()
-    return lowered.startswith("mmproj") or bool(
+    return is_multimodal_projector(lowered) or bool(
         re.search(
             r"(?:^|[-_.])(?:mtp|dflash2?|dspark|eagle3)(?:[-_.]|$)",
             lowered,
         )
     )
+
+
+def is_multimodal_projector(filename: str) -> bool:
+    """Return whether a GGUF is a multimodal projector sidecar."""
+
+    lowered = Path(filename).name.lower()
+    return lowered.startswith("mmproj") or bool(
+        re.search(
+            r"(?:^|[-_.])vision[-_.](?:bf16|f16|f32|q8_0)(?:[-_.]|$)",
+            lowered,
+        )
+    )
+
+
+def _projector_sort_key(filename: str) -> tuple[int, int, str]:
+    """Prefer portable F16 projector weights, then other full-quality formats."""
+
+    lowered = Path(filename).name.lower()
+    format_rank = 0 if re.search(r"(?:^|[-_.])f16(?:[-_.]|$)", lowered) else 1
+    named_rank = 0 if lowered.startswith("mmproj") else 1
+    return format_rank, named_rank, lowered
+
+
+def find_multimodal_projector(model_path: Path) -> Path | None:
+    """Find the best projector stored beside a local language model."""
+
+    try:
+        candidates = [
+            path
+            for path in model_path.parent.iterdir()
+            if path.is_file()
+            and path.suffix.lower() == ".gguf"
+            and is_multimodal_projector(path.name)
+        ]
+    except OSError:
+        return None
+    return min(candidates, key=lambda path: _projector_sort_key(path.name), default=None)
 
 
 @dataclass(frozen=True)
@@ -33,6 +70,9 @@ class HuggingFaceGguf:
     size_bytes: int | None
     quant: str
     sha256: str | None = None
+    mmproj_filename: str | None = None
+    mmproj_size_bytes: int | None = None
+    mmproj_sha256: str | None = None
 
 
 def _config_dir() -> Path:
@@ -134,8 +174,28 @@ def list_huggingface_ggufs(repository: str) -> list[HuggingFaceGguf]:
         raise ValueError("enter a Hugging Face repository as owner/name")
     info = HfApi().model_info(repository, files_metadata=True)
     revision = str(info.sha)
+    siblings = list(info.siblings or [])
+    projector_siblings = [
+        sibling
+        for sibling in siblings
+        if str(sibling.rfilename).lower().endswith(".gguf")
+        and is_multimodal_projector(str(sibling.rfilename))
+    ]
+    projector = min(
+        projector_siblings,
+        key=lambda item: _projector_sort_key(str(item.rfilename)),
+        default=None,
+    )
+    projector_filename = str(projector.rfilename) if projector is not None else None
+    projector_size = (
+        projector.size
+        if projector is not None and isinstance(projector.size, int)
+        else None
+    )
+    projector_lfs = getattr(projector, "lfs", None)
+    projector_sha256 = getattr(projector_lfs, "sha256", None)
     files: list[HuggingFaceGguf] = []
-    for sibling in info.siblings or []:
+    for sibling in siblings:
         filename = str(sibling.rfilename)
         lowered = Path(filename).name.lower()
         if not lowered.endswith(".gguf"):
@@ -155,6 +215,13 @@ def list_huggingface_ggufs(repository: str) -> list[HuggingFaceGguf]:
                 size_bytes=size,
                 quant=quant_from_filename(filename),
                 sha256=sha256 if isinstance(sha256, str) else None,
+                mmproj_filename=projector_filename,
+                mmproj_size_bytes=projector_size,
+                mmproj_sha256=(
+                    projector_sha256
+                    if isinstance(projector_sha256, str)
+                    else None
+                ),
             )
         )
 
@@ -185,7 +252,7 @@ def download_huggingface_gguf(model: HuggingFaceGguf, model_root: Path) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
     if model.size_bytes is not None:
         available = shutil.disk_usage(destination).free
-        required = model.size_bytes + 2 * 1024**3
+        required = model.size_bytes + (model.mmproj_size_bytes or 0) + 2 * 1024**3
         if available < required:
             raise RuntimeError(
                 f"download needs about {required / 1024**3:.1f} GiB free; "
@@ -200,6 +267,13 @@ def download_huggingface_gguf(model: HuggingFaceGguf, model_root: Path) -> Path:
             local_dir=destination,
         )
     ).resolve()
+    if model.mmproj_filename:
+        hf_hub_download(
+            repo_id=model.repository,
+            filename=model.mmproj_filename,
+            revision=model.revision,
+            local_dir=destination,
+        )
     provenance = downloaded.with_suffix(downloaded.suffix + ".marathon.json")
     provenance.write_text(
         json.dumps(
@@ -210,6 +284,15 @@ def download_huggingface_gguf(model: HuggingFaceGguf, model_root: Path) -> Path:
                 "filename": model.filename,
                 "size_bytes": model.size_bytes,
                 "sha256": model.sha256,
+                "multimodal_projector": (
+                    {
+                        "filename": model.mmproj_filename,
+                        "size_bytes": model.mmproj_size_bytes,
+                        "sha256": model.mmproj_sha256,
+                    }
+                    if model.mmproj_filename
+                    else None
+                ),
             },
             indent=2,
         )

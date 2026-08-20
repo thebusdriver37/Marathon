@@ -62,6 +62,18 @@ class BackendProcessSpec:
     environment: tuple[tuple[str, str], ...] = ()
 
 
+def _slot_api_enabled(model: Model, backend: Backend) -> bool:
+    """Return whether this model/backend pair supports llama.cpp slot actions."""
+
+    if not backend.supports_slots:
+        return False
+    # llama.cpp currently rejects save, restore, and erase when a multimodal
+    # projector is loaded, even if --slot-save-path was configured.
+    return not (
+        backend.kind == "llama_cpp" and model.multimodal_projector is not None
+    )
+
+
 def ensure_dirs() -> None:
     for path in (CONFIG_DIR, USER_STATE_DIR / "logs", runs_dir(), RUNTIME_DIR, ROUTER_STATE_DIR, SLOT_ROOT):
         path.mkdir(parents=True, exist_ok=True)
@@ -434,7 +446,8 @@ class Runtime:
 
         if backend.kind == "llama_cpp":
             command = server_command(self.model, self.profile, backend)
-            command.extend(["--slot-save-path", str(slot_path)])
+            if _slot_api_enabled(self.model, backend):
+                command.extend(["--slot-save-path", str(slot_path)])
             environment = backend_environment(self.model, backend)
             if self.profile.gpus:
                 environment["CUDA_VISIBLE_DEVICES"] = ",".join(
@@ -594,6 +607,7 @@ class Runtime:
         self.telemetry = create_run_writer(self.model.id)
         self._run_started_mono = time.monotonic()
         self._backend = backend_for(self.model, self.profile)
+        slot_api_enabled = _slot_api_enabled(self.model, self._backend)
         slot_path = SLOT_ROOT / self.model.alias
         backend_specs = self._backend_specs(self._backend, slot_path)
         backend_commands = [list(spec.command) for spec in backend_specs]
@@ -632,7 +646,8 @@ class Runtime:
                     "id": self._backend.id,
                     "display_name": self._backend.display_name,
                     "kind": self._backend.kind,
-                    "supports_slots": self._backend.supports_slots,
+                    "supports_slots": slot_api_enabled,
+                    "configured_supports_slots": self._backend.supports_slots,
                     "environment_keys": sorted(
                         key for key, _value in self._backend.environment
                     ),
@@ -677,7 +692,8 @@ class Runtime:
         environment.setdefault("CUDA_SCALE_LAUNCH_QUEUES", "4x")
         if progress:
             progress(f"Starting {self._backend.display_name}")
-        slot_path.mkdir(parents=True, exist_ok=True)
+        if slot_api_enabled:
+            slot_path.mkdir(parents=True, exist_ok=True)
         load_started = time.monotonic()
         model_log = self._open_log(self.model_log)
         for spec in backend_specs:
@@ -720,11 +736,14 @@ class Runtime:
                     self._backend.model_alias or self.model.alias
                 ),
                 "MARATHON_BACKEND_SLOT_API": (
-                    "1" if self._backend.supports_slots else "0"
+                    "1" if slot_api_enabled else "0"
                 ),
                 "MARATHON_MODEL_SUPERVISED": "1",
                 "MARATHON_MODEL_PARALLEL_TOOL_CALLS": (
                     "1" if self.profile.parallel_tool_calls else "0"
+                ),
+                "MARATHON_MODEL_INPUT_MODALITIES": (
+                    "text,image" if self.model.multimodal_projector else "text"
                 ),
                 "MARATHON_MODEL_REASONING_LEVELS": json.dumps(
                     [

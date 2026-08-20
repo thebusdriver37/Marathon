@@ -11,6 +11,7 @@ from typing import Any
 
 from .model_library import (
     configured_model_roots,
+    find_multimodal_projector,
     is_model_sidecar,
     quant_from_filename,
 )
@@ -114,6 +115,7 @@ class Model:
     size_bytes: int
     family: Family
     quant: str
+    multimodal_projector: Path | None = None
 
     @property
     def alias(self) -> str:
@@ -382,7 +384,17 @@ def discover_models(model_root: Path | None = None) -> list[Model]:
         ids[model_id] = ids.get(model_id, 0) + 1
         if ids[model_id] > 1:
             model_id = f"{model_id}-{ids[model_id]}"
-        result.append(Model(model_id, display, path, _model_size(path), family, quant))
+        result.append(
+            Model(
+                model_id,
+                display,
+                path,
+                _model_size(path),
+                family,
+                quant,
+                find_multimodal_projector(path),
+            )
+        )
     return sorted(result, key=lambda model: (model.family.id, model.display_name.lower()))
 
 
@@ -503,6 +515,8 @@ def server_command(model: Model, profile: Profile, backend: Backend | None = Non
         "--cache-type-k", profile.cache_k, "--cache-type-v", profile.cache_v,
         "--flash-attn", profile.flash_attention, "--jinja", "--metrics",
     ]
+    if model.multimodal_projector is not None:
+        command.extend(["--mmproj", str(model.multimodal_projector)])
     if profile.split_mode == "none":
         command.extend(["--main-gpu", str(profile.main_gpu)])
     elif profile.tensor_split:

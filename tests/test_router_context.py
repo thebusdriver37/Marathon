@@ -95,6 +95,18 @@ class RouterContextTests(unittest.TestCase):
             (("low", "Fast"), ("medium", "Balanced"), ("xhigh", "Deep")),
         )
 
+    def test_custom_profile_loads_image_capability(self) -> None:
+        environment = {
+            "MARATHON_MODEL_PATH": "/tmp/model.gguf",
+            "MARATHON_MODEL_INPUT_MODALITIES": "text,image",
+        }
+        with mock.patch.dict(router_module.os.environ, environment, clear=True):
+            profile = router_module._custom_model_profile(ROOT_DIR)
+
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertEqual(profile.input_modalities, ("text", "image"))
+
     def test_catalog_advertises_full_dynamic_context_window(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)
@@ -124,6 +136,19 @@ class RouterContextTests(unittest.TestCase):
             model = state.model_catalog()["models"][0]
 
         self.assertTrue(model["supports_parallel_tool_calls"])
+
+    def test_catalog_advertises_profile_image_capability(self) -> None:
+        profile = replace(
+            fixture_profile(), input_modalities=("text", "image")
+        )
+        state = object.__new__(router_module.RouterState)
+        state.available_profiles = {profile.slug: profile}
+        state._refresh_profiles = lambda: state.available_profiles
+
+        with mock.patch.object(router_module, "_base_instructions", return_value="prompt"):
+            model = state.model_catalog()["models"][0]
+
+        self.assertEqual(model["input_modalities"], ["text", "image"])
 
     def test_catalog_advertises_profile_reasoning_levels(self) -> None:
         profile = replace(
@@ -180,6 +205,48 @@ class RouterContextTests(unittest.TestCase):
                 "enable_thinking": True,
                 "reasoning_effort": "low",
             },
+        )
+
+    def test_image_tool_output_becomes_backend_image_message(self) -> None:
+        image_url = "data:image/png;base64,aGVsbG8="
+        request = {
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_view",
+                    "output": [
+                        {
+                            "type": "input_image",
+                            "image_url": image_url,
+                            "detail": "high",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        normalized = router_module.normalize_responses_request(request)
+
+        self.assertEqual(
+            normalized["input"],
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_view",
+                    "output": "Image attached in the following user message.",
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": image_url,
+                            "detail": "high",
+                        }
+                    ],
+                },
+            ],
         )
 
     def test_no_reasoning_disables_thinking_and_clears_effort(self) -> None:
