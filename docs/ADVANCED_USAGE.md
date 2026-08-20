@@ -106,7 +106,18 @@ Architecture-specific distributed backends keep their shipped profiles.
 ## Codex Integration
 
 Marathon prefers its patched Codex binary at `$XDG_DATA_HOME/marathon/bin/codex` and falls back to a stock `codex` command.
-It leaves `CODEX_HOME` unchanged, so normal Codex configuration, sessions, skills, plugins, and `AGENTS.md` discovery continue to work.
+Marathon gives Codex a separate writable home at `.marathon/codex-home` inside the Marathon installation.
+Configuration, sessions, logs, history, memory, and SQLite state therefore cannot modify or appear in stock Codex.
+
+Marathon refreshes a generated `marathon-shared` profile from the user's normal Codex configuration before each launch.
+It excludes the model, provider, reasoning effort, context, and catalog keys that Marathon owns.
+Authentication, `AGENTS.md`, hooks, rules, skills, and plugins are explicitly linked into the isolated home so the same user tools remain available.
+Project `.codex/config.toml` files continue to apply through normal Codex configuration precedence.
+
+On the first isolated launch, existing `marathon-local` rollout files are moved from the stock Codex session tree into Marathon's session tree.
+Set `MARATHON_CODEX_HOME` to relocate the isolated home or `MARATHON_STOCK_CODEX_HOME` when the normal Codex home is not `~/.codex`.
+`MARATHON_USE_USER_CONFIG=1` is an explicit compatibility escape hatch that disables this isolation.
+`MARATHON_CODEX_BIN` selects both the patched Codex install destination and the executable Marathon launches.
 
 Marathon supplies invocation-specific settings for the local provider, selected model, loaded context, model catalog, and status line.
 After backend startup, Marathon reads the context that was actually loaded and propagates that value to Codex, compaction, and truncation limits.
@@ -123,8 +134,8 @@ Tool execution time is excluded from completed-turn generation throughput.
 Use Codex's `/model` menu to change the active reasoning effort without reloading the GGUF or discarding the conversation.
 Supported values are defined per model family in the runtime catalog.
 
-Marathon sessions remain in Codex's normal session store but are tagged with the `marathon-local` provider.
-The resume picker filters on that provider, and Marathon-branded sessions print `marathon resume <id>` when they exit.
+Marathon sessions remain in Marathon's isolated Codex session store and are tagged with the `marathon-local` provider.
+The resume picker also filters on that provider, and Marathon-branded sessions print `marathon resume <id>` when they exit.
 The `marathon resume` and `marathon fork` commands start the remembered backend before opening Codex and stop it again afterward.
 
 Marathon bounds tool outputs and individual model responses to protect the context window from accidental unbounded output.
@@ -166,6 +177,7 @@ The legacy DwarfStar profile uses three workers and one coordinator across four 
 | Registered model folders | `~/.config/marathon/models.json` |
 | Dyno profiles | `~/.config/marathon/dyno/profiles/` |
 | Dyno evidence | `~/.local/state/marathon/dyno/` |
+| Marathon Codex home | `<marathon-install>/.marathon/codex-home/` |
 | Per-run traces | `~/.local/state/marathon/runs/*.jsonl` |
 | Compatibility logs | `~/.local/state/marathon/logs/` |
 | Live process metadata | `$XDG_RUNTIME_DIR/marathon/` |

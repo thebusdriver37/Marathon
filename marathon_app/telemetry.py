@@ -238,12 +238,16 @@ def summarize_run(path: Path, *, live: bool = False) -> dict[str, Any]:
         active_data = active_start.get("data") or {}
         timestamp = active_start.get("ts")
         cwd = active_data.get("cwd")
+        codex_home = active_data.get("codex_home")
         if isinstance(timestamp, str) and isinstance(cwd, str):
             try:
                 started_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 active_codex_sessions = summarize_active_sessions(
                     started_at,
                     cwd=Path(cwd),
+                    codex_home=Path(codex_home)
+                    if isinstance(codex_home, str)
+                    else None,
                 )
             except (OSError, ValueError):
                 active_codex_sessions = []

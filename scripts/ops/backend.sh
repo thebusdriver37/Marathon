@@ -161,81 +161,109 @@ port_owner_pid() {
 }
 
 pid_cmdline() {
-  ps -p "$1" -o cmd= 2>/dev/null || true
+  local pid="$1"
+  if [[ -r "/proc/$pid/cmdline" ]]; then
+    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true
+    return
+  fi
+  ps -p "$pid" -o cmd= 2>/dev/null || true
+}
+
+process_start_ticks() {
+  local pid="$1"
+  [[ -r "/proc/$pid/stat" ]] || return 1
+  awk '{print $22}' "/proc/$pid/stat" 2>/dev/null
+}
+
+read_pid_record() {
+  local path="$1"
+  local pid="" started=""
+  [[ -f "$path" ]] || return 1
+  read -r pid started <"$path" || true
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ -z "$started" || "$started" =~ ^[0-9]+$ ]] || return 1
+  printf '%s %s\n' "$pid" "$started"
+}
+
+pid_record_is_current() {
+  local pid="$1"
+  local expected_started="${2:-}"
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ -z "$expected_started" ]] && return 0
+  [[ "$(process_start_ticks "$pid" || true)" == "$expected_started" ]]
+}
+
+write_pid_record() {
+  local path="$1"
+  local pid="$2"
+  local started
+  started="$(process_start_ticks "$pid" || true)"
+  printf '%s %s\n' "$pid" "$started" >"$path"
 }
 
 terminate_pid() {
   local pid="$1"
   local label="$2"
+  local started="${3:-}"
   [[ -n "$pid" ]] || return 0
-  if ! kill -0 "$pid" 2>/dev/null; then
+  [[ -n "$started" ]] || started="$(process_start_ticks "$pid" || true)"
+  if ! pid_record_is_current "$pid" "$started"; then
     return 0
   fi
   echo "stopping $label pid $pid..."
   kill "$pid" 2>/dev/null || true
   for _ in {1..12}; do
-    if ! kill -0 "$pid" 2>/dev/null; then
+    if ! pid_record_is_current "$pid" "$started"; then
       return 0
     fi
     sleep 1
   done
-  kill -9 "$pid" 2>/dev/null || true
+  if pid_record_is_current "$pid" "$started"; then
+    kill -9 "$pid" 2>/dev/null || true
+  fi
 }
 
 stop_router() {
-  local pid=""
-  if [[ -f "$ROUTER_PID_FILE" ]]; then
-    pid="$(tr -cd '0-9' <"$ROUTER_PID_FILE" || true)"
-    if [[ -n "$pid" ]]; then
-      terminate_pid "$pid" "router"
+  local record="" pid="" started="" cmd=""
+  record="$(read_pid_record "$ROUTER_PID_FILE" || true)"
+  read -r pid started <<<"$record"
+  if [[ -n "$pid" ]] && pid_record_is_current "$pid" "$started"; then
+    cmd="$(pid_cmdline "$pid")"
+    if [[ "$cmd" == *"codex_local_router.py"* && "$cmd" == *"--state-dir $STATE_DIR"* ]]; then
+      terminate_pid "$pid" "router" "$started"
+    else
+      echo "warning: refusing to stop unowned router pid $pid: $cmd" >&2
     fi
   fi
+  rm -f "$ROUTER_PID_FILE"
 
   pid="$(port_owner_pid "$ROUTER_PORT" || true)"
   if [[ -n "$pid" ]]; then
-    local cmd
     cmd="$(pid_cmdline "$pid")"
-    if [[ "$cmd" == *"codex_local_router.py"* ]]; then
-      terminate_pid "$pid" "router"
-    else
-      echo "warning: router port $ROUTER_PORT is owned by another process: $cmd" >&2
-    fi
+    echo "warning: router port $ROUTER_PORT remains owned by another process: $cmd" >&2
   fi
-
-  rm -f "$ROUTER_PID_FILE"
 }
 
 stop_model_backends() {
-  local slug port pid cmd
-  for slug in qwen3.6-27b-q4-128k-single qwen3.6-27b-q4-128k qwen3.6-27b-q4 qwen3.6-35b-a3b qwopus3.6-35b-a3b-v1 gemma4-26b-a4b-it-128k "$(custom_slug)"; do
-    port="$(profile_port "$slug" 2>/dev/null || true)"
-    [[ -n "$port" ]] || continue
-    pid="$(port_owner_pid "$port" || true)"
-    if [[ -z "$pid" ]]; then
-      rm -f "$STATE_DIR/$slug.pid"
-      continue
-    fi
-    cmd="$(pid_cmdline "$pid")"
-    if [[ "$cmd" == *"llama-server"* ]]; then
-      terminate_pid "$pid" "$slug"
-      rm -f "$STATE_DIR/$slug.pid"
-    else
-      echo "warning: model port $port is owned by another process: $cmd" >&2
-    fi
-  done
-
-  local pid_file
+  local pid_file record pid started slug port cmd
   for pid_file in "$STATE_DIR"/*.pid; do
     [[ -e "$pid_file" ]] || continue
     [[ "$(basename "$pid_file")" != "codex-local-router.pid" ]] || continue
     slug="$(basename "$pid_file" .pid)"
-    pid="$(tr -cd '0-9' <"$pid_file" || true)"
-    [[ -n "$pid" ]] || continue
-    cmd="$(pid_cmdline "$pid")"
-    if [[ "$cmd" == *"llama-server"* ]]; then
-      terminate_pid "$pid" "$slug"
+    record="$(read_pid_record "$pid_file" || true)"
+    read -r pid started <<<"$record"
+    if [[ -z "$pid" ]] || ! pid_record_is_current "$pid" "$started"; then
       rm -f "$pid_file"
+      continue
     fi
+    cmd="$(pid_cmdline "$pid")"
+    port="$(profile_port "$slug" 2>/dev/null || true)"
+    if [[ -n "$port" && "$cmd" == *"llama-server"* && " $cmd " == *" --port $port "* ]]; then
+      terminate_pid "$pid" "$slug" "$started"
+    else
+      echo "warning: refusing to stop unowned model pid $pid: $cmd" >&2
+    fi
+    rm -f "$pid_file"
   done
 }
 
@@ -320,17 +348,17 @@ start_router() {
       --state-dir "$STATE_DIR" \
       --log-dir "$LOG_DIR" >>"$ROUTER_LOG" 2>&1 &
   fi
-  echo "$!" >"$ROUTER_PID_FILE"
+  write_pid_record "$ROUTER_PID_FILE" "$!"
 }
 
 wait_until_ready() {
   local slug="$1"
   local deadline=$((SECONDS + START_TIMEOUT_SECONDS))
-  local json current status router_pid
+  local json current status router_pid router_started
 
-  router_pid="$(cat "$ROUTER_PID_FILE" 2>/dev/null || true)"
+  read -r router_pid router_started <<<"$(read_pid_record "$ROUTER_PID_FILE" || true)"
   while (( SECONDS < deadline )); do
-    if [[ -n "$router_pid" ]] && ! kill -0 "$router_pid" 2>/dev/null; then
+    if [[ -n "$router_pid" ]] && ! pid_record_is_current "$router_pid" "$router_started"; then
       echo "error: router exited before backend became ready." >&2
       echo "router log: $ROUTER_LOG" >&2
       return 1

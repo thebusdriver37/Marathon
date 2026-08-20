@@ -12,7 +12,7 @@ LLAMACPP_BIN="${LLAMACPP_BIN:-$AI_ROOT/backends/llama.cpp-current/build/bin/llam
 SLOT_DIR="${MARATHON_SLOT_SAVE_ROOT:-$AI_ROOT/cache/marathon/slots}"
 ROUTER_STATE_DIR="$AI_ROOT/cache/marathon/router"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-PATCHED_CODEX_BIN="${MARATHON_PATCHED_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
+PATCHED_CODEX_BIN="${MARATHON_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
 HERMES_BIN="${MARATHON_HERMES_BIN:-hermes}"
 
 failures=0

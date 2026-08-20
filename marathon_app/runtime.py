@@ -230,32 +230,6 @@ def _gpu_processes() -> list[dict[str, str]]:
     return processes
 
 
-def stop_legacy_services() -> None:
-    """Stop only the known Paddock service and Marathon's old detached backend."""
-
-    if shutil.which("systemctl"):
-        subprocess.run(
-            ["systemctl", "--user", "stop", "paddock.service"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        subprocess.run(
-            ["systemctl", "--user", "disable", "paddock.service"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    backend_script = ROOT_DIR / "scripts" / "ops" / "backend.sh"
-    if backend_script.is_file():
-        subprocess.run(
-            [str(backend_script), "stop"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-
-
 def request_stop() -> bool:
     """Ask an active foreground Marathon supervisor to shut down."""
 
@@ -274,7 +248,6 @@ def request_stop() -> bool:
             pass
     elif pid:
         SESSION_FILE.unlink(missing_ok=True)
-    stop_legacy_services()
     return stopped
 
 
@@ -681,7 +654,6 @@ class Runtime:
             },
         )
         self._start_sampler()
-        stop_legacy_services()
         try:
             self._check_conflicts()
         except Exception as error:

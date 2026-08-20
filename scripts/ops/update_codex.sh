@@ -6,7 +6,7 @@ CODEX_DIR="${MARATHON_CODEX_DIR:-$ROOT_DIR/codex}"
 PATCHES_DIR="${MARATHON_PATCH_DIR:-$ROOT_DIR/patches/codex}"
 UPSTREAM_BRANCH="${MARATHON_CODEX_UPSTREAM:-origin/main}"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-INSTALL_BIN="${MARATHON_PATCHED_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
+INSTALL_BIN="${MARATHON_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
 
 if ! git -C "$CODEX_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: Codex submodule is missing at $CODEX_DIR" >&2

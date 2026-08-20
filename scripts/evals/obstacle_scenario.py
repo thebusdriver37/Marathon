@@ -14,6 +14,7 @@ from pathlib import Path
 from marathon_app import runtime as runtime_module
 from marathon_app.catalog import discover_models, find_model, find_profile
 from marathon_app.codex_telemetry import snapshot_sessions, summarize_session_changes
+from marathon_app.codex_home import codex_environment
 from marathon_app.frontends import codex_command
 from marathon_app.runtime import Runtime
 from marathon_app.telemetry import EventWriter
@@ -70,9 +71,10 @@ def main() -> int:
     output_dir.mkdir(exist_ok=True)
     event_log = output_dir / f"{args.name}.codex.jsonl"
     last_message = output_dir / f"{args.name}.last.md"
-    before = snapshot_sessions()
+    environment, codex_home, shared_profile = codex_environment()
+    before = snapshot_sessions(codex_home)
 
-    base_command = codex_command(runtime)
+    base_command = codex_command(runtime, shared_profile=shared_profile)
     config_args = [] if args.use_user_config else ["--ignore-user-config"]
     if args.resume:
         command = [
@@ -112,7 +114,7 @@ def main() -> int:
         process = subprocess.Popen(
             command,
             cwd=workspace,
-            env=os.environ.copy(),
+            env=environment,
             text=True,
             stdout=output,
             stderr=subprocess.STDOUT,
@@ -125,7 +127,12 @@ def main() -> int:
             terminate_group(process)
             returncode = 124
 
-    summaries = summarize_session_changes(before, cwd=workspace)
+    summaries = summarize_session_changes(
+        before,
+        cwd=workspace,
+        provider="marathon-local",
+        codex_home=codex_home,
+    )
     for summary in summaries:
         writer.emit("codex.session.completed", {"scenario": args.name, **summary})
     writer.emit(

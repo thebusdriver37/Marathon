@@ -11,13 +11,16 @@ from pathlib import Path
 from typing import Any
 
 
-def _session_root() -> Path:
-    codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+def _session_root(codex_home: Path | None = None) -> Path:
+    if codex_home is None:
+        codex_home = Path(
+            os.environ.get("CODEX_HOME", Path.home() / ".codex")
+        ).expanduser()
     return codex_home / "sessions"
 
 
-def snapshot_sessions() -> dict[Path, int]:
-    root = _session_root()
+def snapshot_sessions(codex_home: Path | None = None) -> dict[Path, int]:
+    root = _session_root(codex_home)
     if not root.exists():
         return {}
     result: dict[Path, int] = {}
@@ -65,6 +68,29 @@ def _tool_failure(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _session_metadata(path: Path) -> tuple[str | None, str | None, str | None]:
+    """Read only the rollout header fields needed to identify a session."""
+
+    try:
+        with path.open("rb") as handle:
+            for _ in range(32):
+                raw = handle.readline()
+                if not raw:
+                    break
+                item = json.loads(raw)
+                if item.get("type") != "session_meta":
+                    continue
+                payload = item.get("payload") or {}
+                return (
+                    str(payload.get("id") or "") or None,
+                    str(payload.get("cwd") or "") or None,
+                    str(payload.get("model_provider") or "") or None,
+                )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    return None, None, None
+
+
 def _summarize_sessions(
     before: dict[Path, int],
     after: dict[Path, int],
@@ -89,9 +115,7 @@ def _summarize_sessions(
         last_total: dict[str, int] | None = None
         model: str | None = None
         context_window: int | None = None
-        session_id: str | None = None
-        session_cwd: str | None = None
-        session_provider: str | None = None
+        session_id, session_cwd, session_provider = _session_metadata(path)
         with path.open("rb") as handle:
             if offset:
                 handle.seek(offset - 1)
@@ -209,9 +233,18 @@ def _summarize_sessions(
 
 
 def summarize_session_changes(
-    before: dict[Path, int], *, cwd: Path | None = None
+    before: dict[Path, int],
+    *,
+    cwd: Path | None = None,
+    provider: str | None = None,
+    codex_home: Path | None = None,
 ) -> list[dict[str, Any]]:
-    return _summarize_sessions(before, snapshot_sessions(), cwd=cwd)
+    return _summarize_sessions(
+        before,
+        snapshot_sessions(codex_home),
+        cwd=cwd,
+        provider=provider,
+    )
 
 
 def refresh_legacy_tool_metrics(session: dict[str, Any]) -> dict[str, Any]:
@@ -239,12 +272,17 @@ def refresh_legacy_tool_metrics(session: dict[str, Any]) -> dict[str, Any]:
     return updated
 
 
-def summarize_active_sessions(started_at: datetime, *, cwd: Path) -> list[dict[str, Any]]:
+def summarize_active_sessions(
+    started_at: datetime,
+    *,
+    cwd: Path,
+    codex_home: Path | None = None,
+) -> list[dict[str, Any]]:
     """Read a still-running Marathon Codex rollout without starting a monitor."""
 
     threshold = started_at.timestamp() - 2
     candidates: dict[Path, int] = {}
-    for path, size in snapshot_sessions().items():
+    for path, size in snapshot_sessions(codex_home).items():
         try:
             if path.stat().st_mtime >= threshold:
                 candidates[path] = size

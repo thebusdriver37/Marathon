@@ -37,6 +37,7 @@ marathon
 ```
 
 Marathon loads the remembered model and opens Codex directly.
+Its writable Codex configuration and sessions stay separate from stock Codex while personal instructions, skills, plugins, hooks, and rules remain available.
 
 ## Choosing a Quant
 

@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 ROUTER_HOST="${MARATHON_PROXY_HOST:-127.0.0.1}"
 ROUTER_PORT="${MARATHON_PROXY_PORT:-18111}"
-PATCHED_CODEX_BIN="${MARATHON_CODEX_BIN_PATH:-$DATA_HOME/marathon/bin/codex}"
 CODEX_BIN="${MARATHON_CODEX_BIN:-}"
+DEFAULT_CODEX_BIN="$DATA_HOME/marathon/bin/codex"
 LOG_DIR="${MARATHON_LOG_DIR:-$ROOT_DIR/logs}"
 STATE_DIR="${MARATHON_ROUTER_STATE_DIR:-$ROOT_DIR/.marathon/state}"
 LOCAL_MODELS_FILE="${MARATHON_MODELS_FILE:-$ROOT_DIR/config/qwen_models.json}"
@@ -19,8 +19,8 @@ router_base="http://$ROUTER_HOST:$ROUTER_PORT"
 router_v1="$router_base/v1"
 
 if [[ -z "$CODEX_BIN" ]]; then
-  if [[ -x "$PATCHED_CODEX_BIN" ]]; then
-    CODEX_BIN="$PATCHED_CODEX_BIN"
+  if [[ -x "$DEFAULT_CODEX_BIN" ]]; then
+    CODEX_BIN="$DEFAULT_CODEX_BIN"
   else
     CODEX_BIN="codex"
   fi
@@ -108,9 +108,12 @@ if [[ -z "${CODEX_CLI_NAME:-}" ]]; then
   fi
 fi
 
-if [[ "${MARATHON_USE_USER_CONFIG:-0}" != "1" ]]; then
-  export CODEX_HOME="${MARATHON_CODEX_HOME:-$ROOT_DIR/.marathon/codex-home}"
-  mkdir -p "$CODEX_HOME"
+IFS=$'\t' read -r CODEX_HOME CODEX_SHARED_PROFILE < <(
+  PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m marathon_app.codex_home
+)
+export CODEX_HOME
+if [[ -n "$CODEX_SHARED_PROFILE" ]]; then
+  export CODEX_SQLITE_HOME="$CODEX_HOME"
 fi
 
 ensure_codex_home_config() {
@@ -163,4 +166,9 @@ if [[ "${1:-}" == "exec" ]]; then
   exec "$CODEX_BIN" exec --ignore-user-config "${COMMON_ARGS[@]}" "$@"
 fi
 
-exec "$CODEX_BIN" "${COMMON_ARGS[@]}" "$@"
+PROFILE_ARGS=()
+if [[ -n "$CODEX_SHARED_PROFILE" ]]; then
+  PROFILE_ARGS=(--profile "$CODEX_SHARED_PROFILE")
+fi
+
+exec "$CODEX_BIN" "${PROFILE_ARGS[@]}" "${COMMON_ARGS[@]}" "$@"

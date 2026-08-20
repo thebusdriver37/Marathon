@@ -58,6 +58,9 @@ Environment:
   MARATHON_REMOTE_BIN       Marathon executable on the SSH host (default: PATH or ~/.local/bin/marathon)
   MARATHON_SSH_BIN          OpenSSH client executable (default: ssh on PATH)
   MARATHON_HERMES_BIN       Hermes executable (default: hermes on PATH)
+  MARATHON_CODEX_BIN        Patched Codex executable and build destination
+  MARATHON_CODEX_HOME       Isolated writable Codex home
+  MARATHON_STOCK_CODEX_HOME Normal Codex home used for shared user resources
   QWEN36_27B_GGUF           Exact Qwen3.6 27B GGUF path
   QWEN36_35B_A3B_GGUF       Exact Qwen3.6 35B A3B GGUF path
   QWOPUS36_35B_A3B_GGUF     Exact Qwopus3.6 35B A3B v1 GGUF path

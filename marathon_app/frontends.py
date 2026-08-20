@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+from .codex_home import codex_environment
 from .codex_telemetry import snapshot_sessions, summarize_session_changes
 from .runtime import Runtime
 
@@ -58,7 +59,13 @@ def _marathon_cli_name() -> str:
 
 
 def _codex_features(binary: str) -> set[str]:
-    marker = Path(f"{binary}.features")
+    candidate = Path(binary).expanduser()
+    if not candidate.is_absolute():
+        resolved = shutil.which(binary)
+        if not resolved:
+            return set()
+        candidate = Path(resolved)
+    marker = Path(f"{candidate.resolve()}.features")
     try:
         return {
             line.strip()
@@ -69,7 +76,12 @@ def _codex_features(binary: str) -> set[str]:
         return set()
 
 
-def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list[str]:
+def codex_command(
+    runtime: Runtime,
+    extra_args: list[str] | None = None,
+    *,
+    shared_profile: str | None = None,
+) -> list[str]:
     binary = _codex_binary()
     provider = (
         'model_providers.marathon-local={ name = "Marathon Local", '
@@ -86,6 +98,8 @@ def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list
         "-c", f"model_catalog_json={json.dumps(str(runtime.catalog_file))}",
         "-c", 'web_search="cached"',
     ]
+    if shared_profile:
+        command.extend(["--profile", shared_profile])
     if "tokens-per-second" in _codex_features(binary):
         command.extend(
             ["-c", f"tui.status_line={json.dumps(MARATHON_STATUS_LINE)}"]
@@ -95,14 +109,19 @@ def codex_command(runtime: Runtime, extra_args: list[str] | None = None) -> list
 
 
 def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
-    command = codex_command(runtime, extra_args)
-    environment = os.environ.copy()
+    environment, codex_home, shared_profile = codex_environment()
+    command = codex_command(runtime, extra_args, shared_profile=shared_profile)
     environment.setdefault("CODEX_CLI_NAME", _marathon_cli_name())
-    before = snapshot_sessions()
+    before = snapshot_sessions(codex_home)
     started = time.monotonic()
     runtime.record(
         "frontend.started",
-        {"frontend": "codex", "binary": command[0], "cwd": str(Path.cwd())},
+        {
+            "frontend": "codex",
+            "binary": command[0],
+            "cwd": str(Path.cwd()),
+            "codex_home": str(codex_home),
+        },
     )
     with runtime.frontend_signals():
         result = subprocess.run(
@@ -112,7 +131,12 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
             preexec_fn=_restore_sigint,
             check=False,
         )
-    summaries = summarize_session_changes(before, cwd=Path.cwd())
+    summaries = summarize_session_changes(
+        before,
+        cwd=Path.cwd(),
+        provider="marathon-local",
+        codex_home=codex_home,
+    )
     for summary in summaries:
         runtime.record("codex.session.completed", summary)
     runtime.record(

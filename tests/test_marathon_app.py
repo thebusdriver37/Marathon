@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +15,7 @@ from unittest import mock
 
 from marathon_app import catalog
 from marathon_app import model_library
+from marathon_app.codex_home import SHARED_PROFILE_FILE, prepare_codex_home
 from marathon_app.frontends import (
     _codex_binary,
     _stream_chat,
@@ -751,6 +754,199 @@ class RuntimeTests(unittest.TestCase):
                 self.assertFalse(session_file.exists())
 
 
+class CodexHomeTests(unittest.TestCase):
+    def test_isolated_home_shares_tools_without_sharing_writable_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stock = root / "stock"
+            isolated = root / "isolated"
+            stock.mkdir()
+            (stock / "config.toml").write_text(
+                'model = "gpt-stock"\n'
+                'model_reasoning_effort = "medium"\n'
+                'sqlite_home = "/tmp/stock-sqlite"\n'
+                'log_dir = "/tmp/stock-logs"\n'
+                'personality = "pragmatic"\n'
+                "\n[mcp_servers.example]\n"
+                'command = "example-mcp"\n',
+                encoding="utf-8",
+            )
+            (stock / "AGENTS.md").write_text("shared instructions\n", encoding="utf-8")
+            (stock / "skills").mkdir()
+            (stock / "skills" / "local-skill").mkdir()
+            isolated.mkdir()
+            (isolated / "config.toml").write_text(
+                'model = "marathon-local-model"\n', encoding="utf-8"
+            )
+
+            home, profile = prepare_codex_home(
+                {
+                    "CODEX_HOME": str(stock),
+                    "MARATHON_CODEX_HOME": str(isolated),
+                }
+            )
+
+            shared_config = (isolated / SHARED_PROFILE_FILE).read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(home, isolated)
+            self.assertEqual(profile, "marathon-shared")
+            self.assertEqual(
+                (isolated / "config.toml").read_text(encoding="utf-8"),
+                'model = "marathon-local-model"\n',
+            )
+            self.assertNotIn('model = "gpt-stock"', shared_config)
+            self.assertNotIn("model_reasoning_effort", shared_config)
+            self.assertNotIn("sqlite_home", shared_config)
+            self.assertNotIn("log_dir", shared_config)
+            self.assertIn('personality = "pragmatic"', shared_config)
+            self.assertIn("[mcp_servers.example]", shared_config)
+            self.assertEqual((isolated / SHARED_PROFILE_FILE).stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                (isolated / "AGENTS.md").resolve(), (stock / "AGENTS.md").resolve()
+            )
+            self.assertEqual(
+                (isolated / "skills" / "local-skill").resolve(),
+                (stock / "skills" / "local-skill").resolve(),
+            )
+
+    def test_existing_marathon_sessions_move_out_of_stock_codex_home(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stock = root / "stock"
+            isolated = root / "isolated"
+            sessions = stock / "sessions" / "2026" / "08" / "19"
+            sessions.mkdir(parents=True)
+            marathon_session = sessions / "marathon.jsonl"
+            legacy_session = sessions / "legacy-marathon.jsonl"
+            stock_session = sessions / "stock.jsonl"
+            marathon_session.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "marathon-session",
+                            "model_provider": "marathon-local",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            legacy_session.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "legacy-marathon-session",
+                            "model_provider": "marathon_local",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stock_session.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "stock-session",
+                            "model_provider": "openai",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            prepare_codex_home(
+                {
+                    "CODEX_HOME": str(stock),
+                    "MARATHON_CODEX_HOME": str(isolated),
+                }
+            )
+
+            migrated = isolated / "sessions" / "2026" / "08" / "19" / "marathon.jsonl"
+            migrated_legacy = (
+                isolated
+                / "sessions"
+                / "2026"
+                / "08"
+                / "19"
+                / "legacy-marathon.jsonl"
+            )
+            self.assertTrue(migrated.is_file())
+            self.assertFalse(marathon_session.exists())
+            self.assertTrue(migrated_legacy.is_file())
+            self.assertFalse(legacy_session.exists())
+            legacy_meta = json.loads(
+                migrated_legacy.read_text(encoding="utf-8").splitlines()[0]
+            )
+            self.assertEqual(
+                legacy_meta["payload"]["model_provider"], "marathon-local"
+            )
+            self.assertTrue(stock_session.is_file())
+
+    def test_legacy_launcher_resolves_user_home_instead_of_filesystem_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_curl = fake_bin / "curl"
+            fake_curl.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  */health) printf '%s\\n' "
+                "'{\"current_model\":\"local-model\",\"backend_health\":{\"status\":\"ok\"}}' ;;\n"
+                "  */v1/models) printf '%s\\n' '{\"data\":[]}' ;;\n"
+                "  *) exit 1 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            environment = os.environ.copy()
+            environment.pop("CODEX_HOME", None)
+            environment.update(
+                {
+                    "HOME": str(root / "home"),
+                    "PATH": f"{fake_bin}:{environment['PATH']}",
+                    "MARATHON_CODEX_BIN": "/bin/true",
+                    "MARATHON_ROUTER_STATE_DIR": str(root / "state"),
+                    "MARATHON_RUNTIME_MODELS_FILE": str(root / "state" / "models.json"),
+                    "MARATHON_USE_USER_CONFIG": "1",
+                    "MARATHON_WEB_SEARCH_MODE": "disabled",
+                }
+            )
+
+            result = subprocess.run(
+                [str(Path("scripts/launchers/start_codex.sh").resolve())],
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((root / "home" / ".codex" / "config.toml").is_file())
+
+    def test_codex_binary_override_is_consistent_across_entry_points(self) -> None:
+        paths = (
+            Path("marathon_app/frontends.py"),
+            Path("scripts/launchers/start_codex.sh"),
+            Path("scripts/build_codex.sh"),
+            Path("scripts/ops/update_codex.sh"),
+            Path("scripts/ops/doctor.sh"),
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                content = path.read_text(encoding="utf-8")
+                self.assertIn("MARATHON_CODEX_BIN", content)
+                self.assertNotIn("MARATHON_CODEX_BIN_PATH", content)
+                self.assertNotIn("MARATHON_PATCHED_CODEX_BIN", content)
+
+
 class FrontendTests(unittest.TestCase):
     def test_patched_codex_is_preferred_when_installed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -785,17 +981,66 @@ class FrontendTests(unittest.TestCase):
         runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"))
         completed = subprocess.CompletedProcess([], 0)
 
-        with (
-            mock.patch("marathon_app.frontends.subprocess.run", return_value=completed) as run,
-            mock.patch("marathon_app.frontends.snapshot_sessions", return_value={}),
-            mock.patch("marathon_app.frontends.summarize_session_changes", return_value=[]),
-            mock.patch("marathon_app.frontends.shutil.which", return_value="/usr/bin/marathon"),
-        ):
-            code = run_codex(runtime, ["resume", "session-id"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stock_home = root / "stock-codex"
+            marathon_home = root / "marathon-codex"
+            stock_home.mkdir()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_HOME": str(stock_home),
+                        "CODEX_SQLITE_HOME": str(root / "stock-sqlite"),
+                        "MARATHON_CODEX_HOME": str(marathon_home),
+                    },
+                    clear=False,
+                ),
+                mock.patch(
+                    "marathon_app.frontends.subprocess.run", return_value=completed
+                ) as run,
+                mock.patch(
+                    "marathon_app.frontends.snapshot_sessions", return_value={}
+                ),
+                mock.patch(
+                    "marathon_app.frontends.summarize_session_changes", return_value=[]
+                ) as summarize,
+                mock.patch(
+                    "marathon_app.frontends.shutil.which",
+                    return_value="/usr/bin/marathon",
+                ),
+            ):
+                code = run_codex(runtime, ["resume", "session-id"])
 
         self.assertEqual(code, 0)
         self.assertEqual(run.call_args.kwargs["env"]["CODEX_CLI_NAME"], "marathon")
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], str(marathon_home))
+        self.assertEqual(
+            run.call_args.kwargs["env"]["CODEX_SQLITE_HOME"], str(marathon_home)
+        )
         self.assertEqual(run.call_args.args[0][-2:], ["resume", "session-id"])
+        self.assertEqual(summarize.call_args.kwargs["provider"], "marathon-local")
+
+    def test_project_cannot_enable_patched_features_for_stock_codex(self) -> None:
+        model = fixture_model()
+        runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "codex.features").write_text(
+                "tokens-per-second\n", encoding="utf-8"
+            )
+            previous = Path.cwd()
+            try:
+                os.chdir(project)
+                with mock.patch(
+                    "marathon_app.frontends._codex_binary", return_value="codex"
+                ):
+                    command = codex_command(runtime)
+            finally:
+                os.chdir(previous)
+
+        self.assertFalse(any("tokens-per-second" in item for item in command))
 
     def test_patched_codex_enables_turn_throughput_status_item(self) -> None:
         model = fixture_model()
@@ -1041,7 +1286,11 @@ class TelemetryTests(unittest.TestCase):
             )
             writer.emit(
                 "frontend.started",
-                {"frontend": "codex", "cwd": str(workspace)},
+                {
+                    "frontend": "codex",
+                    "cwd": str(workspace),
+                    "codex_home": str(root),
+                },
             )
             sessions = root / "sessions" / "2026" / "01" / "01"
             sessions.mkdir(parents=True)
@@ -1088,7 +1337,11 @@ class TelemetryTests(unittest.TestCase):
                 "".join(json.dumps(record) + "\n" for record in records),
                 encoding="utf-8",
             )
-            with mock.patch.dict(os.environ, {"CODEX_HOME": directory}, clear=False):
+            with mock.patch.dict(
+                os.environ,
+                {"CODEX_HOME": str(root / "stock-codex")},
+                clear=False,
+            ):
                 summary = summarize_run(run_path, live=True)
 
         self.assertEqual(summary["codex_sessions"], 1)
@@ -1110,10 +1363,40 @@ class TelemetryTests(unittest.TestCase):
 
     def test_codex_import_reads_new_complete_line_and_no_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
             sessions = Path(directory) / "sessions" / "2026" / "01" / "01"
             sessions.mkdir(parents=True)
             path = sessions / "rollout.jsonl"
-            path.write_text('{"type":"session_meta","payload":{"id":"session-1"}}\n', encoding="utf-8")
+            stock_path = sessions / "stock-rollout.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "session-1",
+                            "cwd": str(workspace),
+                            "model_provider": "marathon-local",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stock_path.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "stock-session",
+                            "cwd": str(workspace),
+                            "model_provider": "openai",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             with mock.patch.dict(os.environ, {"CODEX_HOME": directory}, clear=False):
                 before = snapshot_sessions()
                 with path.open("a", encoding="utf-8") as handle:
@@ -1139,14 +1422,91 @@ class TelemetryTests(unittest.TestCase):
                         "type": "response_item",
                         "payload": {"type": "function_call_output", "call_id": "call-1", "output": "private"},
                     }) + "\n")
-                summaries = summarize_session_changes(before)
+                with stock_path.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "type": "turn_context",
+                                "payload": {
+                                    "cwd": str(workspace),
+                                    "model": "gpt-stock",
+                                },
+                            }
+                        )
+                        + "\n"
+                    )
+                summaries = summarize_session_changes(
+                    before,
+                    cwd=workspace,
+                    provider="marathon-local",
+                )
 
         self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["session_id"], "session-1")
+        self.assertEqual(summaries[0]["provider"], "marathon-local")
         self.assertEqual(summaries[0]["reasoning_efforts"], ["high"])
         self.assertEqual(summaries[0]["token_delta"]["total_tokens"], 35)
         self.assertEqual(summaries[0]["tool_calls"], {"exec_command": 1})
         self.assertEqual(summaries[0]["tool_metrics"][0]["duration_ms"], 250)
         self.assertNotIn("private", json.dumps(summaries[0]))
+
+    def test_legacy_backend_stop_leaves_unowned_llama_server_running(self) -> None:
+        if not Path("/usr/bin/ss").is_file():
+            self.skipTest("ss is required for the ownership regression test")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            process = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    'exec -a llama-server "$1" -m http.server "$2" --bind 127.0.0.1',
+                    "bash",
+                    sys.executable,
+                    str(port),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                            break
+                    except OSError:
+                        time.sleep(0.05)
+                else:
+                    self.fail("test llama-server did not start")
+
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "MARATHON_MODEL_SLUG": "ownership-audit",
+                        "MARATHON_MODEL_PORT": str(port),
+                        "MARATHON_PROXY_PORT": str(port + 1),
+                        "MARATHON_ROUTER_STATE_DIR": str(root / "state"),
+                        "MARATHON_LOG_DIR": str(root / "logs"),
+                    }
+                )
+                subprocess.run(
+                    [str(Path("scripts/ops/backend.sh").resolve()), "stop"],
+                    env=environment,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+
+                self.assertIsNone(process.poll())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
 
 
 class UiTests(unittest.TestCase):

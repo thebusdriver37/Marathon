@@ -1872,6 +1872,43 @@ class RouterState:
         )
         return proc.stdout.strip()
 
+    def _pid_args(self, pid: int) -> tuple[str, ...]:
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return ()
+        return tuple(
+            item.decode("utf-8", errors="replace")
+            for item in raw.split(b"\0")
+            if item
+        )
+
+    def _process_start_ticks(self, pid: int) -> str | None:
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        except OSError:
+            return None
+        return fields[21] if len(fields) > 21 else None
+
+    def _read_profile_pid(self, profile: ModelProfile) -> tuple[int, str | None] | None:
+        try:
+            fields = self._profile_pid_file(profile).read_text(encoding="utf-8").split()
+            pid = int(fields[0])
+        except (OSError, ValueError, IndexError):
+            return None
+        return pid, fields[1] if len(fields) > 1 else None
+
+    def _owns_profile_pid(self, profile: ModelProfile, pid: int, started: str | None) -> bool:
+        if started is not None and self._process_start_ticks(pid) != started:
+            return False
+        args = self._pid_args(pid)
+        if not args or "llama-server" not in Path(args[0]).name:
+            return False
+        return any(
+            args[index] == "--port" and args[index + 1] == str(profile.port)
+            for index in range(len(args) - 1)
+        )
+
     def _profile_ready(self, profile: ModelProfile) -> bool:
         return _json_model_matches(profile.target, profile.alias)
 
@@ -1884,28 +1921,47 @@ class RouterState:
     def _stop_profile(self, profile: ModelProfile) -> None:
         if profile.supervised:
             return
-        pid = self._port_owner_pid(profile.port)
-        if pid is None:
+        record = self._read_profile_pid(profile)
+        port_pid = self._port_owner_pid(profile.port)
+        if record is None:
             self.live_slot_by_model.pop(profile.slug, None)
             self._profile_pid_file(profile).unlink(missing_ok=True)
+            if port_pid is not None:
+                cmd = self._pid_cmdline(port_pid)
+                raise RuntimeError(
+                    f"port {profile.port} is occupied by a process Marathon does not own: {cmd}"
+                )
             return
-        cmd = self._pid_cmdline(pid)
-        if "llama-server" not in cmd:
-            raise RuntimeError(f"port {profile.port} is occupied by unexpected process: {cmd}")
+        pid, started = record
+        if not self._owns_profile_pid(profile, pid, started):
+            self._profile_pid_file(profile).unlink(missing_ok=True)
+            if port_pid is not None:
+                foreign = self._pid_cmdline(port_pid)
+                raise RuntimeError(
+                    f"port {profile.port} is occupied by a process Marathon does not own: {foreign}"
+                )
+            return
+        if port_pid is not None and port_pid != pid:
+            foreign = self._pid_cmdline(port_pid)
+            raise RuntimeError(
+                f"port {profile.port} is occupied by a process Marathon does not own: {foreign}"
+            )
+        owned_started = started or self._process_start_ticks(pid)
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         for _ in range(10):
             time.sleep(1)
-            if self._port_owner_pid(profile.port) is None:
+            if self._process_start_ticks(pid) != owned_started:
                 self.live_slot_by_model.pop(profile.slug, None)
                 self._profile_pid_file(profile).unlink(missing_ok=True)
                 return
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        if self._process_start_ticks(pid) == owned_started:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         self.live_slot_by_model.pop(profile.slug, None)
         self._profile_pid_file(profile).unlink(missing_ok=True)
 
@@ -1927,7 +1983,10 @@ class RouterState:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        self._profile_pid_file(profile).write_text(f"{proc.pid}\n", encoding="utf-8")
+        started = self._process_start_ticks(proc.pid) or ""
+        self._profile_pid_file(profile).write_text(
+            f"{proc.pid} {started}\n", encoding="utf-8"
+        )
 
     def _wait_for_profile(self, profile: ModelProfile) -> None:
         for _ in range(240):
