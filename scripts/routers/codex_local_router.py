@@ -260,6 +260,24 @@ def _can_reuse_reconnect_root(
     )
 
 
+def _root_prompt_cache_mode(
+    profile_slug: str,
+    prompt_cache_key: str,
+    live_slots: dict[str, str],
+    live_cache_keys: dict[str, str],
+) -> str:
+    if _can_reuse_reconnect_root(
+        profile_slug,
+        prompt_cache_key,
+        live_slots,
+        live_cache_keys,
+    ):
+        return "reuse-live-reconnect-root"
+    if profile_slug in live_slots:
+        return "reuse-live-cross-conversation-root"
+    return "reuse-backend-root-prefix"
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -3309,9 +3327,23 @@ class RouterState:
                     "reason": "same prompt cache key; llama.cpp will prefix-match full prompt",
                 }
             elif parent_snapshot is None:
-                erase_result = await self.erase_slot(profile)
-                self.live_slot_by_model.pop(profile.slug, None)
-                self.live_prompt_cache_key_by_model.pop(profile.slug, None)
+                slot_prepare_mode = _root_prompt_cache_mode(
+                    profile.slug,
+                    prompt_cache_key,
+                    self.live_slot_by_model,
+                    self.live_prompt_cache_key_by_model,
+                )
+                # llama.cpp compares the complete token stream before reusing
+                # KV state. Keeping the slot therefore preserves an exact
+                # shared prefix while automatically invalidating changed
+                # instructions, tools, project context, and user input.
+                restore_result = {
+                    "status": "skipped",
+                    "reason": (
+                        "new conversation; llama.cpp will reuse only the "
+                        "token-exact prompt prefix"
+                    ),
+                }
             elif not scaffold_matches:
                 slot_prepare_mode = "erase-scaffold-mismatch"
                 erase_result = await self.erase_slot(profile)

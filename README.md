@@ -59,6 +59,8 @@ Marathon records the repository, filename, revision, size, and expected SHA-256 
 When a repository includes a compatible vision projector, Marathon downloads it beside the model and enables screenshot and image inspection automatically.
 Existing models get the same behavior when their matching `mmproj` or `vision-f16` GGUF is stored beside the main model.
 Because current llama.cpp does not support slot snapshots with vision, Marathon automatically replays conversation context for those models and keeps slot snapshots enabled for text-only models.
+Marathon also preserves llama.cpp's token-exact prompt prefix across new conversations while the runtime remains open, so unchanged system instructions, tools, and `AGENTS.md` content do not need to be processed again.
+Prompt changes invalidate themselves automatically and require no cache management.
 
 ## Reasoning Control
 

@@ -13,6 +13,16 @@ The `marathon dashboard` command exposes model profiles, alternate frontends, wa
 
 Legacy `marathon backend ...` commands remain available for compatibility, but the normal runtime does not use their detached-process lifecycle.
 
+## Prompt Prefix Cache
+
+Marathon enables llama.cpp prompt caching and keeps completed prompt prefixes available when a new conversation starts.
+llama.cpp compares the complete token stream and reuses only the exact common prefix, so edits to the system prompt, tools, plugins, skills, project context, or `AGENTS.md` automatically reprocess the changed suffix.
+No manual invalidation or cache clearing is required.
+
+The default host-memory cache is 8 GiB.
+Set `MARATHON_PROMPT_CACHE_RAM_MIB` or override `prompt_cache_ram_mib` in the personal catalog settings to change the limit.
+The cache exists only for the lifetime of the Marathon backend, and exiting Marathon still frees the GPUs and cache memory.
+
 ## Model and Backend Paths
 
 Marathon uses this default hierarchy:

@@ -214,6 +214,9 @@ class CatalogTests(unittest.TestCase):
         self.assertNotIn("--tensor-split", command)
         self.assertEqual(command[command.index("--cache-type-k") + 1], "q8_0")
         self.assertEqual(command[command.index("--cache-type-v") + 1], "q8_0")
+        self.assertIn("--cache-prompt", command)
+        self.assertIn("--cache-idle-slots", command)
+        self.assertEqual(command[command.index("--cache-ram") + 1], "8192")
         self.assertEqual(command[command.index("--fit") + 1], "on")
         self.assertEqual(command[command.index("--fit-ctx") + 1], "32768")
 
@@ -327,6 +330,20 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(command[command.index("--n-gpu-layers") + 1], "999")
         self.assertEqual(command[command.index("--tensor-split") + 1], "1,1,1,1")
         self.assertEqual(command[command.index("--flash-attn") + 1], "on")
+
+    def test_prompt_cache_ram_has_environment_override(self) -> None:
+        model = fixture_model()
+        profile = catalog.find_profile(model, "balanced", "codex")
+        backend = catalog.Backend("test", "Test backend", TEST_EXECUTABLE)
+
+        with mock.patch.dict(
+            os.environ,
+            {"MARATHON_PROMPT_CACHE_RAM_MIB": "4096"},
+            clear=False,
+        ):
+            command = catalog.server_command(model, profile, backend)
+
+        self.assertEqual(command[command.index("--cache-ram") + 1], "4096")
 
     def test_deepseek_profiles_keep_optimized_and_legacy_paths_separate(self) -> None:
         model = fixture_model("deepseek-v4-flash")

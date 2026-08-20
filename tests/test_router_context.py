@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -644,6 +645,98 @@ class RouterContextTests(unittest.TestCase):
                 "model", "session-b", {"model": "resp"}, {"model": "session-a"}
             )
         )
+
+    def test_new_conversation_preserves_token_exact_root_prefix(self) -> None:
+        live_slots = {"model": "resp"}
+        live_cache_keys = {"model": "session-a"}
+
+        self.assertEqual(
+            router_module._root_prompt_cache_mode(
+                "model", "session-a", live_slots, live_cache_keys
+            ),
+            "reuse-live-reconnect-root",
+        )
+        self.assertEqual(
+            router_module._root_prompt_cache_mode(
+                "model", "session-b", live_slots, live_cache_keys
+            ),
+            "reuse-live-cross-conversation-root",
+        )
+        self.assertEqual(
+            router_module._root_prompt_cache_mode(
+                "model", "session-b", {}, {}
+            ),
+            "reuse-backend-root-prefix",
+        )
+
+    def test_new_conversation_does_not_erase_live_llama_slot(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.lineage_lock = asyncio.Lock()
+        state.lineage = {}
+        state.last_response_by_model = {profile.slug: "resp_old"}
+        state.live_slot_by_model = {profile.slug: "resp_old"}
+        state.live_prompt_cache_key_by_model = {profile.slug: "session-a"}
+        state.experimental_delta_only = False
+        state.slot_id = 0
+        state.backend_lock = asyncio.Lock()
+        state.slot_snapshots_enabled = False
+        state.erase_slot = mock.AsyncMock()
+        state._run_responses_loop = mock.AsyncMock(
+            return_value=(
+                {
+                    "id": "resp_new",
+                    "usage": {
+                        "input_tokens": 10_500,
+                        "input_tokens_details": {"cached_tokens": 10_000},
+                    },
+                },
+                [],
+                0,
+            )
+        )
+        state.telemetry = mock.Mock()
+        state.trace_request = mock.Mock()
+        state.lock = threading.Lock()
+        state._trace_seq = 0
+        state._response_id_seq = 0
+        state.debug = False
+
+        result = asyncio.run(
+            state.process_websocket_create(
+                {
+                    "model": profile.slug,
+                    "prompt_cache_key": "session-b",
+                    "instructions": "stable system prompt",
+                    "tools": [],
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "new conversation"}
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+        state.erase_slot.assert_not_awaited()
+        forwarded = state._run_responses_loop.await_args.kwargs["forward_request"]
+        self.assertTrue(forwarded["cache_prompt"])
+        self.assertEqual(forwarded["id_slot"], 0)
+        completed = [
+            call.args[1]
+            for call in state.telemetry.emit.call_args_list
+            if call.args[0] == "router.response.completed"
+        ][0]
+        self.assertEqual(
+            completed["slot"]["prepare_mode"],
+            "reuse-live-cross-conversation-root",
+        )
+        self.assertEqual(result["usage"]["input_tokens_details"]["cached_tokens"], 10_000)
 
     def test_ws_scope_supersedes_only_the_same_generating_session(self) -> None:
         request = {

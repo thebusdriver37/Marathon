@@ -44,6 +44,7 @@ class Settings:
     router_port: int
     health_timeout: int
     stop_timeout: int
+    prompt_cache_ram_mib: int
 
 
 @dataclass(frozen=True)
@@ -190,6 +191,12 @@ def settings(catalog: dict[str, Any] | None = None) -> Settings:
             )
         ),
         stop_timeout=int(raw["stop_timeout"]),
+        prompt_cache_ram_mib=int(
+            os.environ.get(
+                "MARATHON_PROMPT_CACHE_RAM_MIB",
+                raw.get("prompt_cache_ram_mib", 8192),
+            )
+        ),
     )
 
 
@@ -514,6 +521,8 @@ def server_command(model: Model, profile: Profile, backend: Backend | None = Non
         "--batch-size", str(profile.batch), "--ubatch-size", str(profile.ubatch),
         "--cache-type-k", profile.cache_k, "--cache-type-v", profile.cache_v,
         "--flash-attn", profile.flash_attention, "--jinja", "--metrics",
+        "--cache-prompt", "--cache-idle-slots", "--cache-ram",
+        str(cfg.prompt_cache_ram_mib),
     ]
     if model.multimodal_projector is not None:
         command.extend(["--mmproj", str(model.multimodal_projector)])
