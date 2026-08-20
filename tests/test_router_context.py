@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import tempfile
 import threading
 import unittest
 from dataclasses import replace
@@ -634,6 +635,24 @@ class RouterContextTests(unittest.TestCase):
         self.assertEqual(retained, "base\n\ndeveloper policy")
         self.assertEqual(changed, "new base")
 
+    def test_empty_non_generating_warmup_is_a_starter_root(self) -> None:
+        warmup = router_module.ResponseSnapshot(
+            response_id="warm_123",
+            profile_slug="dynamic-model",
+            conversation_items=[],
+            snapshot_filename="",
+            instructions_text="warmup",
+            base_instructions_hash="base",
+            instructions_hash="instructions",
+            tools_hash="tools",
+            prompt_cache_key="session",
+            created_at=0,
+        )
+        generated = replace(warmup, response_id="resp_123")
+
+        self.assertTrue(router_module._is_warmup_root(warmup))
+        self.assertFalse(router_module._is_warmup_root(generated))
+
     def test_reconnect_root_reuses_only_same_live_prompt_cache_session(self) -> None:
         self.assertTrue(
             router_module._can_reuse_reconnect_root(
@@ -737,6 +756,125 @@ class RouterContextTests(unittest.TestCase):
             "reuse-live-cross-conversation-root",
         )
         self.assertEqual(result["usage"]["input_tokens_details"]["cached_tokens"], 10_000)
+
+    def test_starter_scaffold_matches_responses_tool_conversion(self) -> None:
+        scaffold = router_module._starter_scaffold_chat_body(
+            {
+                "instructions": "stable system prompt",
+                "input": [{"role": "user", "content": "not cached"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "read_file",
+                        "description": "Read one file",
+                        "parameters": {"type": "object"},
+                    },
+                    {"type": "web_search"},
+                ],
+                "parallel_tool_calls": False,
+            }
+        )
+
+        self.assertEqual(
+            scaffold["messages"],
+            [{"role": "system", "content": "stable system prompt"}],
+        )
+        self.assertFalse(scaffold["add_generation_prompt"])
+        self.assertEqual(len(scaffold["tools"]), 1)
+        self.assertTrue(scaffold["tools"][0]["function"]["strict"])
+        self.assertNotIn("input", scaffold)
+
+    def test_starter_cache_survives_router_restart(self) -> None:
+        profile = fixture_profile()
+        request = {
+            "instructions": "stable system prompt",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read_file",
+                    "parameters": {"type": "object"},
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            slot_root = Path(temporary)
+
+            def make_state() -> router_module.RouterState:
+                state = object.__new__(router_module.RouterState)
+                state.starter_cache_enabled = True
+                state.starter_cache_max_count = 8
+                state.starter_cache_max_bytes = 1024 * 1024
+                state.backend_cache_id = "backend-v1"
+                state.slot_save_root = slot_root
+                state.slot_id = 0
+                state.erase_slot = mock.AsyncMock(return_value={"status": "erased"})
+                state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})
+                state._request_json = mock.AsyncMock(
+                    side_effect=[
+                        {"prompt": "rendered starter prompt"},
+                        {"timings": {"prompt_n": 10_000}},
+                    ]
+                )
+
+                async def save_slot(
+                    saved_profile: router_module.ModelProfile,
+                    filename: str,
+                ) -> dict[str, object]:
+                    directory = state._slot_save_dir(saved_profile)
+                    directory.mkdir(parents=True, exist_ok=True)
+                    (directory / filename).write_bytes(b"persistent slot state")
+                    return {"status": "saved"}
+
+                state.save_slot = mock.AsyncMock(side_effect=save_slot)
+                return state
+
+            first = make_state()
+            built = asyncio.run(first.prepare_starter_cache(profile, request))
+
+            self.assertEqual(built["mode"], "build-starter-cache")
+            self.assertEqual(first._request_json.await_count, 2)
+            completion = first._request_json.await_args_list[1].args[3]
+            self.assertEqual(completion["n_predict"], 0)
+            self.assertEqual(completion["prompt"], "rendered starter prompt")
+
+            restarted = make_state()
+            restored = asyncio.run(restarted.prepare_starter_cache(profile, request))
+
+            self.assertEqual(restored["mode"], "restore-starter-cache")
+            restarted.restore_slot.assert_awaited_once_with(
+                profile,
+                built["snapshot_filename"],
+            )
+            restarted._request_json.assert_not_awaited()
+            restarted.erase_slot.assert_not_awaited()
+
+    def test_starter_cache_fingerprint_tracks_scaffold_and_backend(self) -> None:
+        profile = fixture_profile()
+        first = router_module._starter_cache_fingerprint(
+            profile,
+            "backend-v1",
+            router_module._starter_scaffold_chat_body(
+                {"instructions": "one", "tools": []}
+            ),
+        )
+        changed_prompt = router_module._starter_cache_fingerprint(
+            profile,
+            "backend-v1",
+            router_module._starter_scaffold_chat_body(
+                {"instructions": "two", "tools": []}
+            ),
+        )
+        changed_backend = router_module._starter_cache_fingerprint(
+            profile,
+            "backend-v2",
+            router_module._starter_scaffold_chat_body(
+                {"instructions": "one", "tools": []}
+            ),
+        )
+
+        self.assertNotEqual(first, changed_prompt)
+        self.assertNotEqual(first, changed_backend)
 
     def test_ws_scope_supersedes_only_the_same_generating_session(self) -> None:
         request = {

@@ -105,6 +105,9 @@ DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 16
 DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = True
 DEFAULT_SLOT_SNAPSHOTS_ENABLED = False
+DEFAULT_STARTER_CACHE_ENABLED = True
+DEFAULT_STARTER_CACHE_MAX_COUNT = 8
+DEFAULT_STARTER_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
 DEFAULT_TOOL_OUTPUT_MAX_CHARS = 16_384
 DEFAULT_WEB_TOOL_CACHE_MAX_ENTRIES = 256
 DEFAULT_WEB_TURN_PROGRESS_MAX_ENTRIES = 64
@@ -276,6 +279,72 @@ def _root_prompt_cache_mode(
     if profile_slug in live_slots:
         return "reuse-live-cross-conversation-root"
     return "reuse-backend-root-prefix"
+
+
+def _is_warmup_root(snapshot: ResponseSnapshot | None) -> bool:
+    """Return whether a non-generating Codex warmup precedes the first turn."""
+
+    return bool(
+        snapshot is not None
+        and snapshot.response_id.startswith("warm_")
+        and not snapshot.conversation_items
+        and not snapshot.snapshot_filename
+    )
+
+
+def _starter_scaffold_chat_body(request: dict[str, Any]) -> dict[str, Any]:
+    """Build the token-exact chat-template input before conversation messages."""
+
+    body: dict[str, Any] = {"add_generation_prompt": False}
+    if "instructions" in request:
+        instructions = request.get("instructions")
+        body["messages"] = [
+            {
+                "role": "system",
+                "content": instructions if isinstance(instructions, str) else "",
+            }
+        ]
+    else:
+        body["messages"] = []
+
+    chat_tools: list[dict[str, Any]] = []
+    tools = request.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict) or tool.get("type") != "function":
+                continue
+            function = copy.deepcopy(tool)
+            function.pop("type", None)
+            function.setdefault("strict", True)
+            chat_tools.append({"type": "function", "function": function})
+    if chat_tools:
+        body["tools"] = chat_tools
+
+    for key in (
+        "chat_template_kwargs",
+        "enable_thinking",
+        "parallel_tool_calls",
+        "reasoning_format",
+        "tool_choice",
+    ):
+        if key in request:
+            body[key] = copy.deepcopy(request[key])
+    return body
+
+
+def _starter_cache_fingerprint(
+    profile: ModelProfile,
+    backend_cache_id: str,
+    scaffold_body: dict[str, Any],
+) -> str:
+    payload = {
+        "schema": 1,
+        "profile_slug": profile.slug,
+        "profile_alias": profile.alias,
+        "backend_cache_id": backend_cache_id,
+        "scaffold": scaffold_body,
+    }
+    return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
 
 def _repo_root() -> Path:
@@ -1536,6 +1605,25 @@ class RouterState:
             "MARATHON_SLOT_SNAPSHOTS_ENABLED",
             DEFAULT_SLOT_SNAPSHOTS_ENABLED,
         )
+        self.starter_cache_enabled = _env_bool(
+            "MARATHON_STARTER_CACHE_ENABLED",
+            DEFAULT_STARTER_CACHE_ENABLED,
+        )
+        self.starter_cache_max_count = max(
+            1,
+            _env_int(
+                "MARATHON_STARTER_CACHE_MAX_COUNT",
+                DEFAULT_STARTER_CACHE_MAX_COUNT,
+            ),
+        )
+        self.starter_cache_max_bytes = max(
+            0,
+            _env_int(
+                "MARATHON_STARTER_CACHE_MAX_BYTES",
+                DEFAULT_STARTER_CACHE_MAX_BYTES,
+            ),
+        )
+        self.backend_cache_id = os.getenv("MARATHON_BACKEND_CACHE_ID", "")
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.trace_log_path = self.log_dir / "codex_local_router_trace.jsonl"
@@ -2354,6 +2442,167 @@ class RouterState:
 
     def _slot_save_dir(self, profile: ModelProfile) -> Path:
         return self.slot_save_root / profile.alias
+
+    @staticmethod
+    def _snapshot_ready(path: Path) -> bool:
+        try:
+            return path.is_file() and path.stat().st_size > 0
+        except OSError:
+            return False
+
+    def _prune_starter_cache_sync(
+        self,
+        profile: ModelProfile,
+        protected_filename: str,
+    ) -> dict[str, Any]:
+        slot_dir = self._slot_save_dir(profile)
+        prefix = f"starter__{profile.slug}__"
+        snapshots: list[tuple[Path, int, float]] = []
+        for path in slot_dir.glob(f"{prefix}*.bin"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if path.is_file():
+                snapshots.append((path, stat.st_size, stat.st_mtime))
+
+        snapshots.sort(key=lambda item: (item[2], item[0].name), reverse=True)
+        kept_count = 0
+        kept_bytes = 0
+        deleted: list[str] = []
+        for path, size, _mtime in snapshots:
+            if size <= 0:
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                deleted.append(path.name)
+                continue
+
+            protected = path.name == protected_filename
+            within_count = kept_count < self.starter_cache_max_count
+            within_bytes = (
+                self.starter_cache_max_bytes <= 0
+                or kept_bytes + size <= self.starter_cache_max_bytes
+            )
+            if protected or (within_count and within_bytes):
+                kept_count += 1
+                kept_bytes += size
+                continue
+
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            deleted.append(path.name)
+
+        return {
+            "deleted": deleted,
+            "deleted_count": len(deleted),
+            "kept_count": kept_count,
+            "kept_bytes": kept_bytes,
+        }
+
+    async def prepare_starter_cache(
+        self,
+        profile: ModelProfile,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Restore or create the persistent system-and-tools prompt prefix."""
+
+        if not self.starter_cache_enabled or not profile.supports_slots:
+            return {
+                "mode": "starter-cache-disabled",
+                "status": "skipped",
+            }
+
+        scaffold_body = _starter_scaffold_chat_body(request)
+        fingerprint = _starter_cache_fingerprint(
+            profile,
+            self.backend_cache_id,
+            scaffold_body,
+        )
+        filename = f"starter__{profile.slug}__{fingerprint}.bin"
+        slot_dir = self._slot_save_dir(profile)
+        slot_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_path = slot_dir / filename
+
+        restore_error: str | None = None
+        if self._snapshot_ready(snapshot_path):
+            try:
+                restored = await self.restore_slot(profile, filename)
+                snapshot_path.touch()
+                return {
+                    "mode": "restore-starter-cache",
+                    "status": "restored",
+                    "fingerprint": fingerprint,
+                    "snapshot_filename": filename,
+                    "restore_result": restored,
+                }
+            except Exception as exc:
+                restore_error = str(exc)
+                try:
+                    snapshot_path.unlink()
+                except OSError:
+                    pass
+
+        try:
+            erased = await self.erase_slot(profile)
+            rendered = await self._request_json(
+                profile,
+                "POST",
+                "/apply-template",
+                scaffold_body,
+                retry_connection_error=True,
+            )
+            prompt = rendered.get("prompt")
+            if not isinstance(prompt, str) or not prompt:
+                raise RuntimeError("llama.cpp returned an empty starter prompt")
+            prefilled = await self._request_json(
+                profile,
+                "POST",
+                "/completion",
+                {
+                    "prompt": prompt,
+                    "n_predict": 0,
+                    "id_slot": self.slot_id,
+                    "cache_prompt": True,
+                },
+                retry_connection_error=True,
+            )
+            saved = await self.save_slot(profile, filename)
+            if not self._snapshot_ready(snapshot_path):
+                raise RuntimeError("llama.cpp produced an empty starter snapshot")
+            pruned = await asyncio.to_thread(
+                self._prune_starter_cache_sync,
+                profile,
+                filename,
+            )
+            return {
+                "mode": "build-starter-cache",
+                "status": "built",
+                "fingerprint": fingerprint,
+                "snapshot_filename": filename,
+                "restore_error": restore_error,
+                "erase_result": erased,
+                "prefill_timings": prefilled.get("timings"),
+                "save_result": saved,
+                "prune_result": pruned,
+            }
+        except Exception as exc:
+            try:
+                erased = await self.erase_slot(profile)
+            except Exception:
+                erased = None
+            return {
+                "mode": "starter-cache-fallback",
+                "status": "error",
+                "fingerprint": fingerprint,
+                "snapshot_filename": filename,
+                "restore_error": restore_error,
+                "error": str(exc),
+                "erase_result": erased,
+            }
 
     def _delete_slot_snapshots_sync(self, profile: ModelProfile) -> dict[str, Any]:
         slot_dir = self._slot_save_dir(profile)
@@ -3295,6 +3544,7 @@ class RouterState:
             restore_result: dict[str, Any] | None = None
             erase_result: dict[str, Any] | None = None
             restore_error: str | None = None
+            starter_cache_result: dict[str, Any] | None = None
             slot_prepare_mode = "erase-root"
             slot_prepare_start = time.perf_counter()
             live_parent = (
@@ -3302,6 +3552,7 @@ class RouterState:
                 and previous_response_id is not None
                 and self.live_slot_by_model.get(profile.slug) == previous_response_id
             )
+            starter_root = parent_snapshot is None or _is_warmup_root(parent_snapshot)
             live_reconnect_root = (
                 profile.supports_slots
                 and parent_snapshot is None
@@ -3326,24 +3577,36 @@ class RouterState:
                     "status": "skipped",
                     "reason": "same prompt cache key; llama.cpp will prefix-match full prompt",
                 }
-            elif parent_snapshot is None:
-                slot_prepare_mode = _root_prompt_cache_mode(
-                    profile.slug,
-                    prompt_cache_key,
-                    self.live_slot_by_model,
-                    self.live_prompt_cache_key_by_model,
-                )
-                # llama.cpp compares the complete token stream before reusing
-                # KV state. Keeping the slot therefore preserves an exact
-                # shared prefix while automatically invalidating changed
-                # instructions, tools, project context, and user input.
-                restore_result = {
-                    "status": "skipped",
-                    "reason": (
-                        "new conversation; llama.cpp will reuse only the "
-                        "token-exact prompt prefix"
-                    ),
-                }
+            elif starter_root:
+                if profile.slug in self.live_slot_by_model:
+                    slot_prepare_mode = _root_prompt_cache_mode(
+                        profile.slug,
+                        prompt_cache_key,
+                        self.live_slot_by_model,
+                        self.live_prompt_cache_key_by_model,
+                    )
+                    # llama.cpp compares the complete token stream before
+                    # reusing live KV state, so changed scaffolds naturally
+                    # invalidate only the mismatched suffix.
+                    restore_result = {
+                        "status": "skipped",
+                        "reason": (
+                            "new conversation; llama.cpp will reuse only the "
+                            "token-exact prompt prefix"
+                        ),
+                    }
+                else:
+                    starter_cache_result = await self.prepare_starter_cache(
+                        profile,
+                        forward_request,
+                    )
+                    slot_prepare_mode = str(starter_cache_result["mode"])
+                    action_result = starter_cache_result.get("restore_result")
+                    restore_result = (
+                        action_result
+                        if isinstance(action_result, dict)
+                        else starter_cache_result
+                    )
             elif not scaffold_matches:
                 slot_prepare_mode = "erase-scaffold-mismatch"
                 erase_result = await self.erase_slot(profile)
@@ -3452,62 +3715,63 @@ class RouterState:
         with self.lock:
             self._trace_seq += 1
             trace_entry = {
-                    "trace_id": self._trace_seq,
-                    "timestamp": time.time(),
-                    "method": "WS",
-                    "path": "/v1/responses",
-                    "profile_slug": profile.slug,
-                    "profile_alias": profile.alias,
-                    "requested_model": requested_model,
-                    "previous_response_id": previous_response_id,
-                    "response_id": response_id,
-                    "relation": relation,
-                    "backend_ms": backend_ms,
-                    "backend_timings": backend_response.get("timings"),
+                "trace_id": self._trace_seq,
+                "timestamp": time.time(),
+                "method": "WS",
+                "path": "/v1/responses",
+                "profile_slug": profile.slug,
+                "profile_alias": profile.alias,
+                "requested_model": requested_model,
+                "previous_response_id": previous_response_id,
+                "response_id": response_id,
+                "relation": relation,
+                "backend_ms": backend_ms,
+                "backend_timings": backend_response.get("timings"),
+                "restore_result": restore_result,
+                "lineage": {
+                    "mode": relation,
+                    "delta_input_items": len(delta_input),
+                    "full_input_items": len(full_input),
+                    "scaffold_matches": scaffold_matches,
+                    "delta_only_restore": delta_only_restore,
+                },
+                "slot": {
+                    "slot_id": self.slot_id,
+                    "prepare_mode": slot_prepare_mode,
+                    "prepare_ms": slot_prepare_ms,
+                    "starter_cache": starter_cache_result,
+                    "save_ms": slot_save_ms,
+                    "erase_result": erase_result,
                     "restore_result": restore_result,
-                    "lineage": {
-                        "mode": relation,
-                        "delta_input_items": len(delta_input),
-                        "full_input_items": len(full_input),
-                        "scaffold_matches": scaffold_matches,
-                        "delta_only_restore": delta_only_restore,
-                    },
-                    "slot": {
-                        "slot_id": self.slot_id,
-                        "prepare_mode": slot_prepare_mode,
-                        "prepare_ms": slot_prepare_ms,
-                        "save_ms": slot_save_ms,
-                        "erase_result": erase_result,
-                        "restore_result": restore_result,
-                        "restore_error": restore_error,
-                        "save_result": save_result,
-                        "save_error": save_error,
-                        "pre_prune_result": pre_prune_result,
-                        "post_prune_result": post_prune_result,
-                        "snapshot_filename": snapshot_filename,
-                        "snapshot_saved": snapshot_saved,
-                    },
-                    "backend": {
-                        "usage": usage_payload,
-                        "timings": backend_response.get("timings"),
-                        "latency_ms": backend_ms,
-                    },
-                    "output": {
-                        "item_types": dict(Counter(
-                            str(item.get("type") or "unknown")
-                            for item in output_items if isinstance(item, dict)
-                        )),
-                        "tool_calls": dict(Counter(
-                            str(item.get("name") or item.get("type") or "unknown")
-                            for item in output_items
-                            if isinstance(item, dict) and item.get("type") in {
-                                "function_call", "custom_tool_call", "local_shell_call",
-                                "web_search_call", "tool_search_call",
-                            }
-                        )),
-                        "web_search_iterations": web_search_iterations,
-                    },
-                }
+                    "restore_error": restore_error,
+                    "save_result": save_result,
+                    "save_error": save_error,
+                    "pre_prune_result": pre_prune_result,
+                    "post_prune_result": post_prune_result,
+                    "snapshot_filename": snapshot_filename,
+                    "snapshot_saved": snapshot_saved,
+                },
+                "backend": {
+                    "usage": usage_payload,
+                    "timings": backend_response.get("timings"),
+                    "latency_ms": backend_ms,
+                },
+                "output": {
+                    "item_types": dict(Counter(
+                        str(item.get("type") or "unknown")
+                        for item in output_items if isinstance(item, dict)
+                    )),
+                    "tool_calls": dict(Counter(
+                        str(item.get("name") or item.get("type") or "unknown")
+                        for item in output_items
+                        if isinstance(item, dict) and item.get("type") in {
+                            "function_call", "custom_tool_call", "local_shell_call",
+                            "web_search_call", "tool_search_call",
+                        }
+                    )),
+                    "web_search_iterations": web_search_iterations,
+                },
+            }
             self.telemetry.emit("router.response.completed", trace_entry)
             if self.debug:
                 try:
@@ -3561,6 +3825,11 @@ async def handle_health(request: web.Request) -> web.Response:
                 "max_count": state.slot_snapshot_max_count,
                 "max_bytes": state.slot_snapshot_max_bytes,
                 "clean_startup": state.slot_snapshot_clean_startup,
+            },
+            "starter_cache": {
+                "enabled": state.starter_cache_enabled,
+                "max_count": state.starter_cache_max_count,
+                "max_bytes": state.starter_cache_max_bytes,
             },
             "known_lineage": len(state.lineage),
             "live_slots": dict(state.live_slot_by_model),

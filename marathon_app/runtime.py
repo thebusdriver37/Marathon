@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -65,13 +66,47 @@ class BackendProcessSpec:
 def _slot_api_enabled(model: Model, backend: Backend) -> bool:
     """Return whether this model/backend pair supports llama.cpp slot actions."""
 
-    if not backend.supports_slots:
-        return False
-    # llama.cpp currently rejects save, restore, and erase when a multimodal
-    # projector is loaded, even if --slot-save-path was configured.
-    return not (
-        backend.kind == "llama_cpp" and model.multimodal_projector is not None
-    )
+    return backend.supports_slots
+
+
+def _cache_file_identity(path: Path | None) -> dict[str, object] | None:
+    """Return the stable local identity of a file that affects KV state."""
+
+    if path is None:
+        return None
+    resolved = path.expanduser().resolve()
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return {"path": str(resolved), "missing": True}
+    return {
+        "path": str(resolved),
+        "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _backend_cache_id(
+    model: Model,
+    specs: list[BackendProcessSpec],
+) -> str:
+    """Fingerprint everything that can make a llama.cpp slot incompatible."""
+
+    payload = {
+        "schema": 1,
+        "model": _cache_file_identity(model.path),
+        "projector": _cache_file_identity(model.multimodal_projector),
+        "processes": [
+            {
+                "command": list(spec.command),
+                "environment": sorted(spec.environment),
+                "binary": _cache_file_identity(Path(spec.command[0])),
+            }
+            for spec in specs
+        ],
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def ensure_dirs() -> None:
@@ -583,6 +618,7 @@ class Runtime:
         slot_api_enabled = _slot_api_enabled(self.model, self._backend)
         slot_path = SLOT_ROOT / self.model.alias
         backend_specs = self._backend_specs(self._backend, slot_path)
+        backend_cache_id = _backend_cache_id(self.model, backend_specs)
         backend_commands = [list(spec.command) for spec in backend_specs]
         primary_command = backend_commands[-1]
         self.record(
@@ -710,6 +746,7 @@ class Runtime:
                 "MARATHON_BACKEND_SLOT_API": (
                     "1" if slot_api_enabled else "0"
                 ),
+                "MARATHON_BACKEND_CACHE_ID": backend_cache_id,
                 "MARATHON_MODEL_SUPERVISED": "1",
                 "MARATHON_MODEL_PARALLEL_TOOL_CALLS": (
                     "1" if self.profile.parallel_tool_calls else "0"

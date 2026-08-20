@@ -21,7 +21,13 @@ No manual invalidation or cache clearing is required.
 
 The default host-memory cache is 8 GiB.
 Set `MARATHON_PROMPT_CACHE_RAM_MIB` or override `prompt_cache_ram_mib` in the personal catalog settings to change the limit.
-The cache exists only for the lifetime of the Marathon backend, and exiting Marathon still frees the GPUs and cache memory.
+Exiting Marathon frees the GPUs and memory cache.
+
+Marathon also saves the stable system-and-tools prefix under `~/AI/cache/marathon/slots/`.
+After a cold backend start, the first conversation restores an exact matching disk snapshot instead of processing that prefix again.
+The cache fingerprint includes the model, projector, backend binary and arguments, instructions, and tools, so incompatible changes build a new snapshot automatically.
+Marathon retains up to eight starter snapshots within a 16 GiB default limit.
+The optional `MARATHON_STARTER_CACHE_MAX_COUNT` and `MARATHON_STARTER_CACHE_MAX_BYTES` environment variables adjust those limits.
 
 ## Model and Backend Paths
 

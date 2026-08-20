@@ -631,7 +631,7 @@ class RuntimeTests(unittest.TestCase):
             ["--slot-save-path", "/tmp/slots"],
         )
 
-    def test_multimodal_llama_backend_disables_unsupported_slot_api(self) -> None:
+    def test_multimodal_llama_backend_enables_slot_api(self) -> None:
         model = replace(
             fixture_model("qwen3.8-27b"),
             multimodal_projector=Path("/tmp/mmproj-F16.gguf"),
@@ -642,8 +642,11 @@ class RuntimeTests(unittest.TestCase):
 
         specs = runtime._backend_specs(backend, Path("/tmp/slots"))
 
-        self.assertFalse(runtime_module._slot_api_enabled(model, backend))
-        self.assertNotIn("--slot-save-path", specs[0].command)
+        self.assertTrue(runtime_module._slot_api_enabled(model, backend))
+        self.assertEqual(
+            list(specs[0].command)[-2:],
+            ["--slot-save-path", "/tmp/slots"],
+        )
 
     def test_backend_can_explicitly_disable_slot_api_for_text_model(self) -> None:
         model = fixture_model("qwen3.8-27b")
