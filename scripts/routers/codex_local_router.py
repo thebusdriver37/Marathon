@@ -1907,6 +1907,8 @@ class RouterState:
                     "upgrade": None,
                     "base_instructions": instructions,
                     "model_messages": None,
+                    "include_skills_usage_instructions": True,
+                    "include_plugin_usage_instructions": True,
                     "supports_reasoning_summaries": False,
                     "default_reasoning_summary": "auto",
                     "support_verbosity": False,

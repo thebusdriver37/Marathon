@@ -338,6 +338,18 @@ context = 32768
 
         self.assertTrue(model["supports_parallel_tool_calls"])
 
+    def test_catalog_enables_codex_skill_and_plugin_guidance(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.available_profiles = {profile.slug: profile}
+        state._refresh_profiles = lambda: state.available_profiles
+
+        with mock.patch.object(router_module, "_base_instructions", return_value="prompt"):
+            model = state.model_catalog()["models"][0]
+
+        self.assertTrue(model["include_skills_usage_instructions"])
+        self.assertTrue(model["include_plugin_usage_instructions"])
+
     def test_catalog_advertises_profile_image_capability(self) -> None:
         profile = replace(
             fixture_profile(), input_modalities=("text", "image")
