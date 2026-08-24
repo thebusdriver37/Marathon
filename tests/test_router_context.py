@@ -35,6 +35,135 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_external_model_loads_from_the_existing_user_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = Path(directory) / "catalog.toml"
+            catalog_path.write_text(
+                """
+[[external_models]]
+id = "deepseek-spark"
+model = "spark/deepseek-v4-flash-0731-spark"
+display_name = "DeepSeek V4 Flash on Spark"
+description = "Remote coding model"
+base_url = "http://127.0.0.1:9292/v1"
+api_key_env = "SPARK_API_KEY"
+context = 262144
+auto_compact_token_limit = 229376
+truncation_limit = 221184
+temperature = 0.0
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                router_module.os.environ,
+                {
+                    "MARATHON_USER_CATALOG": str(catalog_path),
+                    "SPARK_API_KEY": "test-secret",
+                },
+                clear=True,
+            ):
+                profiles = router_module._external_model_profiles()
+                available = router_module._available_profiles()
+                headers = profiles["deepseek-spark"].upstream_headers()
+
+        profile = profiles["deepseek-spark"]
+        self.assertEqual(profile.alias, "spark/deepseek-v4-flash-0731-spark")
+        self.assertEqual(profile.target, "http://127.0.0.1:9292")
+        self.assertEqual(profile.context_window, 262_144)
+        self.assertEqual(profile.auto_compact_token_limit, 229_376)
+        self.assertEqual(profile.truncation_limit, 221_184)
+        self.assertEqual(profile.temperature, 0.0)
+        self.assertTrue(profile.external)
+        self.assertTrue(profile.supervised)
+        self.assertFalse(profile.supports_slots)
+        self.assertIn("deepseek-spark", available)
+        self.assertEqual(headers, {"Authorization": "Bearer test-secret"})
+
+    def test_external_model_reports_a_missing_api_key_when_selected(self) -> None:
+        profile = replace(
+            fixture_profile(),
+            external=True,
+            supervised=True,
+            supports_slots=False,
+            api_key_env="MISSING_EXTERNAL_KEY",
+        )
+        with mock.patch.dict(router_module.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "MISSING_EXTERNAL_KEY",
+            ):
+                profile.upstream_headers()
+
+    def test_external_model_can_read_one_named_key_from_an_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key_file = Path(directory) / ".env"
+            key_file.write_text(
+                "UNRELATED=ignore-me\nSPARK_API_KEY=file-secret\n",
+                encoding="utf-8",
+            )
+            profile = replace(
+                fixture_profile(),
+                external=True,
+                supervised=True,
+                supports_slots=False,
+                api_key_env="SPARK_API_KEY",
+                api_key_file=str(key_file),
+            )
+            with mock.patch.dict(router_module.os.environ, {}, clear=True):
+                headers = profile.upstream_headers()
+
+        self.assertEqual(headers, {"Authorization": "Bearer file-secret"})
+
+    def test_external_proxy_does_not_forward_client_credentials(self) -> None:
+        profile = replace(
+            fixture_profile(),
+            external=True,
+            api_key_env="EXTERNAL_API_KEY",
+        )
+        with mock.patch.dict(
+            router_module.os.environ,
+            {"EXTERNAL_API_KEY": "external-secret"},
+            clear=True,
+        ):
+            headers = router_module._proxy_request_headers(
+                profile,
+                {
+                    "Authorization": "Bearer client-secret",
+                    "Cookie": "session=client-secret",
+                    "Host": "127.0.0.1:8080",
+                    "X-Request-ID": "trace-1",
+                },
+            )
+
+        self.assertEqual(headers["Authorization"], "Bearer external-secret")
+        self.assertNotIn("Cookie", headers)
+        self.assertNotIn("Host", headers)
+        self.assertEqual(headers["X-Request-ID"], "trace-1")
+
+    def test_external_model_rejects_a_local_model_id_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = Path(directory) / "catalog.toml"
+            catalog_path.write_text(
+                """
+[[external_models]]
+id = "qwen3.6-27b-q4"
+model = "remote-model"
+display_name = "Collision"
+base_url = "http://127.0.0.1:9292/v1"
+context = 32768
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                router_module.os.environ,
+                {"MARATHON_USER_CATALOG": str(catalog_path)},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "conflicts with a local model"):
+                    router_module._profiles()
+
     def test_router_state_reports_empty_profile_catalog(self) -> None:
         with mock.patch.object(router_module, "_available_profiles", return_value={}):
             with self.assertRaisesRegex(
@@ -942,8 +1071,15 @@ class RouterContextTests(unittest.TestCase):
                 return False
 
         class Client:
-            def post(self, _url: str, *, json: dict[str, object]):
+            def post(
+                self,
+                _url: str,
+                *,
+                json: dict[str, object],
+                headers: dict[str, str] | None = None,
+            ):
                 self.request = json
+                self.headers = headers
                 return Response()
 
         state = object.__new__(router_module.RouterState)
@@ -964,6 +1100,7 @@ class RouterContextTests(unittest.TestCase):
         )
         self.assertEqual(response["id"], "resp_slow")
         self.assertEqual(response["usage"]["output_tokens"], 1)
+        self.assertEqual(state.http_client.headers, {})
 
     def test_output_budget_scales_and_is_profile_overrideable(self) -> None:
         self.assertEqual(router_module._max_output_tokens(fixture_profile(32_768)), 4_096)

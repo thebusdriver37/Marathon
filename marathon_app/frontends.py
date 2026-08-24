@@ -93,8 +93,6 @@ def codex_command(
         "-c", provider,
         "-c", 'model_provider="marathon-local"',
         "-m", runtime.model.alias,
-        "-c", f"model_context_window={runtime.context_window}",
-        "-c", f"model_auto_compact_token_limit={runtime.auto_compact_token_limit}",
         "-c", f"model_catalog_json={json.dumps(str(runtime.catalog_file))}",
         "-c", 'web_search="cached"',
     ]

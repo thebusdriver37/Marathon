@@ -983,7 +983,7 @@ class FrontendTests(unittest.TestCase):
 
         self.assertEqual(selected, str(binary))
 
-    def test_codex_uses_runtime_overrides_without_ignoring_user_config(self) -> None:
+    def test_codex_uses_per_model_catalog_without_ignoring_user_config(self) -> None:
         model = fixture_model()
         profile = catalog.find_profile(model, "balanced", "codex")
         runtime = Runtime(model, profile)
@@ -992,8 +992,8 @@ class FrontendTests(unittest.TestCase):
         joined = " ".join(command)
         self.assertIn("marathon-local", joined)
         self.assertIn("model_catalog_json", joined)
-        self.assertIn("model_context_window=262144", command)
-        self.assertIn("model_auto_compact_token_limit=229376", command)
+        self.assertNotIn("model_context_window=262144", command)
+        self.assertNotIn("model_auto_compact_token_limit=229376", command)
         self.assertNotIn("--ignore-user-config", command)
 
     def test_codex_child_uses_marathon_resume_command(self) -> None:

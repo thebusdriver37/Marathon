@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Local multi-model router for running Codex against llama.cpp backends.
+"""Multi-model router for running Codex against local and external backends.
 
 This exposes a Codex-compatible `/v1/models` catalog with multiple local model
-profiles and normalizes Codex Responses API requests before forwarding them to
-the selected local backend. Only one heavyweight backend is kept warm at a time;
-switching models starts the requested backend and stops the others.
+profiles plus optional external models and normalizes Codex Responses API
+requests before forwarding them to the selected backend. Only one managed local
+backend is kept warm at a time. External services are never started or stopped.
 
 It also implements a Responses websocket transport that preserves conversation
 lineage with llama.cpp slot save/restore. That gives Marathon a local analogue
@@ -30,6 +30,7 @@ from collections import Counter
 from collections import OrderedDict
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ from aiohttp import ClientTimeout
 from aiohttp import WSMsgType
 from aiohttp import web
 
+from marathon_app.catalog import external_models
 from marathon_app.telemetry import EventWriter
 
 from marathon_web_search import WebFetchExecutor
@@ -74,6 +76,15 @@ HOP_BY_HOP_HEADERS = {
     "trailer",
     "transfer-encoding",
     "upgrade",
+}
+
+EXTERNAL_SENSITIVE_HEADERS = {
+    "anthropic-api-key",
+    "api-key",
+    "authorization",
+    "cookie",
+    "x-api-key",
+    "x-goog-api-key",
 }
 
 DEFAULT_USAGE = {
@@ -195,6 +206,9 @@ class ModelProfile:
     default_reasoning_level: str | None = None
     supported_reasoning_levels: tuple[tuple[str, str], ...] = ()
     input_modalities: tuple[str, ...] = ("text",)
+    external: bool = False
+    api_key_env: str | None = None
+    api_key_file: str | None = None
 
     @property
     def port(self) -> int:
@@ -206,6 +220,40 @@ class ModelProfile:
             if path.exists():
                 return str(path.resolve())
         return None
+
+    def upstream_headers(self) -> dict[str, str]:
+        if not self.api_key_env and not self.api_key_file:
+            return {}
+        api_key = (
+            os.environ.get(self.api_key_env, "").strip()
+            if self.api_key_env
+            else ""
+        )
+        if not api_key and self.api_key_file:
+            try:
+                lines = Path(self.api_key_file).read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"external model {self.slug} cannot read API key file "
+                    f"{self.api_key_file}: {exc}"
+                ) from exc
+            for line in lines:
+                value = line.strip()
+                if not value or value.startswith("#"):
+                    continue
+                if self.api_key_env and "=" in value:
+                    name, value = value.removeprefix("export ").split("=", 1)
+                    if name.strip() != self.api_key_env:
+                        continue
+                api_key = value.strip().strip("'\"")
+                if api_key:
+                    break
+        if not api_key:
+            source = self.api_key_env or self.api_key_file
+            raise RuntimeError(
+                f"external model {self.slug} requires API key from {source}"
+            )
+        return {"Authorization": f"Bearer {api_key}"}
 
 
 @dataclass
@@ -794,6 +842,41 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
     )
 
 
+def _external_target(base_url: str) -> str:
+    """Convert an OpenAI API base URL into the server root used internally."""
+
+    normalized = base_url.rstrip("/")
+    return normalized[:-3] if normalized.endswith("/v1") else normalized
+
+
+def _external_model_profiles() -> dict[str, ModelProfile]:
+    profiles: dict[str, ModelProfile] = {}
+    for configured in external_models():
+        profiles[configured.id] = ModelProfile(
+            slug=configured.id,
+            alias=configured.model,
+            display_name=configured.display_name,
+            description=configured.description,
+            launcher="",
+            model_paths=(),
+            target=_external_target(configured.base_url),
+            context_window=configured.context,
+            auto_compact_token_limit=configured.auto_compact_token_limit,
+            truncation_limit=configured.truncation_limit,
+            supports_parallel_tool_calls=(
+                configured.supports_parallel_tool_calls
+            ),
+            supports_slots=False,
+            supervised=True,
+            temperature=configured.temperature,
+            input_modalities=configured.input_modalities,
+            external=True,
+            api_key_env=configured.api_key_env,
+            api_key_file=configured.api_key_file,
+        )
+    return profiles
+
+
 def _profiles() -> dict[str, ModelProfile]:
     root = _repo_root()
     profiles = {
@@ -912,13 +995,21 @@ def _profiles() -> dict[str, ModelProfile]:
     custom_profile = _custom_model_profile(root)
     if custom_profile is not None:
         profiles[custom_profile.slug] = custom_profile
+    for slug, profile in _external_model_profiles().items():
+        if slug in profiles:
+            raise ValueError(
+                f"external model {slug!r} conflicts with a local model id"
+            )
+        profiles[slug] = profile
     return profiles
 
 
 def _available_profiles() -> dict[str, ModelProfile]:
     available: dict[str, ModelProfile] = {}
     for slug, profile in _profiles().items():
-        if Path(profile.launcher).exists() and profile.resolved_model_path():
+        if profile.external or (
+            Path(profile.launcher).exists() and profile.resolved_model_path()
+        ):
             available[slug] = profile
     return available
 
@@ -1545,9 +1636,17 @@ def normalize_responses_request(
     return data
 
 
-def _json_model_matches(url: str, expected_model: str) -> bool:
+def _json_model_matches(
+    url: str,
+    expected_model: str,
+    headers: dict[str, str] | None = None,
+) -> bool:
     try:
-        with urllib.request.urlopen(f"{url.rstrip('/')}/v1/models", timeout=3) as resp:
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/v1/models",
+            headers=headers or {},
+        )
+        with urllib.request.urlopen(request, timeout=3) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return False
@@ -1562,6 +1661,22 @@ def _json_model_matches(url: str, expected_model: str) -> bool:
             if any(item.get(field) == expected_model for field in ("id", "slug", "model", "name")):
                 return True
     return False
+
+
+def _proxy_request_headers(
+    profile: ModelProfile,
+    request_headers: Mapping[str, str],
+) -> dict[str, str]:
+    blocked = HOP_BY_HOP_HEADERS | {"host"}
+    if profile.external:
+        blocked |= EXTERNAL_SENSITIVE_HEADERS
+    headers = {
+        key: value
+        for key, value in request_headers.items()
+        if key.lower() not in blocked
+    }
+    headers.update(profile.upstream_headers())
+    return headers
 
 
 class RouterState:
@@ -1938,8 +2053,13 @@ class RouterState:
         profile = self.resolve_model(requested_model)
         with self.lock:
             if self.current_model != profile.slug:
-                self._stop_other_backends(profile.slug)
+                self._stop_other_backends(profile)
             if not self._profile_ready(profile):
+                if profile.external:
+                    raise RuntimeError(
+                        f"external backend for {profile.slug} is unavailable at "
+                        f"{profile.target}"
+                    )
                 if profile.supervised:
                     raise RuntimeError(
                         f"Marathon's supervised backend for {profile.slug} is unavailable"
@@ -2016,11 +2136,17 @@ class RouterState:
         )
 
     def _profile_ready(self, profile: ModelProfile) -> bool:
-        return _json_model_matches(profile.target, profile.alias)
+        return _json_model_matches(
+            profile.target,
+            profile.alias,
+            headers=profile.upstream_headers(),
+        )
 
-    def _stop_other_backends(self, keep_slug: str) -> None:
+    def _stop_other_backends(self, keep_profile: ModelProfile) -> None:
+        if keep_profile.external:
+            return
         for slug, profile in self.available_profiles.items():
-            if slug == keep_slug:
+            if slug == keep_profile.slug:
                 continue
             self._stop_profile(profile)
 
@@ -2119,7 +2245,12 @@ class RouterState:
         last_connection_error: Exception | None = None
         for attempt in range(attempts):
             try:
-                async with self.http_client.request(method, url, json=payload) as response:
+                async with self.http_client.request(
+                    method,
+                    url,
+                    json=payload,
+                    headers=profile.upstream_headers(),
+                ) as response:
                     text = await response.text()
                     if response.status >= 400:
                         protocol_error = _backend_tool_protocol_error_reason(
@@ -2240,7 +2371,11 @@ class RouterState:
             await send_event(pending_message_done)
             pending_message_done = None
 
-        async with self.http_client.post(url, json=request) as response:
+        async with self.http_client.post(
+            url,
+            json=request,
+            headers=profile.upstream_headers(),
+        ) as response:
             if response.status >= 400:
                 text = await response.text()
                 protocol_error = _backend_tool_protocol_error_reason(
@@ -3963,11 +4098,7 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
     if state.http_client is None:
         return web.json_response({"error": {"message": "router HTTP client session is not open"}}, status=500)
 
-    headers = {
-        key: value
-        for key, value in request.headers.items()
-        if key.lower() not in HOP_BY_HOP_HEADERS
-    }
+    headers = _proxy_request_headers(profile, request.headers)
     if body:
         headers["Content-Type"] = headers.get("Content-Type", "application/json")
 

@@ -126,7 +126,7 @@ class RemoteRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["op"], "event")
         self.assertEqual(payload["event"], "frontend.started")
 
-    def test_local_codex_command_targets_tunnel_and_dynamic_context(self) -> None:
+    def test_local_codex_command_targets_tunnel_and_per_model_catalog(self) -> None:
         model = fixture_model()
         profile = catalog.find_profile(model, "balanced", "codex")
         with mock.patch("marathon_app.remote._available_port", return_value=31415):
@@ -138,8 +138,12 @@ class RemoteRuntimeTests(unittest.TestCase):
         joined = " ".join(command)
 
         self.assertIn('base_url = "http://127.0.0.1:31415/v1"', joined)
-        self.assertIn("model_context_window=131072", command)
-        self.assertIn("model_auto_compact_token_limit=114688", command)
+        self.assertIn(
+            f"model_catalog_json={json.dumps(str(runtime.catalog_file))}",
+            command,
+        )
+        self.assertNotIn("model_context_window=131072", command)
+        self.assertNotIn("model_auto_compact_token_limit=114688", command)
 
     def test_client_cleanup_requests_remote_stop(self) -> None:
         model = fixture_model()

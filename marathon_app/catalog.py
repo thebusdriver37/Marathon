@@ -8,6 +8,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .model_library import (
     configured_model_roots,
@@ -21,16 +22,22 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 CATALOG_PATH = Path(
     os.environ.get("MARATHON_CATALOG", ROOT_DIR / "config" / "runtime_catalog.toml")
 ).expanduser()
-USER_CATALOG_PATH = Path(
-    os.environ.get(
-        "MARATHON_USER_CATALOG",
-        os.path.join(
-            os.environ.get("XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config")),
-            "marathon",
-            "catalog.toml",
-        ),
-    )
-).expanduser()
+def user_catalog_path() -> Path:
+    """Return the active machine-local catalog path.
+
+    Resolve this at call time so tests and launchers can set
+    ``MARATHON_USER_CATALOG`` after importing Marathon.
+    """
+
+    configured = os.environ.get("MARATHON_USER_CATALOG")
+    if configured:
+        return Path(configured).expanduser()
+    return Path(
+        os.environ.get(
+            "XDG_CONFIG_HOME",
+            os.path.join(os.path.expanduser("~"), ".config"),
+        )
+    ).expanduser() / "marathon" / "catalog.toml"
 
 
 @dataclass(frozen=True)
@@ -123,6 +130,25 @@ class Model:
         return self.id
 
 
+@dataclass(frozen=True)
+class ExternalModel:
+    """An optional OpenAI-compatible model configured outside the repository."""
+
+    id: str
+    model: str
+    display_name: str
+    description: str
+    base_url: str
+    context: int
+    auto_compact_token_limit: int
+    truncation_limit: int
+    api_key_env: str | None = None
+    api_key_file: str | None = None
+    supports_parallel_tool_calls: bool = False
+    temperature: float | None = None
+    input_modalities: tuple[str, ...] = ("text",)
+
+
 def _merge_catalog(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge a user catalog over the base, keeping settings, backends, and
     families keyed by id while appending user-defined profiles to families."""
@@ -159,10 +185,139 @@ def load_catalog(path: Path | None = None) -> dict[str, Any]:
     base = CATALOG_PATH if path is None else path
     with base.open("rb") as handle:
         merged = tomllib.load(handle)
-    if path is None and USER_CATALOG_PATH.exists():
-        with USER_CATALOG_PATH.open("rb") as handle:
+    local_catalog = user_catalog_path()
+    if path is None and local_catalog.exists():
+        with local_catalog.open("rb") as handle:
             merged = _merge_catalog(merged, tomllib.load(handle))
     return merged
+
+
+def _external_context_defaults(context: int) -> tuple[int, int]:
+    reserve = min(context // 2, max(12_288, min(32_768, context // 8)))
+    auto_compact = max(1, context - reserve)
+    guard = max(2_048, min(8_192, context // 20))
+    return auto_compact, max(1, auto_compact - guard)
+
+
+def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalModel, ...]:
+    """Load optional OpenAI-compatible models from the merged user catalog."""
+
+    loaded = load_catalog() if catalog is None else catalog
+    raw_models = loaded.get("external_models", [])
+    if not isinstance(raw_models, list) or any(
+        not isinstance(item, dict) for item in raw_models
+    ):
+        raise ValueError("external_models must be a list of tables")
+
+    result: list[ExternalModel] = []
+    seen: set[str] = set()
+    for raw in raw_models:
+        if raw.get("enabled", True) is False:
+            continue
+        model_id = str(raw.get("id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", model_id):
+            raise ValueError(
+                "external model id may only contain letters, numbers, '.', '_', and '-'"
+            )
+        if model_id in seen:
+            raise ValueError(f"duplicate external model id: {model_id}")
+        seen.add(model_id)
+
+        upstream_model = str(raw.get("model") or "").strip()
+        if not upstream_model:
+            raise ValueError(f"external model {model_id} requires model")
+        base_url = str(raw.get("base_url") or "").strip().rstrip("/")
+        parsed_url = urlparse(base_url)
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.netloc
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise ValueError(
+                f"external model {model_id} requires an http(s) base_url "
+                "without embedded credentials, query, or fragment"
+            )
+
+        try:
+            context = int(raw["context"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"external model {model_id} requires a positive integer context"
+            ) from exc
+        if context <= 0:
+            raise ValueError(
+                f"external model {model_id} requires a positive integer context"
+            )
+        default_auto_compact, default_truncation = _external_context_defaults(context)
+        auto_compact = int(
+            raw.get("auto_compact_token_limit", default_auto_compact)
+        )
+        truncation = int(raw.get("truncation_limit", default_truncation))
+        if not 0 < truncation <= auto_compact <= context:
+            raise ValueError(
+                f"external model {model_id} requires 0 < truncation_limit "
+                "<= auto_compact_token_limit <= context"
+            )
+
+        api_key_env_raw = raw.get("api_key_env")
+        api_key_env = (
+            str(api_key_env_raw).strip() if api_key_env_raw is not None else None
+        )
+        if api_key_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env):
+            raise ValueError(
+                f"external model {model_id} has an invalid api_key_env name"
+            )
+        api_key_file_raw = raw.get("api_key_file")
+        api_key_file = (
+            str(Path(str(api_key_file_raw)).expanduser())
+            if api_key_file_raw is not None
+            else None
+        )
+
+        raw_modalities = raw.get("input_modalities", ["text"])
+        if not isinstance(raw_modalities, list):
+            raise ValueError(
+                f"external model {model_id} input_modalities must be a list"
+            )
+        modalities = tuple(
+            dict.fromkeys(str(value).strip().lower() for value in raw_modalities)
+        )
+        if not modalities or any(value not in {"text", "image"} for value in modalities):
+            raise ValueError(
+                f"external model {model_id} input_modalities may contain only text and image"
+            )
+
+        temperature_raw = raw.get("temperature")
+        result.append(
+            ExternalModel(
+                id=model_id,
+                model=upstream_model,
+                display_name=str(raw.get("display_name") or model_id).strip(),
+                description=str(
+                    raw.get("description")
+                    or "OpenAI-compatible external model"
+                ).strip(),
+                base_url=base_url,
+                context=context,
+                auto_compact_token_limit=auto_compact,
+                truncation_limit=truncation,
+                api_key_env=api_key_env or None,
+                api_key_file=api_key_file,
+                supports_parallel_tool_calls=bool(
+                    raw.get("supports_parallel_tool_calls", False)
+                ),
+                temperature=(
+                    float(temperature_raw)
+                    if temperature_raw is not None
+                    else None
+                ),
+                input_modalities=modalities,
+            )
+        )
+    return tuple(result)
 
 
 def _resolve_ai_path(value: str | os.PathLike[str], ai_root: Path) -> Path:

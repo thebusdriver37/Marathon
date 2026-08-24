@@ -187,6 +187,7 @@ Set `MARATHON_AI_ROOT` to move the complete models, backends, and cache hierarch
 
 Personal runtime profiles and catalog edits belong in `~/.config/marathon/catalog.toml`.
 That file is merged over the repository's `config/runtime_catalog.toml`, so machine-specific families, backends, and profiles never need to be committed.
+Optional OpenAI-compatible external models can also be declared there and will appear in Codex's `/model` menu without changing the repository.
 Set `MARATHON_USER_CATALOG` to point the override elsewhere.
 
 ## Runtime Safety

@@ -135,8 +135,9 @@ Set `MARATHON_CODEX_HOME` to relocate the isolated home or `MARATHON_STOCK_CODEX
 `MARATHON_USE_USER_CONFIG=1` is an explicit compatibility escape hatch that disables this isolation.
 `MARATHON_CODEX_BIN` selects both the patched Codex install destination and the executable Marathon launches.
 
-Marathon supplies invocation-specific settings for the local provider, selected model, loaded context, model catalog, and status line.
-After backend startup, Marathon reads the context that was actually loaded and propagates that value to Codex, compaction, and truncation limits.
+Marathon supplies invocation-specific settings for the local provider, selected model, model catalog, and status line.
+After backend startup, Marathon reads the context that was actually loaded and records that value with the active model's compaction and truncation limits in the generated catalog.
+This keeps context limits correct when `/model` switches between deployments with different windows.
 
 The patched status line includes:
 
@@ -149,6 +150,39 @@ Tool execution time is excluded from completed-turn generation throughput.
 
 Use Codex's `/model` menu to change the active reasoning effort without reloading the GGUF or discarding the conversation.
 Supported values are defined per model family in the runtime catalog.
+
+## External OpenAI-Compatible Models
+
+Marathon can include optional Responses API models in the same Codex `/model` menu as the active local model.
+External models are configured only in the machine-local catalog, so endpoint addresses and deployment-specific model names do not enter the public repository.
+Marathon never starts, stops, or unloads these services, and switching to one leaves the supervised local backend warm.
+
+Add an entry to `~/.config/marathon/catalog.toml`:
+
+```toml
+[[external_models]]
+id = "remote-coder"
+model = "provider-model-id"
+display_name = "Remote Coder"
+description = "Private OpenAI-compatible coding model"
+base_url = "https://inference.example.net/v1"
+api_key_env = "MARATHON_REMOTE_API_KEY"
+context = 131072
+temperature = 0.0
+```
+
+Export the referenced credential before starting Marathon:
+
+```bash
+export MARATHON_REMOTE_API_KEY="your-private-key"
+marathon
+```
+
+Do not place the key itself in the catalog.
+To avoid exporting the key globally, set `api_key_file` to a private file containing either the bare key or the named `api_key_env=value` entry.
+The endpoint must expose `/v1/models` and the Responses API, including function tool calls for agentic coding.
+The optional `auto_compact_token_limit`, `truncation_limit`, `supports_parallel_tool_calls`, and `input_modalities` fields override Marathon's conservative defaults when the deployment has been validated for them.
+Set `enabled = false` to retain an entry without showing it in the model menu.
 
 Marathon sessions remain in Marathon's isolated Codex session store and are tagged with the `marathon-local` provider.
 The resume picker also filters on that provider, and Marathon-branded sessions print `marathon resume <id>` when they exit.
