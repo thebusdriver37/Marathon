@@ -16,6 +16,7 @@ router unchanged:
   MARATHON_WEB_SEARCH_TIMEOUT   per-search timeout in seconds (default: 15)
   MARATHON_WEB_SEARCH_MAX_RESULTS  results to forward to the model (default: 8)
   MARATHON_WEB_SEARCH_MAX_ITERS    cap on tool-call iterations (default: 5)
+  MARATHON_WEB_SEARCH_RETRIES      transient request retries (default: 1)
   MARATHON_WEB_FETCH_ALLOW_PRIVATE
                                 set to "1" to allow fetches to private/local IPs
 
@@ -41,6 +42,7 @@ from urllib.parse import urlencode
 from urllib.parse import urljoin
 from urllib.parse import urlsplit
 
+from aiohttp import ClientError
 from aiohttp import ClientSession
 from aiohttp import ClientTimeout
 
@@ -152,6 +154,7 @@ class WebSearchSettings:
     timeout_s: float
     max_results: int
     max_iterations: int
+    retries: int = 1
 
     @classmethod
     def from_env(cls) -> "WebSearchSettings":
@@ -160,6 +163,7 @@ class WebSearchSettings:
             timeout_s=_env_float("MARATHON_WEB_SEARCH_TIMEOUT", 15.0),
             max_results=_env_int("MARATHON_WEB_SEARCH_MAX_RESULTS", 8),
             max_iterations=_env_int("MARATHON_WEB_SEARCH_MAX_ITERS", 5),
+            retries=max(0, min(_env_int("MARATHON_WEB_SEARCH_RETRIES", 1), 3)),
         )
 
 
@@ -300,13 +304,15 @@ class SearchResult:
     url: str
     snippet: str
     engine: str | None
+    published_date: str | None = None
 
     def to_text_block(self, index: int) -> str:
-        engine_suffix = f" [{self.engine}]" if self.engine else ""
+        metadata = [value for value in (self.engine, self.published_date) if value]
+        metadata_suffix = f" [{'; '.join(metadata)}]" if metadata else ""
         snippet = self.snippet.strip()
         if not snippet:
             snippet = "(no snippet provided)"
-        return f"{index}. {self.title}{engine_suffix}\n   {self.url}\n   {snippet}"
+        return f"{index}. {self.title}{metadata_suffix}\n   {self.url}\n   {snippet}"
 
 
 def format_results_for_model(query: str, results: list[SearchResult]) -> str:
@@ -329,7 +335,15 @@ class WebSearchExecutor:
         if self._client is not None:
             return self._client
         if self._owned_client is None:
-            self._owned_client = ClientSession(timeout=ClientTimeout(total=self.settings.timeout_s))
+            headers: dict[str, str] = {}
+            if _is_loopback_url(self.settings.base_url):
+                # SearXNG trusts its loopback proxy hop and otherwise logs each
+                # Docker-host request as a missing client-IP error.
+                headers["X-Forwarded-For"] = "127.0.0.1"
+            self._owned_client = ClientSession(
+                timeout=ClientTimeout(total=self.settings.timeout_s),
+                headers=headers,
+            )
             self._client = self._owned_client
         return self._client  # type: ignore[return-value]
 
@@ -346,40 +360,125 @@ class WebSearchExecutor:
         params = {"q": query.strip(), "format": "json", "safesearch": "0"}
         url = f"{self.settings.base_url}/search?{urlencode(params)}"
         timeout = ClientTimeout(total=self.settings.timeout_s)
-        async with client.get(url, timeout=timeout) as response:
-            if response.status >= 400:
-                text = await response.text()
-                raise RuntimeError(
-                    f"SearXNG returned HTTP {response.status}: {text[:200]}"
+        retries = max(0, min(self.settings.retries, 3))
+        payload: Any = None
+        for attempt in range(retries + 1):
+            try:
+                async with client.get(url, timeout=timeout) as response:
+                    if response.status >= 500:
+                        text = await response.text()
+                        raise _RetryableSearchError(
+                            f"SearXNG returned HTTP {response.status}: {text[:200]}"
+                        )
+                    if response.status >= 400:
+                        text = await response.text()
+                        raise RuntimeError(
+                            f"SearXNG returned HTTP {response.status}: {text[:200]}"
+                        )
+                    payload = await response.json(content_type=None)
+                break
+            except (
+                ClientError,
+                asyncio.TimeoutError,
+                json.JSONDecodeError,
+                _RetryableSearchError,
+            ) as exc:
+                if attempt >= retries:
+                    raise RuntimeError(
+                        f"SearXNG request failed after {attempt + 1} attempt(s): {exc}"
+                    ) from exc
+                LOG.warning(
+                    "SearXNG search attempt %d failed; retrying: %s",
+                    attempt + 1,
+                    exc,
                 )
-            payload = await response.json(content_type=None)
+                await asyncio.sleep(min(0.25 * (2**attempt), 1.0))
 
         raw_results = payload.get("results") if isinstance(payload, dict) else None
         if not isinstance(raw_results, list):
-            return []
+            raise RuntimeError("SearXNG returned JSON without a results list")
 
         cap = max_results if max_results is not None else self.settings.max_results
         cap = max(1, min(cap, 20))
 
         formatted: list[SearchResult] = []
-        for entry in raw_results[:cap]:
+        seen_urls: set[str] = set()
+        for entry in raw_results:
             if not isinstance(entry, dict):
                 continue
             title = str(entry.get("title") or "").strip()
             url_str = str(entry.get("url") or "").strip()
-            snippet = str(entry.get("content") or "").strip()
-            engine = entry.get("engine")
-            if not title and not url_str:
+            if urlsplit(url_str).scheme not in {"http", "https"}:
                 continue
+            if url_str in seen_urls:
+                continue
+            snippet = str(entry.get("content") or "").strip()
+            raw_engines = entry.get("engines")
+            if isinstance(raw_engines, list):
+                engines = [str(engine) for engine in raw_engines if engine]
+                engine_name = ", ".join(dict.fromkeys(engines)) or None
+            else:
+                engine = entry.get("engine")
+                engine_name = str(engine) if isinstance(engine, str) else None
+            published_date = str(entry.get("publishedDate") or "").strip() or None
+            seen_urls.add(url_str)
             formatted.append(
                 SearchResult(
                     title=title or url_str,
                     url=url_str,
                     snippet=snippet,
-                    engine=str(engine) if isinstance(engine, str) else None,
+                    engine=engine_name,
+                    published_date=published_date,
                 )
             )
+            if len(formatted) >= cap:
+                break
+
+        engine_failures = _engine_failure_summaries(payload)
+        if not formatted and engine_failures:
+            raise RuntimeError(
+                "SearXNG returned no usable results; upstream engines failed: "
+                + "; ".join(engine_failures)
+            )
+        if engine_failures:
+            LOG.warning(
+                "SearXNG returned partial results; upstream engines failed: %s",
+                "; ".join(engine_failures),
+            )
         return formatted
+
+
+class _RetryableSearchError(RuntimeError):
+    pass
+
+
+def _engine_failure_summaries(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    raw_failures = payload.get("unresponsive_engines")
+    if not isinstance(raw_failures, list):
+        return []
+    failures: list[str] = []
+    for raw_failure in raw_failures:
+        if not isinstance(raw_failure, (list, tuple)) or not raw_failure:
+            continue
+        name = str(raw_failure[0]).strip()
+        reason = str(raw_failure[1]).strip() if len(raw_failure) > 1 else "failed"
+        if name:
+            failures.append(f"{name}: {reason}")
+    return failures
+
+
+def _is_loopback_url(url: str) -> bool:
+    hostname = urlsplit(url).hostname
+    if not hostname:
+        return False
+    if hostname.rstrip(".").lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def make_function_call_output(call_id: str, text: str) -> dict[str, Any]:

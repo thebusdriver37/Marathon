@@ -34,7 +34,7 @@ Commands:
   fork [ID]       Fork a Marathon session or open its session picker
   exec            Run headless Codex exec against the default local model
   install         Install the marathon command into ~/.local/bin
-  search <sub>    Manage the SearXNG container (up | down | status | logs | url | restart | pull)
+  search <sub>    Manage SearXNG (up | down | status | check | logs | url | restart | pull)
   setup-deps      Create .marathon/venv and install router Python dependencies
   build           Build patched Marathon binaries
   build-codex     Build the patched local Codex binary

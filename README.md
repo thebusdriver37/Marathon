@@ -155,11 +155,13 @@ Marathon can provide local web search and page fetching through SearXNG:
 
 ```bash
 marathon search up
+marathon search check
 marathon
 ```
 
 This optional feature requires Docker with the `docker compose` plugin.
 The service binds to loopback by default.
+Startup waits for a functional upstream search instead of treating the container health endpoint as proof that search works.
 
 ## Troubleshooting
 

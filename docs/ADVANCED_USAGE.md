@@ -260,13 +260,17 @@ Marathon then exposes search, page fetch, and optional browser-rendering tools t
 ```bash
 marathon search up
 marathon search status
+marathon search check
 marathon search logs
 marathon search down
 ```
 
 The first start generates a local secret in `docker/searxng/.env`.
+`search up`, `search restart`, and `search status` include a real search probe so upstream engine failures are visible immediately.
+The bundled configuration keeps only Google CSE, Bing, and Wikipedia, with Google CSE weighted first for technical and documentation queries.
 Set `MARATHON_SEARXNG_URL` when the service runs somewhere else.
 Set `MARATHON_WEB_SEARCH_MODE=disabled`, `cached`, or `live` to control Codex's web-search mode.
+Set `MARATHON_WEB_SEARCH_RETRIES` from `0` through `3` to control retries for transient SearXNG transport and server failures.
 Set `MARATHON_WEB_BROWSE_ENABLE=0` to hide the optional browser-rendering path.
 
 Fetch blocks loopback and private-network targets unless `MARATHON_WEB_FETCH_ALLOW_PRIVATE=1` is explicitly set.

@@ -6,6 +6,10 @@ ROUTER_HOST="${MARATHON_PROXY_HOST:-127.0.0.1}"
 ROUTER_PORT="${MARATHON_PROXY_PORT:-18111}"
 LLAMA_PORT="${MARATHON_LLAMA_PORT:-8082}"
 SEARXNG_URL="${MARATHON_SEARXNG_URL:-http://127.0.0.1:18093}"
+SEARXNG_CURL=(curl -fsS)
+if [[ "$SEARXNG_URL" =~ ^https?://(127\.0\.0\.1|localhost|\[::1\])([:/]|$) ]]; then
+  SEARXNG_CURL+=(-H 'X-Forwarded-For: 127.0.0.1')
+fi
 AI_ROOT="${MARATHON_AI_ROOT:-$HOME/AI}"
 MODELS_DIR="${MARATHON_MODELS_DIR:-$AI_ROOT/models/gguf}"
 LLAMACPP_BIN="${LLAMACPP_BIN:-$AI_ROOT/backends/llama.cpp-current/build/bin/llama-server}"
@@ -267,8 +271,41 @@ else
   fi
 fi
 
-if curl -fsS --max-time 2 "$SEARXNG_URL/healthz" >/dev/null 2>&1; then
+if "${SEARXNG_CURL[@]}" --max-time 2 "$SEARXNG_URL/healthz" >/dev/null 2>&1; then
   pass "SearXNG reachable: $SEARXNG_URL"
+  search_json="$("${SEARXNG_CURL[@]}" -G --max-time 20 \
+    --data-urlencode 'q=SearXNG documentation official' \
+    --data-urlencode 'format=json' \
+    "$SEARXNG_URL/search" 2>/dev/null || true)"
+  search_probe="$(SEARCH_JSON="$search_json" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+
+try:
+    payload = json.loads(os.environ["SEARCH_JSON"])
+except Exception:
+    print("0|invalid JSON response")
+    raise SystemExit(0)
+
+results = payload.get("results") if isinstance(payload, dict) else None
+count = len(results) if isinstance(results, list) else 0
+failures = []
+raw_failures = payload.get("unresponsive_engines") if isinstance(payload, dict) else None
+if isinstance(raw_failures, list):
+    for failure in raw_failures:
+        if isinstance(failure, list) and failure:
+            name = str(failure[0])
+            reason = str(failure[1]) if len(failure) > 1 else "failed"
+            failures.append(f"{name}: {reason}")
+print(f"{count}|{'; '.join(failures)}")
+PY
+)"
+  IFS='|' read -r search_result_count search_failures <<<"$search_probe"
+  if [[ "${search_result_count:-0}" =~ ^[0-9]+$ ]] && (( search_result_count > 0 )); then
+    pass "SearXNG functional search returned $search_result_count results"
+  else
+    warn "SearXNG is reachable but search returned no results${search_failures:+ ($search_failures)}"
+  fi
 else
   warn "SearXNG not reachable; run: marathon search up or set MARATHON_WEB_SEARCH_MODE=disabled"
 fi

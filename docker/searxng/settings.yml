@@ -6,7 +6,14 @@
 #
 # To customise per-host, edit this file or add your own docker compose override.
 
-use_default_settings: true
+use_default_settings:
+  engines:
+    # SearXNG otherwise merges every upstream default into this file.
+    # Keep the small set that is useful and currently reliable for local agents.
+    keep_only:
+      - bing
+      - google cse
+      - wikipedia
 
 general:
   debug: false
@@ -57,19 +64,15 @@ outgoing:
   enable_http2: true
   retries: 1
 
-# Engines: keep general-purpose web engines only by default.
+# Google CSE currently provides the best technical/documentation results without
+# requiring a user API key. Bing provides an independent fallback, and Wikipedia
+# improves entity searches. Avoid the CAPTCHA-prone HTML scrapers that make local
+# agent searches intermittently fail.
 engines:
-  - name: duckduckgo
+  - name: google cse
     disabled: false
-  - name: google
-    disabled: false
+    weight: 2.0
   - name: bing
     disabled: false
-  - name: brave
-    disabled: false
-  - name: qwant
-    disabled: false
   - name: wikipedia
-    disabled: false
-  - name: startpage
     disabled: false

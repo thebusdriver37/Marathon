@@ -4,10 +4,14 @@
 # file exists primarily to keep the bind mount well-defined. If you re-enable
 # the limiter in settings.yml, the values below are sane defaults.
 
-[botdetection.ip_limit]
-link_token = false
-
-[real_ip]
-x_for = 1
+[botdetection]
 ipv4_prefix = 32
-ipv6_prefix = 56
+ipv6_prefix = 48
+trusted_proxies = [
+  "127.0.0.0/8",
+  "::1",
+]
+
+[botdetection.ip_limit]
+filter_link_local = false
+link_token = false

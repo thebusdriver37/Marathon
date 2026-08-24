@@ -141,11 +141,16 @@ ensure_codex_home_config
 
 WEB_SEARCH_MODE="${MARATHON_WEB_SEARCH_MODE:-cached}"
 SEARXNG_URL="${MARATHON_SEARXNG_URL:-http://127.0.0.1:18093}"
+SEARXNG_CURL=(curl -fsS)
+if [[ "$SEARXNG_URL" =~ ^https?://(127\.0\.0\.1|localhost|\[::1\])([:/]|$) ]]; then
+  SEARXNG_CURL+=(-H 'X-Forwarded-For: 127.0.0.1')
+fi
 
 if [[ "$WEB_SEARCH_MODE" != "disabled" ]]; then
-  if ! curl -fsS --max-time 2 "$SEARXNG_URL/healthz" >/dev/null 2>&1; then
-    echo "warning: SearXNG at $SEARXNG_URL is not reachable; web search will fail until you run 'marathon search up'" >&2
-    echo "         set MARATHON_WEB_SEARCH_MODE=disabled to silence this warning" >&2
+  if ! "${SEARXNG_CURL[@]}" --max-time 2 "$SEARXNG_URL/healthz" >/dev/null 2>&1; then
+    echo "warning: SearXNG at $SEARXNG_URL is not reachable; web search is disabled for this session" >&2
+    echo "         run 'marathon search up' before starting Marathon to enable it" >&2
+    WEB_SEARCH_MODE="disabled"
   fi
 fi
 

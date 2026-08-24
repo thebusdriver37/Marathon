@@ -2989,9 +2989,9 @@ class RouterState:
             return make_function_call_output(
                 call_id,
                 f"Web search failed: {exc}\nThe SearXNG instance at "
-                f"{self.web_search_settings.base_url} did not respond. Tell the user "
-                "the search backend is unreachable and answer from your own knowledge "
-                "if possible.",
+                f"{self.web_search_settings.base_url} could not complete this query. "
+                "Tell the user the exact search error and answer from your own "
+                "knowledge if possible.",
             )
 
         return make_function_call_output(call_id, format_results_for_model(query, results))
