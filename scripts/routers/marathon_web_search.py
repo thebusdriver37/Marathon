@@ -38,6 +38,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qsl
 from urllib.parse import urlencode
 from urllib.parse import urljoin
 from urllib.parse import urlsplit
@@ -59,6 +60,7 @@ LOG = logging.getLogger("marathon.web_search")
 WEB_SEARCH_TOOL_NAME = "web_search"
 WEB_FETCH_TOOL_NAME = "web_fetch"
 WEB_BROWSE_TOOL_NAME = "web_browse"
+WEB_SEARCH_TIME_RANGES = ("day", "week", "month", "year")
 
 WEB_SEARCH_TOOL_DESCRIPTION = (
     "Search the public web via SearXNG and return ranked results with title, "
@@ -99,6 +101,14 @@ WEB_SEARCH_TOOL_PARAMETERS: dict[str, Any] = {
             "minimum": 1,
             "maximum": 20,
             "description": "Maximum number of results to return (default: 8).",
+        },
+        "time_range": {
+            "type": "string",
+            "enum": list(WEB_SEARCH_TIME_RANGES),
+            "description": (
+                "Optional freshness filter: day, week, month, or year. "
+                "Omit it when results from any date are acceptable."
+            ),
         },
     },
     "required": ["query"],
@@ -315,11 +325,29 @@ class SearchResult:
         return f"{index}. {self.title}{metadata_suffix}\n   {self.url}\n   {snippet}"
 
 
-def format_results_for_model(query: str, results: list[SearchResult]) -> str:
+@dataclass(frozen=True)
+class SearchOutcome:
+    results: list[SearchResult]
+    warnings: tuple[str, ...] = ()
+
+
+def format_results_for_model(
+    query: str,
+    results: list[SearchResult],
+    *,
+    warnings: tuple[str, ...] = (),
+    time_range: str | None = None,
+) -> str:
+    warning_text = "\n".join(f"WARNING: {warning}" for warning in warnings)
     if not results:
-        return f"No results found for query: {query!r}."
+        range_suffix = f" within time range {time_range!r}" if time_range else ""
+        message = f"No results found for query: {query!r}{range_suffix}."
+        return f"{warning_text}\n{message}" if warning_text else message
     blocks = [r.to_text_block(idx + 1) for idx, r in enumerate(results)]
-    header = f"SearXNG results for query: {query!r}\n"
+    range_suffix = f" (time range: {time_range})" if time_range else ""
+    header = f"SearXNG results for query: {query!r}{range_suffix}\n"
+    if warning_text:
+        header += f"{warning_text}\n"
     return header + "\n".join(blocks)
 
 
@@ -353,11 +381,32 @@ class WebSearchExecutor:
             self._owned_client = None
             self._client = None
 
-    async def search(self, query: str, max_results: int | None = None) -> list[SearchResult]:
+    async def search(
+        self,
+        query: str,
+        max_results: int | None = None,
+        time_range: str | None = None,
+    ) -> list[SearchResult]:
+        outcome = await self.search_with_diagnostics(
+            query,
+            max_results=max_results,
+            time_range=time_range,
+        )
+        return outcome.results
+
+    async def search_with_diagnostics(
+        self,
+        query: str,
+        max_results: int | None = None,
+        time_range: str | None = None,
+    ) -> SearchOutcome:
         if not query or not query.strip():
-            return []
+            return SearchOutcome(results=[])
+        normalized_time_range = normalize_time_range(time_range)
         client = await self._ensure_client()
         params = {"q": query.strip(), "format": "json", "safesearch": "0"}
+        if normalized_time_range is not None:
+            params["time_range"] = normalized_time_range
         url = f"{self.settings.base_url}/search?{urlencode(params)}"
         timeout = ClientTimeout(total=self.settings.timeout_s)
         retries = max(0, min(self.settings.retries, 3))
@@ -402,26 +451,26 @@ class WebSearchExecutor:
         cap = max(1, min(cap, 20))
 
         formatted: list[SearchResult] = []
-        seen_urls: set[str] = set()
+        seen_url_keys: set[str] = set()
+        contributing_engines: set[str] = set()
         for entry in raw_results:
             if not isinstance(entry, dict):
                 continue
             title = str(entry.get("title") or "").strip()
             url_str = str(entry.get("url") or "").strip()
-            if urlsplit(url_str).scheme not in {"http", "https"}:
+            dedupe_key = _url_dedupe_key(url_str)
+            if dedupe_key is None:
                 continue
-            if url_str in seen_urls:
+            engine_names = _engine_names(entry)
+            contributing_engines.update(name.casefold() for name in engine_names)
+            if len(formatted) >= cap:
+                continue
+            if dedupe_key in seen_url_keys:
                 continue
             snippet = str(entry.get("content") or "").strip()
-            raw_engines = entry.get("engines")
-            if isinstance(raw_engines, list):
-                engines = [str(engine) for engine in raw_engines if engine]
-                engine_name = ", ".join(dict.fromkeys(engines)) or None
-            else:
-                engine = entry.get("engine")
-                engine_name = str(engine) if isinstance(engine, str) else None
+            engine_name = ", ".join(engine_names) or None
             published_date = str(entry.get("publishedDate") or "").strip() or None
-            seen_urls.add(url_str)
+            seen_url_keys.add(dedupe_key)
             formatted.append(
                 SearchResult(
                     title=title or url_str,
@@ -431,9 +480,6 @@ class WebSearchExecutor:
                     published_date=published_date,
                 )
             )
-            if len(formatted) >= cap:
-                break
-
         engine_failures = _engine_failure_summaries(payload)
         if not formatted and engine_failures:
             raise RuntimeError(
@@ -445,7 +491,8 @@ class WebSearchExecutor:
                 "SearXNG returned partial results; upstream engines failed: %s",
                 "; ".join(engine_failures),
             )
-        return formatted
+        warnings = _provider_warnings(contributing_engines, engine_failures)
+        return SearchOutcome(results=formatted, warnings=warnings)
 
 
 class _RetryableSearchError(RuntimeError):
@@ -467,6 +514,117 @@ def _engine_failure_summaries(payload: Any) -> list[str]:
         if name:
             failures.append(f"{name}: {reason}")
     return failures
+
+
+def normalize_time_range(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("time_range must be one of: day, week, month, year")
+    normalized = value.strip().casefold()
+    if normalized not in WEB_SEARCH_TIME_RANGES:
+        raise ValueError("time_range must be one of: day, week, month, year")
+    return normalized
+
+
+def _engine_names(entry: dict[str, Any]) -> list[str]:
+    raw_engines = entry.get("engines")
+    if isinstance(raw_engines, list):
+        names: list[str] = []
+        for raw_engine in raw_engines:
+            name = str(raw_engine).strip() if raw_engine is not None else ""
+            if name and name not in names:
+                names.append(name)
+        return names
+    engine = entry.get("engine")
+    if isinstance(engine, str) and engine.strip():
+        return [engine.strip()]
+    return []
+
+
+_TRACKING_QUERY_PARAMETERS = frozenset(
+    {
+        "_hsenc",
+        "_hsmi",
+        "dclid",
+        "fbclid",
+        "gclid",
+        "igshid",
+        "mc_cid",
+        "mc_eid",
+        "msclkid",
+        "vero_conv",
+        "vero_id",
+    }
+)
+
+
+def _url_dedupe_key(url: str) -> str | None:
+    """Canonicalize safe URL variants while preserving semantic query data."""
+
+    try:
+        parsed = urlsplit(url)
+        hostname = (parsed.hostname or "").rstrip(".").casefold()
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.casefold() not in {"http", "https"} or not hostname:
+        return None
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    if port is not None and not (
+        (parsed.scheme.casefold() == "http" and port == 80)
+        or (parsed.scheme.casefold() == "https" and port == 443)
+    ):
+        hostname = f"{hostname}:{port}"
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/") or "/"
+    query_items = []
+    for name, value in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized_name = name.casefold()
+        if normalized_name.startswith("utm_"):
+            continue
+        if normalized_name in _TRACKING_QUERY_PARAMETERS:
+            continue
+        query_items.append((name, value))
+    query = urlencode(sorted(query_items))
+    return f"{hostname}{path}?{query}" if query else f"{hostname}{path}"
+
+
+def _provider_warnings(
+    contributing_engines: set[str],
+    engine_failures: list[str],
+) -> tuple[str, ...]:
+    if "google cse" in contributing_engines:
+        return ()
+
+    google_failures = [
+        failure for failure in engine_failures if failure.casefold().startswith("google cse:")
+    ]
+    fallback_engines = sorted(
+        engine for engine in contributing_engines if engine != "google cse"
+    )
+    fallback_text = ", ".join(fallback_engines) or "other providers"
+    if google_failures:
+        detail = "; ".join(google_failures)
+        rate_limited = any(
+            marker in detail.casefold()
+            for marker in ("429", "too many", "rate limit", "quota", "suspended")
+        )
+        if rate_limited:
+            return (
+                "Google CSE is rate-limited or suspended by SearXNG's public endpoint, "
+                f"which has no user key quota counter ({detail}). Results are "
+                f"fallback-only via {fallback_text}.",
+            )
+        return (
+            f"Google CSE failed ({detail}). Results are fallback-only via {fallback_text}.",
+        )
+    return (
+        "Google CSE contributed no results. Results are fallback-only via "
+        f"{fallback_text}.",
+    )
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -934,6 +1092,7 @@ def synthesize_call_id(item: dict[str, Any], fallback_index: int) -> str:
 
 
 __all__ = [
+    "SearchOutcome",
     "SearchResult",
     "WebFetchExecutor",
     "WebFetchSettings",
@@ -942,6 +1101,7 @@ __all__ = [
     "WEB_BROWSE_TOOL_NAME",
     "WEB_FETCH_TOOL_NAME",
     "WEB_SEARCH_TOOL_NAME",
+    "WEB_SEARCH_TIME_RANGES",
     "collect_managed_calls",
     "collect_web_search_calls",
     "externalize_for_codex",
@@ -954,6 +1114,7 @@ __all__ = [
     "make_web_browse_call_item",
     "make_web_fetch_call_item",
     "make_web_search_call_item",
+    "normalize_time_range",
     "parse_function_call_arguments",
     "request_has_web_search_tool",
     "synthesize_call_id",

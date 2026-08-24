@@ -267,7 +267,12 @@ marathon search down
 
 The first start generates a local secret in `docker/searxng/.env`.
 `search up`, `search restart`, and `search status` include a real search probe so upstream engine failures are visible immediately.
+The probe queries Google CSE directly and fails if only fallback providers are working.
+The bundled Google CSE engine uses SearXNG's public endpoint and has no user API key or numeric quota endpoint to inspect.
+Marathon therefore verifies live Google CSE contribution and surfaces 429, suspension, and fallback details in search tool output.
 The bundled configuration keeps only Google CSE, Bing, and Wikipedia, with Google CSE weighted first for technical and documentation queries.
+The search tool accepts an optional `time_range` of `day`, `week`, `month`, or `year`.
+Result deduplication ignores fragments, common tracking parameters, scheme and `www` aliases, query ordering, and trailing slashes while retaining semantic query parameters.
 Set `MARATHON_SEARXNG_URL` when the service runs somewhere else.
 Set `MARATHON_WEB_SEARCH_MODE=disabled`, `cached`, or `live` to control Codex's web-search mode.
 Set `MARATHON_WEB_SEARCH_RETRIES` from `0` through `3` to control retries for transient SearXNG transport and server failures.

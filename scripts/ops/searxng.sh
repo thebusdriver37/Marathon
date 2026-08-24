@@ -125,6 +125,7 @@ check_search() {
   if ! "${curl_command[@]}" --max-time 20 \
     --data-urlencode 'q=SearXNG documentation official' \
     --data-urlencode 'format=json' \
+    --data-urlencode 'engines=google cse' \
     "$url/search" >"$response_file"; then
     rm -f "$response_file"
     echo "error: SearXNG search request failed at $url" >&2
@@ -142,21 +143,6 @@ except Exception as exc:
     print(f"error: SearXNG returned invalid JSON: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
-results = payload.get("results") if isinstance(payload, dict) else None
-if isinstance(results, list) and results:
-    engines = set()
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        names = result.get("engines")
-        if isinstance(names, list):
-            engines.update(str(name) for name in names if name)
-        elif result.get("engine"):
-            engines.add(str(result["engine"]))
-    suffix = f" via {', '.join(sorted(engines))}" if engines else ""
-    print(f"SearXNG search works: {len(results)} results{suffix}")
-    raise SystemExit(0)
-
 failures = payload.get("unresponsive_engines") if isinstance(payload, dict) else None
 details = []
 if isinstance(failures, list):
@@ -166,7 +152,28 @@ if isinstance(failures, list):
             reason = str(failure[1]) if len(failure) > 1 else "failed"
             details.append(f"{name}: {reason}")
 detail = f" ({'; '.join(details)})" if details else ""
-print(f"error: SearXNG returned no usable results{detail}", file=sys.stderr)
+results = payload.get("results") if isinstance(payload, dict) else None
+engines = set()
+if isinstance(results, list):
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        names = result.get("engines")
+        if isinstance(names, list):
+            engines.update(str(name).casefold() for name in names if name)
+        elif result.get("engine"):
+            engines.add(str(result["engine"]).casefold())
+if isinstance(results, list) and results and "google cse" in engines:
+    print(f"Google CSE provider works: {len(results)} results")
+    raise SystemExit(0)
+if isinstance(results, list) and results:
+    providers = ", ".join(sorted(engines)) or "unknown providers"
+    print(
+        f"error: Google CSE contributed no results; got fallback results via {providers}{detail}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+print(f"error: Google CSE returned no usable results{detail}", file=sys.stderr)
 raise SystemExit(1)
 PY
 )"; then

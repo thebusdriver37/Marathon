@@ -57,6 +57,7 @@ from marathon_web_search import is_web_browse_function_call
 from marathon_web_search import is_web_fetch_function_call
 from marathon_web_search import is_web_search_function_call
 from marathon_web_search import make_function_call_output
+from marathon_web_search import normalize_time_range
 from marathon_web_search import parse_function_call_arguments
 from marathon_web_search import request_has_web_search_tool
 from marathon_web_search import synthesize_call_id
@@ -592,6 +593,8 @@ def _managed_call_signature(item: dict[str, Any]) -> str:
     normalized = copy.deepcopy(args)
     if name == WEB_SEARCH_TOOL_NAME and isinstance(normalized.get("query"), str):
         normalized["query"] = " ".join(normalized["query"].split()).casefold()
+        if isinstance(normalized.get("time_range"), str):
+            normalized["time_range"] = normalized["time_range"].strip().casefold()
     if name in {WEB_FETCH_TOOL_NAME, WEB_BROWSE_TOOL_NAME} and isinstance(
         normalized.get("url"), str
     ):
@@ -2972,6 +2975,11 @@ class RouterState:
             max_results = int(max_results_raw)
         else:
             max_results = None
+        time_range_raw = args.get("time_range")
+        try:
+            time_range = normalize_time_range(time_range_raw)
+        except ValueError as exc:
+            return make_function_call_output(call_id, f"Web search error: {exc}.")
 
         if self.web_search is None:
             return make_function_call_output(
@@ -2983,7 +2991,11 @@ class RouterState:
             )
 
         try:
-            results = await self.web_search.search(query, max_results=max_results)
+            outcome = await self.web_search.search_with_diagnostics(
+                query,
+                max_results=max_results,
+                time_range=time_range,
+            )
         except Exception as exc:
             self._log_tool_error("web_search", query, exc)
             return make_function_call_output(
@@ -2994,7 +3006,15 @@ class RouterState:
                 "knowledge if possible.",
             )
 
-        return make_function_call_output(call_id, format_results_for_model(query, results))
+        return make_function_call_output(
+            call_id,
+            format_results_for_model(
+                query,
+                outcome.results,
+                warnings=outcome.warnings,
+                time_range=time_range,
+            ),
+        )
 
     async def _execute_web_fetch_call(
         self, item: dict[str, Any], fallback_index: int

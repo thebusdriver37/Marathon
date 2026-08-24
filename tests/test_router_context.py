@@ -17,6 +17,8 @@ ROUTER_DIR = ROOT_DIR / "scripts" / "routers"
 sys.path.insert(0, str(ROUTER_DIR))
 
 import codex_local_router as router_module
+from marathon_web_search import SearchOutcome
+from marathon_web_search import SearchResult
 
 
 def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile:
@@ -35,6 +37,74 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_web_search_cache_signature_normalizes_but_distinguishes_time_range(self) -> None:
+        def call(query: str, time_range: str) -> dict[str, object]:
+            return {
+                "type": "function_call",
+                "name": "web_search",
+                "arguments": json.dumps({"query": query, "time_range": time_range}),
+            }
+
+        week_a = router_module._managed_call_signature(
+            call(" Recent   release ", "Week")
+        )
+        week_b = router_module._managed_call_signature(call("recent release", "week"))
+        month = router_module._managed_call_signature(call("recent release", "month"))
+
+        self.assertEqual(week_a, week_b)
+        self.assertNotEqual(week_a, month)
+
+    def test_web_search_forwards_time_range_and_includes_it_in_tool_output(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        state.web_search = mock.Mock()
+        state.web_search.search_with_diagnostics = mock.AsyncMock(
+            return_value=SearchOutcome(
+                results=[
+                    SearchResult(
+                        title="Recent result",
+                        url="https://example.test/recent",
+                        snippet="Published recently.",
+                        engine="google cse",
+                    )
+                ]
+            )
+        )
+        state.web_search_settings = SimpleNamespace(base_url="http://search.test")
+        state.log_dir = Path("/tmp")
+        item = {
+            "type": "function_call",
+            "name": "web_search",
+            "call_id": "search_1",
+            "arguments": json.dumps(
+                {"query": "recent release", "max_results": 4, "time_range": "week"}
+            ),
+        }
+
+        output = asyncio.run(state._execute_web_search_call(item, 0))
+
+        state.web_search.search_with_diagnostics.assert_awaited_once_with(
+            "recent release",
+            max_results=4,
+            time_range="week",
+        )
+        self.assertIn("time range: week", output["output"])
+
+    def test_web_search_rejects_invalid_time_range_before_execution(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        state.web_search = mock.Mock()
+        state.web_search.search_with_diagnostics = mock.AsyncMock()
+        item = {
+            "type": "function_call",
+            "name": "web_search",
+            "call_id": "search_1",
+            "arguments": '{"query":"recent release","time_range":"forever"}',
+        }
+
+        output = asyncio.run(state._execute_web_search_call(item, 0))
+
+        state.web_search.search_with_diagnostics.assert_not_awaited()
+        self.assertIn("day, week, month, year", output["output"])
+
     def test_external_model_loads_from_the_existing_user_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             catalog_path = Path(directory) / "catalog.toml"

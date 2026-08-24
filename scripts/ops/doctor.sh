@@ -289,6 +289,16 @@ except Exception:
 
 results = payload.get("results") if isinstance(payload, dict) else None
 count = len(results) if isinstance(results, list) else 0
+engines = set()
+if isinstance(results, list):
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        names = result.get("engines")
+        if isinstance(names, list):
+            engines.update(str(name).casefold() for name in names if name)
+        elif result.get("engine"):
+            engines.add(str(result["engine"]).casefold())
 failures = []
 raw_failures = payload.get("unresponsive_engines") if isinstance(payload, dict) else None
 if isinstance(raw_failures, list):
@@ -297,12 +307,19 @@ if isinstance(raw_failures, list):
             name = str(failure[0])
             reason = str(failure[1]) if len(failure) > 1 else "failed"
             failures.append(f"{name}: {reason}")
-print(f"{count}|{'; '.join(failures)}")
+print(
+    f"{count}|{'yes' if 'google cse' in engines else 'no'}|"
+    f"{', '.join(sorted(engines))}|{'; '.join(failures)}"
+)
 PY
 )"
-  IFS='|' read -r search_result_count search_failures <<<"$search_probe"
-  if [[ "${search_result_count:-0}" =~ ^[0-9]+$ ]] && (( search_result_count > 0 )); then
-    pass "SearXNG functional search returned $search_result_count results"
+  IFS='|' read -r search_result_count google_cse_present search_engines search_failures <<<"$search_probe"
+  if [[ "${search_result_count:-0}" =~ ^[0-9]+$ ]] \
+    && (( search_result_count > 0 )) \
+    && [[ "$google_cse_present" == "yes" ]]; then
+    pass "SearXNG functional search returned $search_result_count results with Google CSE"
+  elif [[ "${search_result_count:-0}" =~ ^[0-9]+$ ]] && (( search_result_count > 0 )); then
+    warn "Google CSE contributed no results; fallback providers: ${search_engines:-unknown}${search_failures:+ ($search_failures)}"
   else
     warn "SearXNG is reachable but search returned no results${search_failures:+ ($search_failures)}"
   fi

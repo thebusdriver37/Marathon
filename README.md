@@ -162,6 +162,9 @@ marathon
 This optional feature requires Docker with the `docker compose` plugin.
 The service binds to loopback by default.
 Startup waits for a functional upstream search instead of treating the container health endpoint as proof that search works.
+The probe requires Google CSE itself to return results, so a Bing-only fallback now fails `marathon search check` instead of looking healthy.
+SearXNG's Google CSE adapter uses a public endpoint rather than a user API key, so Marathon verifies live provider availability and reports rate limiting instead of claiming to read a key quota counter.
+Agents can request `day`, `week`, `month`, or `year` freshness filters, and tracking variants of the same result URL are collapsed automatically.
 
 ## Troubleshooting
 
