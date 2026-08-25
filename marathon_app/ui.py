@@ -632,10 +632,10 @@ def _show_dyno_results(console: Console, summary) -> None:
     for result in summary.results:
         table.add_row(
             result.candidate.label,
-            f"{result.prompt_tps:.1f}" if result.success else "—",
-            f"{result.decode_tps:.1f}" if result.success else "—",
-            f"{result.loaded_context // 1024}K" if result.loaded_context else "—",
-            f"{result.average_power_w:.0f}W" if result.average_power_w else "—",
+            f"{result.prompt_tps:.1f}" if result.success else "-",
+            f"{result.decode_tps:.1f}" if result.success else "-",
+            f"{result.loaded_context // 1024}K" if result.loaded_context else "-",
+            f"{result.average_power_w:.0f}W" if result.average_power_w else "-",
             "[green]pass[/green]" if result.success else f"[red]{result.error[:38]}[/red]",
         )
     console.print(table)
@@ -817,11 +817,11 @@ def _launch_frontend(
     runtime: Runtime | RemoteRuntime,
     frontend: str,
     extra_args: list[str] | None = None,
-) -> None:
+) -> int:
     console.clear()
     if frontend == "direct":
         direct_chat(runtime, console)
-        return
+        return 0
     code = (
         run_hermes(runtime, extra_args)
         if frontend == "hermes"
@@ -831,6 +831,7 @@ def _launch_frontend(
         console.print(
             f"[yellow]{FRONTEND_NAMES[frontend]} exited with status {code}.[/yellow]"
         )
+    return code
 
 
 def _apply_initial_frontend(
@@ -985,7 +986,7 @@ def run_codex_default(codex_args: list[str] | None = None) -> int:
     try:
         with console.status("[bold magenta]Preparing local Codex...[/bold magenta]", spinner="dots") as status:
             runtime.start(lambda message: status.update(f"[magenta]{message}[/magenta]"))
-        _launch_frontend(console, runtime, "codex", codex_args)
+        result = _launch_frontend(console, runtime, "codex", codex_args)
     except KeyboardInterrupt:
         runtime.record("runtime.interrupted", {}, level="error")
         result = 130

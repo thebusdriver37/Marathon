@@ -84,7 +84,7 @@ class ModelLibraryTests(unittest.TestCase):
             repo_id="author/model",
             filename="model-Q4_K_M.gguf",
             revision="deadbeef",
-            local_dir=root / "author--model",
+            local_dir=(root / "author--model").resolve(),
         )
 
     def test_download_fetches_matching_multimodal_projector(self) -> None:

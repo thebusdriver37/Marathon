@@ -26,10 +26,8 @@ Commands:
   stop            Ask an active runtime to stop and free the GPUs
   report [run]    Summarize a telemetry trace (default: latest run)
   compare A B     Compare two telemetry traces
-  chat            Alias for dashboard (backward compatible)
-  backend <sub>   Manage the local router and llama.cpp backend
   doctor          Check local setup, backend health, models, ports, GPU, and cache usage
-  eval coding     Run a temporary Codex-style coding gauntlet against the active backend
+  eval coding     Run a supervised Codex-style coding gauntlet
   resume [ID]     Resume a Marathon session or open its session picker
   fork [ID]       Fork a Marathon session or open its session picker
   exec            Run headless Codex exec against the default local model
@@ -40,16 +38,12 @@ Commands:
   build-codex     Build the patched local Codex binary
   build-llama     Build the patched local llama.cpp binaries
   setup-llama     Clone and build the pinned llama.cpp backend
-  sweep-128k      Run the focused 128K server config sweep
-  update-codex    Fetch latest Codex, rebase patches, rebuild
+  update-codex    Fetch the pinned stable Codex, rebase patches, rebuild
 
 Environment:
   MARATHON_AI_ROOT          Models, backends, and cache root (default: ~/AI)
   MARATHON_MODELS_DIR       GGUF model directory (default: ~/AI/models/gguf)
   MARATHON_MODEL_DIRS       OS-path-separated GGUF model directories
-  MARATHON_MODEL_PATH       Custom GGUF path for the legacy custom backend command
-  MARATHON_MODEL_SLUG       Custom model slug/alias (default: custom)
-  MARATHON_MODEL_CONTEXT    Custom model context window (default: 32768)
   MARATHON_RUNS_DIR         Per-run JSONL trace directory (default: ~/.local/state/marathon/runs)
   MARATHON_TELEMETRY_INTERVAL  GPU/metrics sample interval in seconds (default: 2)
   MARATHON_BACKEND_METRICS_ENABLED  Poll backend /metrics when supported (default: 0)
@@ -61,10 +55,6 @@ Environment:
   MARATHON_CODEX_BIN        Patched Codex executable and build destination
   MARATHON_CODEX_HOME       Isolated writable Codex home
   MARATHON_STOCK_CODEX_HOME Normal Codex home used for shared user resources
-  QWEN36_27B_GGUF           Exact Qwen3.6 27B GGUF path
-  QWEN36_35B_A3B_GGUF       Exact Qwen3.6 35B A3B GGUF path
-  QWOPUS36_35B_A3B_GGUF     Exact Qwopus3.6 35B A3B v1 GGUF path
-  GEMMA4_26B_A4B_GGUF       Exact Gemma 4 26B A4B IT GGUF path
   LLAMACPP_BIN              Exact llama-server binary path
   MARATHON_DS4_GPUS         DS4 pipeline GPU indexes (default: 0,1,2,3)
   MARATHON_DS4_CONTROL_PORT Override DS4's loopback routing-key base
@@ -99,14 +89,11 @@ if [[ "$cmd" == "codex" && "${MARATHON_AUTO_INSTALL_CLI:-1}" == "1" ]]; then
 fi
 
 case "$cmd" in
-  dashboard|chat)
+  dashboard)
     run_app dashboard "$@"
     ;;
-  codex|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare|resume|fork)
+  codex|exec|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare|resume|fork)
     run_app "$cmd" "$@"
-    ;;
-  backend)
-    exec "$ROOT_DIR/scripts/ops/backend.sh" "$@"
     ;;
   doctor)
     exec "$ROOT_DIR/scripts/ops/doctor.sh" "$@"
@@ -134,9 +121,6 @@ USAGE
         ;;
     esac
     ;;
-  exec)
-    exec "$ROOT_DIR/scripts/launchers/start_codex.sh" exec "$@"
-    ;;
   install)
     exec "$ROOT_DIR/scripts/ops/install_cli.sh" "$@"
     ;;
@@ -157,9 +141,6 @@ USAGE
     ;;
   setup-llama)
     exec "$ROOT_DIR/scripts/ops/setup_llamacpp.sh" "$@"
-    ;;
-  sweep-128k)
-    exec "$ROOT_DIR/scripts/benchmarks/qwen36_128k_server_sweep.py" "$@"
     ;;
   update-codex)
     exec "$ROOT_DIR/scripts/ops/update_codex.sh" "$@"

@@ -12,6 +12,8 @@ BUILD_PROFILE="${MARATHON_CODEX_BUILD_PROFILE:-release}"
 TEMP_TARGET=""
 INSTALL_TMP=""
 FEATURES_TMP=""
+PROMPT_HASH_TMP=""
+PROMPT_FILE="$CODEX_DIR/codex-rs/models-manager/prompt.md"
 
 if [[ ! -f "$CODEX_DIR/codex-rs/Cargo.toml" ]]; then
   if [[ "$CODEX_DIR" != "$ROOT_DIR/codex" ]]; then
@@ -45,6 +47,7 @@ fi
 cleanup() {
   [[ -z "$INSTALL_TMP" ]] || rm -f "$INSTALL_TMP"
   [[ -z "$FEATURES_TMP" ]] || rm -f "$FEATURES_TMP"
+  [[ -z "$PROMPT_HASH_TMP" ]] || rm -f "$PROMPT_HASH_TMP"
   if [[ -n "$TEMP_TARGET" && -d "$TEMP_TARGET" ]]; then
     rm -r -- "$TEMP_TARGET"
   fi
@@ -85,6 +88,9 @@ if [[ -x "$INSTALL_BIN" ]]; then
   if [[ -f "$INSTALL_BIN.features" ]]; then
     cp -f "$INSTALL_BIN.features" "$INSTALL_BIN.previous.features"
   fi
+  if [[ -f "$INSTALL_BIN.prompt-hash" ]]; then
+    cp -f "$INSTALL_BIN.prompt-hash" "$INSTALL_BIN.previous.prompt-hash"
+  fi
 fi
 
 mv -f "$INSTALL_TMP" "$INSTALL_BIN"
@@ -108,6 +114,15 @@ if rg -q 'tokens-per-second' "$BUILD_CODEX_DIR/codex-rs/tui/src"; then
 fi
 mv -f "$FEATURES_TMP" "$INSTALL_BIN.features"
 FEATURES_TMP=""
+
+PROMPT_HASH_TMP="$(mktemp "$install_dir/.codex.prompt-hash.XXXXXX")"
+if [[ -f "$PROMPT_FILE" ]]; then
+  git hash-object "$PROMPT_FILE" >"$PROMPT_HASH_TMP"
+else
+  printf 'missing\n' >"$PROMPT_HASH_TMP"
+fi
+mv -f "$PROMPT_HASH_TMP" "$INSTALL_BIN.prompt-hash"
+PROMPT_HASH_TMP=""
 
 echo
 echo "Codex source: $BUILD_CODEX_DIR"

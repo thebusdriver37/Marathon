@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -203,10 +204,20 @@ def _port_pid(port: int) -> int | None:
             stderr=subprocess.DEVNULL,
             check=False,
         )
-        import re
-
         match = re.search(r"pid=(\d+)", result.stdout)
-        return int(match.group(1)) if match else None
+        if match:
+            return int(match.group(1))
+    if shutil.which("lsof"):
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        for line in result.stdout.splitlines():
+            if line.strip().isdigit():
+                return int(line.strip())
     return None
 
 
@@ -214,7 +225,18 @@ def _cmdline(pid: int) -> str:
     try:
         return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
     except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
         return ""
+    return result.stdout.strip()
 
 
 def _gpu_processes() -> list[dict[str, str]]:
@@ -747,7 +769,6 @@ class Runtime:
                     "1" if slot_api_enabled else "0"
                 ),
                 "MARATHON_BACKEND_CACHE_ID": backend_cache_id,
-                "MARATHON_MODEL_SUPERVISED": "1",
                 "MARATHON_MODEL_PARALLEL_TOOL_CALLS": (
                     "1" if self.profile.parallel_tool_calls else "0"
                 ),
@@ -768,6 +789,18 @@ class Runtime:
                     self.model.family.default_reasoning_level or ""
                 ),
                 "MARATHON_SLOT_SAVE_ROOT": str(SLOT_ROOT),
+                "MARATHON_SLOT_SNAPSHOTS_ENABLED": (
+                    "1" if self.config.slot_snapshots_enabled else "0"
+                ),
+                "MARATHON_SLOT_SNAPSHOT_MAX_COUNT": str(
+                    self.config.slot_snapshot_max_count
+                ),
+                "MARATHON_SLOT_SNAPSHOT_MAX_BYTES": str(
+                    self.config.slot_snapshot_max_bytes
+                ),
+                "MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP": (
+                    "1" if self.config.slot_snapshot_clean_startup else "0"
+                ),
                 "MARATHON_RUN_ID": str(self.run_id or ""),
                 "MARATHON_RUN_LOG": str(self.run_log or ""),
             }

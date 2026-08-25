@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import functools
 import os
 import re
 import tomllib
@@ -15,6 +17,7 @@ from .model_library import (
     find_multimodal_projector,
     is_model_sidecar,
     quant_from_filename,
+    read_gguf_metadata,
 )
 
 
@@ -52,6 +55,10 @@ class Settings:
     health_timeout: int
     stop_timeout: int
     prompt_cache_ram_mib: int
+    slot_snapshots_enabled: bool
+    slot_snapshot_max_count: int
+    slot_snapshot_max_bytes: int
+    slot_snapshot_clean_startup: bool
 
 
 @dataclass(frozen=True)
@@ -124,6 +131,8 @@ class Model:
     family: Family
     quant: str
     multimodal_projector: Path | None = None
+    architecture: str | None = None
+    native_context: int | None = None
 
     @property
     def alias(self) -> str:
@@ -181,15 +190,42 @@ def _merge_keyed_list(base_items: list[dict[str, Any]], override_items: list[dic
     return result
 
 
-def load_catalog(path: Path | None = None) -> dict[str, Any]:
-    base = CATALOG_PATH if path is None else path
+def _catalog_file_revision(path: Path) -> tuple[str, int | None, int | None]:
+    resolved = path.expanduser().resolve()
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return str(resolved), None, None
+    return str(resolved), stat.st_mtime_ns, stat.st_size
+
+
+@functools.lru_cache(maxsize=16)
+def _load_catalog_cached(
+    base_revision: tuple[str, int | None, int | None],
+    user_revision: tuple[str, int | None, int | None] | None,
+) -> dict[str, Any]:
+    base = Path(base_revision[0])
     with base.open("rb") as handle:
         merged = tomllib.load(handle)
-    local_catalog = user_catalog_path()
-    if path is None and local_catalog.exists():
+    if user_revision is not None and user_revision[1] is not None:
+        local_catalog = Path(user_revision[0])
         with local_catalog.open("rb") as handle:
             merged = _merge_catalog(merged, tomllib.load(handle))
     return merged
+
+
+def _catalog_snapshot(path: Path | None = None) -> dict[str, Any]:
+    base = CATALOG_PATH if path is None else path
+    user_revision = (
+        _catalog_file_revision(user_catalog_path()) if path is None else None
+    )
+    return _load_catalog_cached(_catalog_file_revision(base), user_revision)
+
+
+def load_catalog(path: Path | None = None) -> dict[str, Any]:
+    """Load a catalog, reparsing only after either source file changes."""
+
+    return copy.deepcopy(_catalog_snapshot(path))
 
 
 def _external_context_defaults(context: int) -> tuple[int, int]:
@@ -202,7 +238,7 @@ def _external_context_defaults(context: int) -> tuple[int, int]:
 def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalModel, ...]:
     """Load optional OpenAI-compatible models from the merged user catalog."""
 
-    loaded = load_catalog() if catalog is None else catalog
+    loaded = _catalog_snapshot() if catalog is None else catalog
     raw_models = loaded.get("external_models", [])
     if not isinstance(raw_models, list) or any(
         not isinstance(item, dict) for item in raw_models
@@ -325,6 +361,18 @@ def _resolve_ai_path(value: str | os.PathLike[str], ai_root: Path) -> Path:
     return path if path.is_absolute() else ai_root / path
 
 
+def _setting_bool(environment_name: str, default: object) -> bool:
+    value = os.environ.get(environment_name)
+    if value is None:
+        return bool(default)
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{environment_name} must be true or false")
+
+
 def settings(catalog: dict[str, Any] | None = None) -> Settings:
     raw = (catalog or load_catalog())["settings"]
     ai_root = Path(
@@ -351,6 +399,32 @@ def settings(catalog: dict[str, Any] | None = None) -> Settings:
                 "MARATHON_PROMPT_CACHE_RAM_MIB",
                 raw.get("prompt_cache_ram_mib", 8192),
             )
+        ),
+        slot_snapshots_enabled=_setting_bool(
+            "MARATHON_SLOT_SNAPSHOTS_ENABLED",
+            raw.get("slot_snapshots_enabled", False),
+        ),
+        slot_snapshot_max_count=max(
+            0,
+            int(
+                os.environ.get(
+                    "MARATHON_SLOT_SNAPSHOT_MAX_COUNT",
+                    raw.get("slot_snapshot_max_count", 16),
+                )
+            ),
+        ),
+        slot_snapshot_max_bytes=max(
+            0,
+            int(
+                os.environ.get(
+                    "MARATHON_SLOT_SNAPSHOT_MAX_BYTES",
+                    raw.get("slot_snapshot_max_bytes", 32 * 1024**3),
+                )
+            ),
+        ),
+        slot_snapshot_clean_startup=_setting_bool(
+            "MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP",
+            raw.get("slot_snapshot_clean_startup", False),
         ),
     )
 
@@ -485,8 +559,16 @@ def _model_sidecar(path: Path) -> bool:
     return is_model_sidecar(path.name)
 
 
-def _family_for(path: Path, known: tuple[Family, ...]) -> Family:
-    value = str(path).lower()
+def _family_for(
+    path: Path,
+    known: tuple[Family, ...],
+    *,
+    metadata_name: str | None = None,
+    architecture: str | None = None,
+) -> Family:
+    value = " ".join(
+        part for part in (str(path), metadata_name, architecture) if part
+    ).lower()
     for family in known:
         if family.id != "generic" and any(pattern in value for pattern in family.patterns):
             return family
@@ -501,12 +583,17 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
 
-def _model_size(path: Path) -> int:
+def _model_size(path: Path, discovered_sizes: dict[Path, int]) -> int:
     match = re.search(r"-00001-of-(\d{5})\.gguf$", path.name, re.IGNORECASE)
     if not match:
-        return path.stat().st_size
+        return discovered_sizes[path]
     stem = re.sub(r"-00001-of-\d{5}\.gguf$", "", path.name, flags=re.IGNORECASE)
-    return sum(shard.stat().st_size for shard in path.parent.glob(f"{stem}-*-of-*.gguf"))
+    pattern = re.compile(rf"^{re.escape(stem)}-\d{{5}}-of-\d{{5}}\.gguf$", re.IGNORECASE)
+    return sum(
+        size
+        for shard, size in discovered_sizes.items()
+        if shard.parent == path.parent and pattern.match(shard.name)
+    )
 
 
 def discover_models(model_root: Path | None = None) -> list[Model]:
@@ -515,31 +602,46 @@ def discover_models(model_root: Path | None = None) -> list[Model]:
     result: list[Model] = []
     ids: dict[str, int] = {}
     paths: list[Path] = []
+    discovered_sizes: dict[Path, int] = {}
+    discovered_mtimes: dict[Path, int] = {}
     seen_files: set[tuple[int, int]] = set()
     for root in roots:
         if not root.exists():
             continue
         for path in root.rglob("*.gguf"):
             try:
-                identity = (path.stat().st_dev, path.stat().st_ino)
+                stat = path.stat()
+                identity = (stat.st_dev, stat.st_ino)
             except OSError:
                 continue
             if identity in seen_files:
                 continue
             seen_files.add(identity)
             paths.append(path)
+            discovered_sizes[path] = stat.st_size
+            discovered_mtimes[path] = stat.st_mtime_ns
     for path in sorted(paths):
         if ".cache" in path.parts or path.name.lower().startswith("mmproj"):
             continue
-        if _model_sidecar(path) or not _first_shard(path) or path.stat().st_size == 0:
+        if _model_sidecar(path) or not _first_shard(path) or discovered_sizes[path] == 0:
             continue
-        family = _family_for(path, known)
+        metadata = read_gguf_metadata(
+            path,
+            mtime_ns=discovered_mtimes[path],
+            size_bytes=discovered_sizes[path],
+        )
+        family = _family_for(
+            path,
+            known,
+            metadata_name=metadata.name,
+            architecture=metadata.architecture,
+        )
         quant = _quant(path.name)
         if family.id == "generic":
             base = re.sub(r"-\d{5}-of-\d{5}\.gguf$", "", path.name, flags=re.IGNORECASE)
             base = re.sub(r"\.gguf$", "", base, flags=re.IGNORECASE)
             model_id = _slug(base)
-            display = base
+            display = metadata.name or base
         else:
             model_id = f"{family.id}-{_slug(quant)}"
             display = f"{family.display_name} {quant}"
@@ -551,10 +653,12 @@ def discover_models(model_root: Path | None = None) -> list[Model]:
                 model_id,
                 display,
                 path,
-                _model_size(path),
+                _model_size(path, discovered_sizes),
                 family,
                 quant,
                 find_multimodal_projector(path),
+                metadata.architecture,
+                metadata.context_length,
             )
         )
     return sorted(result, key=lambda model: (model.family.id, model.display_name.lower()))

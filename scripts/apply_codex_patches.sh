@@ -22,12 +22,10 @@ if [[ "$PATCH_IN_PLACE" != "1" ]]; then
       echo "error: patched Codex target exists but is not a git worktree: $TARGET_CODEX_DIR" >&2
       exit 1
     fi
-    git -C "$TARGET_CODEX_DIR" reset --hard "$base_ref" >/dev/null
-    git -C "$TARGET_CODEX_DIR" clean -fd >/dev/null
-  else
-    mkdir -p "$(dirname "$TARGET_CODEX_DIR")"
-    git -C "$CODEX_DIR" worktree add --detach "$TARGET_CODEX_DIR" "$base_ref" >/dev/null
+    git -C "$CODEX_DIR" worktree remove --force "$TARGET_CODEX_DIR" >/dev/null
   fi
+  mkdir -p "$(dirname "$TARGET_CODEX_DIR")"
+  git -C "$CODEX_DIR" worktree add --detach "$TARGET_CODEX_DIR" "$base_ref" >/dev/null
 fi
 
 shopt -s nullglob

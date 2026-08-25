@@ -104,7 +104,10 @@ print(ROUTER_STATE_DIR)
 PY
 )"
   if [[ -n "$resolved_paths" ]]; then
-    mapfile -t resolved <<<"$resolved_paths"
+    resolved=()
+    while IFS= read -r line; do
+      resolved+=("$line")
+    done <<<"$resolved_paths"
     if (( ${#resolved[@]} == 5 )); then
       AI_ROOT="${resolved[0]}"
       MODELS_DIR="${resolved[1]}"
@@ -142,7 +145,7 @@ else
 fi
 
 if [[ -x "$ROOT_DIR/.marathon/venv/bin/python3" ]]; then
-  if PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" -c 'import aiohttp, huggingface_hub, prompt_toolkit, rich, marathon_app' 2>/dev/null; then
+  if PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" -c 'import aiohttp, gguf, huggingface_hub, prompt_toolkit, rich, marathon_app' 2>/dev/null; then
     pass "private router/UI Python environment is ready"
   else
     fail "private Python environment is incomplete; run: marathon setup-deps"
@@ -155,6 +158,38 @@ if have python3; then
   pass "python3 available: $(python3 --version 2>&1)"
 else
   fail "python3 not found"
+fi
+
+prompt_file="$ROOT_DIR/codex/codex-rs/models-manager/prompt.md"
+if [[ -f "$prompt_file" ]]; then
+  pass "Codex model prompt exists"
+  current_prompt_hash="$(git hash-object "$prompt_file" 2>/dev/null || true)"
+  built_prompt_hash="$(cat "$PATCHED_CODEX_BIN.prompt-hash" 2>/dev/null || true)"
+  if [[ -n "$built_prompt_hash" && "$built_prompt_hash" == "$current_prompt_hash" ]]; then
+    pass "installed Codex was built with the current model prompt"
+  elif [[ -x "$PATCHED_CODEX_BIN" && -n "$built_prompt_hash" ]]; then
+    warn "Codex model prompt changed after the installed build; run: marathon build-codex"
+  elif [[ -x "$PATCHED_CODEX_BIN" ]]; then
+    warn "installed Codex predates prompt tracking; run: marathon build-codex"
+  fi
+else
+  fail "Codex model prompt is missing: $prompt_file"
+fi
+
+codex_ref="$(tr -d '[:space:]' <"$ROOT_DIR/config/codex.ref" 2>/dev/null || true)"
+if [[ -n "$codex_ref" ]] && git -C "$ROOT_DIR/codex" rev-parse --verify "$codex_ref^{commit}" >/dev/null 2>&1; then
+  current_codex_sha="$(git -C "$ROOT_DIR/codex" rev-parse HEAD)"
+  expected_codex_sha="$(git -C "$ROOT_DIR/codex" rev-parse "$codex_ref^{commit}")"
+  if [[ "$current_codex_sha" == "$expected_codex_sha" ]]; then
+    pass "pinned Codex matches $codex_ref"
+  else
+    codex_behind="$(git -C "$ROOT_DIR/codex" rev-list --count "HEAD..$expected_codex_sha" 2>/dev/null || true)"
+    warn "pinned Codex does not match $codex_ref (${codex_behind:-?} commit(s) behind); run: marathon update-codex"
+  fi
+  latest_stable="$(git -C "$ROOT_DIR/codex" tag --list 'rust-v[0-9]*' --sort=-v:refname | sed '/alpha/d' | head -n1)"
+  if [[ -n "$latest_stable" && "$latest_stable" != "$codex_ref" ]]; then
+    warn "a newer fetched stable Codex tag exists: $latest_stable; update config/codex.ref"
+  fi
 fi
 
 if have docker; then
@@ -185,7 +220,10 @@ for root in settings().model_roots:
     print(root)
 PY
 )"
-mapfile -t model_lines <<<"$model_report"
+model_lines=()
+while IFS= read -r line; do
+  model_lines+=("$line")
+done <<<"$model_report"
 model_count="${model_lines[0]:-0}"
 model_root_count=$(( ${#model_lines[@]} - 1 ))
 if [[ "$model_count" =~ ^[0-9]+$ ]] && (( model_count > 0 )); then
@@ -260,7 +298,7 @@ if [[ -n "$health_json" ]]; then
   elif curl -fsS --max-time 2 "http://127.0.0.1:$LLAMA_PORT/v1/models" >/dev/null 2>&1; then
     pass "inference backend is ready and awaiting its first routed request"
   else
-    fail "backend status is ${backend_status:-unknown}; run: marathon backend logs"
+    fail "backend status is ${backend_status:-unknown}; inspect: ${XDG_STATE_HOME:-$HOME/.local/state}/marathon/logs"
   fi
 else
   owner="$(port_owner "$ROUTER_PORT" || true)"
@@ -329,9 +367,29 @@ fi
 
 log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/marathon/logs"
 info "AI root: $AI_ROOT"
+snapshot_settings="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" - <<'PY' 2>/dev/null || true
+from marathon_app.catalog import settings
+
+configured = settings()
+print("enabled" if configured.slot_snapshots_enabled else "disabled")
+print(configured.slot_snapshot_max_count)
+print(configured.slot_snapshot_max_bytes)
+PY
+)"
+snapshot_status="$(sed -n '1p' <<<"$snapshot_settings")"
+snapshot_count="$(sed -n '2p' <<<"$snapshot_settings")"
+snapshot_bytes="$(sed -n '3p' <<<"$snapshot_settings")"
+info "slot snapshot resume: ${snapshot_status:-unknown} (max ${snapshot_count:-?} files, ${snapshot_bytes:-?} bytes)"
 info "slot snapshots: $(bytes_human "$SLOT_DIR") at $SLOT_DIR"
 info "logs: $(bytes_human "$log_dir") at $log_dir"
 info "router state: $(bytes_human "$ROUTER_STATE_DIR") at $ROUTER_STATE_DIR"
+info "Marathon workspace cache: $(bytes_human "$ROOT_DIR/.marathon") at $ROOT_DIR/.marathon"
+if [[ -d "$ROOT_DIR/.marathon" ]]; then
+  for cache_path in "$ROOT_DIR/.marathon"/*; do
+    [[ -e "$cache_path" ]] || continue
+    info "workspace cache item: $(bytes_human "$cache_path") $(basename "$cache_path")"
+  done
+fi
 
 printf '\n'
 if (( failures > 0 )); then

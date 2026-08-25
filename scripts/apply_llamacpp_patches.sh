@@ -36,12 +36,10 @@ if [[ "$PATCH_IN_PLACE" != "1" ]]; then
       echo "error: patched llama.cpp target exists but is not a git worktree: $TARGET_LLAMACPP_DIR" >&2
       exit 1
     fi
-    git -C "$TARGET_LLAMACPP_DIR" reset --hard "$base_ref" >/dev/null
-    git -C "$TARGET_LLAMACPP_DIR" clean -fd >/dev/null
-  else
-    mkdir -p "$(dirname "$TARGET_LLAMACPP_DIR")"
-    git -C "$LLAMACPP_DIR" worktree add --detach "$TARGET_LLAMACPP_DIR" "$base_ref" >/dev/null
+    git -C "$LLAMACPP_DIR" worktree remove --force "$TARGET_LLAMACPP_DIR" >/dev/null
   fi
+  mkdir -p "$(dirname "$TARGET_LLAMACPP_DIR")"
+  git -C "$LLAMACPP_DIR" worktree add --detach "$TARGET_LLAMACPP_DIR" "$base_ref" >/dev/null
 fi
 
 for patch in "${patches[@]}"; do

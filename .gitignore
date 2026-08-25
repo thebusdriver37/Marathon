@@ -1,4 +1,5 @@
 /.marathon/
+/Marathon/
 /logs/
 /third_party/
 /target/

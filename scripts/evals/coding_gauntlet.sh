@@ -2,8 +2,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ROUTER_HOST="${MARATHON_PROXY_HOST:-127.0.0.1}"
-ROUTER_PORT="${MARATHON_PROXY_PORT:-18111}"
 TIMEOUT_SECONDS="${MARATHON_EVAL_TIMEOUT_SECONDS:-720}"
 BASE_DIR="${MARATHON_EVAL_BASE_DIR:-/tmp}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
@@ -15,7 +13,7 @@ usage() {
   cat <<USAGE
 Usage: marathon eval coding
 
-Runs a temporary Codex-style coding task against the active Marathon backend.
+Runs a temporary Codex-style coding task through Marathon's supervised runtime.
 The gauntlet lives under /tmp by default and does not modify this repo.
 
 Environment:
@@ -38,39 +36,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-router_url="http://$ROUTER_HOST:$ROUTER_PORT"
-health_json="$(curl -fsS --max-time 2 "$router_url/health" 2>/dev/null || true)"
-if [[ -z "$health_json" ]]; then
-  echo "error: Marathon backend is not running." >&2
-  echo "run: marathon backend start 128k-single" >&2
-  exit 1
-fi
-
-backend_status="$(
-  HEALTH_JSON="$health_json" python3 - <<'PY'
-import json
-import os
-
-payload = json.loads(os.environ["HEALTH_JSON"])
-print((payload.get("backend_health") or {}).get("status") or "")
-PY
-)"
-active_model="$(
-  HEALTH_JSON="$health_json" python3 - <<'PY'
-import json
-import os
-
-payload = json.loads(os.environ["HEALTH_JSON"])
-print(payload.get("current_model") or "")
-PY
-)"
-
-if [[ "$backend_status" != "ok" ]]; then
-  echo "error: Marathon backend is not ready: ${backend_status:-unknown}" >&2
-  echo "run: marathon backend status" >&2
-  exit 1
-fi
 
 mkdir -p "$WORK_DIR/miniboard" "$WORK_DIR/tests"
 
@@ -389,7 +354,7 @@ git -C "$WORK_DIR" -c user.name=Marathon -c user.email=marathon@example.invalid 
 prompt="Read brief.md and the repository. Implement the smallest production-quality fix that satisfies the brief and included tests. Preserve the public API, do not add dependencies, and run the test suite before finishing."
 
 printf 'Marathon coding eval\n'
-printf 'model: %s\n' "$active_model"
+printf 'model: remembered Marathon selection\n'
 printf 'workspace: %s\n' "$WORK_DIR"
 printf 'timeout: %ss\n\n' "$TIMEOUT_SECONDS"
 
@@ -416,7 +381,6 @@ diffstat="$(git -C "$WORK_DIR" diff --stat || true)"
 tokens_used="$(sed -n '/tokens used/{n;p;}' "$LOG_FILE" | tail -n1 | tr -d '[:space:]')"
 
 printf '\nResult\n'
-printf 'model: %s\n' "$active_model"
 printf 'exec_exit: %s\n' "$exec_rc"
 printf 'test_exit: %s\n' "$test_rc"
 printf 'duration_seconds: %s\n' "$((end_time - start_time))"

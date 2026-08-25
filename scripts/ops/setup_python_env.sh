@@ -49,7 +49,7 @@ echo
 echo "Marathon venv ready at $VENV_DIR"
 "$VENV_DIR/bin/python3" -c '
 import importlib.metadata as m
-for pkg in ("trafilatura", "aiohttp", "rich", "prompt-toolkit", "huggingface-hub"):
+for pkg in ("trafilatura", "aiohttp", "rich", "prompt-toolkit", "huggingface-hub", "gguf"):
     try:
         print(f"  {pkg}: {m.version(pkg)}")
     except m.PackageNotFoundError:

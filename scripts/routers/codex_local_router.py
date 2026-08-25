@@ -20,9 +20,6 @@ import hashlib
 import json
 import os
 import re
-import signal
-import subprocess
-import sys
 import threading
 import time
 import urllib.request
@@ -124,6 +121,8 @@ DEFAULT_TOOL_OUTPUT_MAX_CHARS = 16_384
 DEFAULT_WEB_TOOL_CACHE_MAX_ENTRIES = 256
 DEFAULT_WEB_TURN_PROGRESS_MAX_ENTRIES = 64
 DEFAULT_WEB_TURN_PROGRESS_TTL_SECONDS = 3_600
+DEFAULT_LINEAGE_MAX_ENTRIES_PER_MODEL = 128
+DEFAULT_TRACE_INPUT_FINGERPRINTS = 256
 DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 DEFAULT_STALLED_RESPONSE_RECOVERIES = 1
 DEFAULT_TOOL_PROTOCOL_RECOVERIES = 1
@@ -194,7 +193,6 @@ class ModelProfile:
     alias: str
     display_name: str
     description: str
-    launcher: str
     model_paths: tuple[str, ...]
     target: str
     context_window: int
@@ -202,7 +200,6 @@ class ModelProfile:
     truncation_limit: int
     supports_parallel_tool_calls: bool = False
     supports_slots: bool = True
-    supervised: bool = False
     temperature: float | None = None
     default_reasoning_level: str | None = None
     supported_reasoning_levels: tuple[tuple[str, str], ...] = ()
@@ -210,10 +207,6 @@ class ModelProfile:
     external: bool = False
     api_key_env: str | None = None
     api_key_file: str | None = None
-
-    @property
-    def port(self) -> int:
-        return int(self.target.rsplit(":", 1)[-1])
 
     def resolved_model_path(self) -> str | None:
         for candidate in self.model_paths:
@@ -261,7 +254,10 @@ class ModelProfile:
 class ResponseSnapshot:
     response_id: str
     profile_slug: str
-    conversation_items: list[dict[str, Any]]
+    parent_response_id: str | None
+    input_items: list[dict[str, Any]]
+    output_items: list[dict[str, Any]]
+    conversation_item_count: int
     snapshot_filename: str
     instructions_text: str
     base_instructions_hash: str
@@ -336,7 +332,7 @@ def _is_warmup_root(snapshot: ResponseSnapshot | None) -> bool:
     return bool(
         snapshot is not None
         and snapshot.response_id.startswith("warm_")
-        and not snapshot.conversation_items
+        and snapshot.conversation_item_count == 0
         and not snapshot.snapshot_filename
     )
 
@@ -415,20 +411,6 @@ def _base_instructions() -> str:
             f"{prompt_path}. Initialize the Codex submodule or set MARATHON_PROMPT_FILE."
         )
     return prompt_path.read_text(encoding="utf-8")
-
-
-def _model_candidates(env_var: str, relative_paths: tuple[str, ...]) -> tuple[str, ...]:
-    configured = os.getenv(env_var)
-    if configured:
-        return (configured,)
-
-    ai_root = Path(os.getenv("MARATHON_AI_ROOT") or Path.home() / "AI").expanduser()
-    models_dir = Path(
-        os.getenv("MARATHON_MODELS_DIR")
-        or os.getenv("MODELS_DIR")
-        or ai_root / "models" / "gguf"
-    ).expanduser()
-    return tuple(str(models_dir / relative_path) for relative_path in relative_paths)
 
 
 def _target_override(env_var: str, default: str) -> str:
@@ -827,7 +809,6 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         alias=_safe_model_slug(_env_str("MARATHON_BACKEND_MODEL_ID", slug)),
         display_name=_env_str("MARATHON_MODEL_DISPLAY_NAME", slug),
         description=_env_str("MARATHON_MODEL_DESCRIPTION", "Custom GGUF model served by llama.cpp."),
-        launcher=str(root / "scripts/launchers/server_custom.sh"),
         model_paths=(str(Path(model_path).expanduser()),),
         target=_target_override("MARATHON_MODEL_TARGET", f"http://127.0.0.1:{port}"),
         context_window=context_window,
@@ -837,7 +818,6 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
             "MARATHON_MODEL_PARALLEL_TOOL_CALLS", False
         ),
         supports_slots=_env_bool("MARATHON_BACKEND_SLOT_API", True),
-        supervised=_env_bool("MARATHON_MODEL_SUPERVISED", False),
         temperature=temperature,
         default_reasoning_level=default_reasoning_level,
         supported_reasoning_levels=supported_reasoning_levels,
@@ -860,7 +840,6 @@ def _external_model_profiles() -> dict[str, ModelProfile]:
             alias=configured.model,
             display_name=configured.display_name,
             description=configured.description,
-            launcher="",
             model_paths=(),
             target=_external_target(configured.base_url),
             context_window=configured.context,
@@ -870,7 +849,6 @@ def _external_model_profiles() -> dict[str, ModelProfile]:
                 configured.supports_parallel_tool_calls
             ),
             supports_slots=False,
-            supervised=True,
             temperature=configured.temperature,
             input_modalities=configured.input_modalities,
             external=True,
@@ -882,119 +860,7 @@ def _external_model_profiles() -> dict[str, ModelProfile]:
 
 def _profiles() -> dict[str, ModelProfile]:
     root = _repo_root()
-    profiles = {
-        "qwen3.6-27b-q4-128k": ModelProfile(
-            slug="qwen3.6-27b-q4-128k",
-            alias="qwen3.6-27b-q4-128k",
-            display_name="Qwen3.6 27B Q4 128K",
-            description="Long-context local Qwen3.6 27B Q4 profile",
-            launcher=str(root / "scripts/launchers/server_27b_128k.sh"),
-            model_paths=_model_candidates(
-                "QWEN36_27B_GGUF",
-                (
-                    "Qwen3.6-27B-GGUF/qwen3.6-27b-q4_k_m.gguf",
-                    "Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf",
-                ),
-            ),
-            target=_target_override("MARATHON_QWEN36_27B_128K_TARGET", "http://127.0.0.1:18091"),
-            context_window=131072,
-            auto_compact_token_limit=115000,
-            truncation_limit=110000,
-        ),
-        "qwen3.6-27b-q4-128k-single": ModelProfile(
-            slug="qwen3.6-27b-q4-128k-single",
-            alias="qwen3.6-27b-q4-128k-single",
-            display_name="Qwen3.6 27B Q4 128K Single GPU",
-            description="Single-GPU long-context local Qwen3.6 27B Q4 profile",
-            launcher=str(root / "scripts/launchers/server_27b_128k_single_gpu.sh"),
-            model_paths=_model_candidates(
-                "QWEN36_27B_GGUF",
-                (
-                    "Qwen3.6-27B-GGUF/qwen3.6-27b-q4_k_m.gguf",
-                    "Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf",
-                ),
-            ),
-            target=_target_override(
-                "MARATHON_QWEN36_27B_128K_SINGLE_TARGET",
-                "http://127.0.0.1:18094",
-            ),
-            context_window=131072,
-            auto_compact_token_limit=115000,
-            truncation_limit=110000,
-        ),
-        "qwen3.6-27b-q4": ModelProfile(
-            slug="qwen3.6-27b-q4",
-            alias="qwen3.6-27b-q4",
-            display_name="Qwen3.6 27B Q4 32K",
-            description="Fast local Qwen3.6 27B Q4 profile",
-            launcher=str(root / "scripts/launchers/server_27b_fast.sh"),
-            model_paths=_model_candidates(
-                "QWEN36_27B_GGUF",
-                (
-                    "Qwen3.6-27B-GGUF/qwen3.6-27b-q4_k_m.gguf",
-                    "Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf",
-                ),
-            ),
-            target=_target_override("MARATHON_QWEN36_27B_FAST_TARGET", "http://127.0.0.1:18090"),
-            context_window=32768,
-            auto_compact_token_limit=28000,
-            truncation_limit=26000,
-        ),
-        "qwen3.6-35b-a3b": ModelProfile(
-            slug="qwen3.6-35b-a3b",
-            alias="qwen3.6-35b-a3b",
-            display_name="Qwen3.6 35B A3B 128K",
-            description="Long-context single-GPU specialist local Qwen3.6 35B A3B profile",
-            launcher=str(root / "scripts/launchers/server_35b_a3b.sh"),
-            model_paths=_model_candidates(
-                "QWEN36_35B_A3B_GGUF",
-                (
-                    "Qwen3.6-35B-A3B-GGUF/qwen3.6-35b-a3b-q4_k_m.gguf",
-                    "Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf",
-                ),
-            ),
-            target=_target_override("MARATHON_QWEN36_35B_A3B_TARGET", "http://127.0.0.1:18092"),
-            context_window=131072,
-            auto_compact_token_limit=115000,
-            truncation_limit=110000,
-        ),
-        "qwopus3.6-35b-a3b-v1": ModelProfile(
-            slug="qwopus3.6-35b-a3b-v1",
-            alias="qwopus3.6-35b-a3b-v1",
-            display_name="Qwopus3.6 35B A3B v1",
-            description="Qwopus3.6 35B A3B v1 GGUF profile served by llama.cpp.",
-            launcher=str(root / "scripts/launchers/server_35b_a3b.sh"),
-            model_paths=_model_candidates(
-                "QWOPUS36_35B_A3B_GGUF",
-                (
-                    "Qwopus3.6-35B-A3B-v1-GGUF/Qwopus3.6-35B-A3B-v1-Q4_K_M.gguf",
-                    "Qwopus3.6-35B-A3B-v1-GGUF/Qwopus3.6-35B-A3B-v1-IQ4_XS.gguf",
-                ),
-            ),
-            target=_target_override("MARATHON_QWOPUS36_35B_A3B_TARGET", "http://127.0.0.1:18096"),
-            context_window=131072,
-            auto_compact_token_limit=115000,
-            truncation_limit=110000,
-        ),
-        "gemma4-26b-a4b-it-128k": ModelProfile(
-            slug="gemma4-26b-a4b-it-128k",
-            alias="gemma4-26b-a4b-it-128k",
-            display_name="Gemma 4 26B A4B IT 128K",
-            description="Single-GPU local Gemma 4 26B A4B instruction profile served by llama.cpp.",
-            launcher=str(root / "scripts/launchers/server_gemma4_26b_a4b.sh"),
-            model_paths=_model_candidates(
-                "GEMMA4_26B_A4B_GGUF",
-                (
-                    "gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf",
-                    "gemma-4-26b-a4b-it-GGUF/gemma-4-26B-A4B-it-Q4_K_M.gguf",
-                ),
-            ),
-            target=_target_override("MARATHON_GEMMA4_26B_A4B_TARGET", "http://127.0.0.1:18097"),
-            context_window=131072,
-            auto_compact_token_limit=115000,
-            truncation_limit=110000,
-        ),
-    }
+    profiles: dict[str, ModelProfile] = {}
     custom_profile = _custom_model_profile(root)
     if custom_profile is not None:
         profiles[custom_profile.slug] = custom_profile
@@ -1010,9 +876,7 @@ def _profiles() -> dict[str, ModelProfile]:
 def _available_profiles() -> dict[str, ModelProfile]:
     available: dict[str, ModelProfile] = {}
     for slug, profile in _profiles().items():
-        if profile.external or (
-            Path(profile.launcher).exists() and profile.resolved_model_path()
-        ):
+        if profile.external or profile.resolved_model_path():
             available[slug] = profile
     return available
 
@@ -1146,7 +1010,7 @@ def _item_roles(items: list[Any]) -> list[str]:
     return roles
 
 
-def _common_prefix_items(previous: list[Any], current: list[Any]) -> int:
+def _common_prefix_items(previous: tuple[str, ...], current: tuple[str, ...]) -> int:
     count = 0
     for prev_item, curr_item in zip(previous, current):
         if prev_item != curr_item:
@@ -1155,22 +1019,66 @@ def _common_prefix_items(previous: list[Any], current: list[Any]) -> int:
     return count
 
 
-def _input_relation(previous: list[Any] | None, current: list[Any]) -> dict[str, Any]:
+def _input_fingerprint_summary(
+    items: list[Any],
+    max_fingerprints: int,
+) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    fingerprints: list[str] = []
+    encoded_bytes = 2
+    for index, item in enumerate(items):
+        encoded = _stable_json(item).encode("utf-8")
+        if index:
+            digest.update(b",")
+            encoded_bytes += 1
+        digest.update(encoded)
+        encoded_bytes += len(encoded)
+        if index < max_fingerprints:
+            fingerprints.append(hashlib.sha256(encoded).hexdigest())
+    digest.update(b"]")
+    return {
+        "count": len(items),
+        "bytes": encoded_bytes,
+        "hash": digest.hexdigest(),
+        "fingerprints": tuple(fingerprints),
+    }
+
+
+def _input_relation(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> dict[str, Any]:
     if previous is None:
         return {
             "relation": "none",
             "common_prefix_items": 0,
             "previous_input_items": None,
-            "current_input_items": len(current),
+            "current_input_items": current["count"],
+            "comparison_capped": current["count"] > len(current["fingerprints"]),
         }
 
-    prefix = _common_prefix_items(previous, current)
-    if current == previous:
+    previous_count = int(previous["count"])
+    current_count = int(current["count"])
+    previous_fingerprints = tuple(previous["fingerprints"])
+    current_fingerprints = tuple(current["fingerprints"])
+    prefix = _common_prefix_items(previous_fingerprints, current_fingerprints)
+    comparison_capped = (
+        min(previous_count, current_count)
+        > min(len(previous_fingerprints), len(current_fingerprints))
+    )
+    if not comparison_capped and current_count == previous_count and (
+        current_fingerprints == previous_fingerprints
+    ):
         relation = "equal"
-    elif prefix == len(previous) and len(current) > len(previous):
+    elif not comparison_capped and prefix == previous_count and current_count > previous_count:
         relation = "extends_prev"
-    elif prefix == len(current) and len(previous) > len(current):
+    elif not comparison_capped and prefix == current_count and previous_count > current_count:
         relation = "rewinds_prev"
+    elif comparison_capped and prefix == min(
+        len(previous_fingerprints), len(current_fingerprints)
+    ):
+        relation = "shares_capped_prefix"
     elif prefix > 0:
         relation = "branches_after_prefix"
     else:
@@ -1179,8 +1087,9 @@ def _input_relation(previous: list[Any] | None, current: list[Any]) -> dict[str,
     return {
         "relation": relation,
         "common_prefix_items": prefix,
-        "previous_input_items": len(previous),
-        "current_input_items": len(current),
+        "previous_input_items": previous_count,
+        "current_input_items": current_count,
+        "comparison_capped": comparison_capped,
     }
 
 
@@ -1685,6 +1594,7 @@ def _proxy_request_headers(
 class RouterState:
     def __init__(self, default_model: str, state_dir: Path, log_dir: Path, debug: bool = False):
         self.lock = threading.Lock()
+        self.model_lock = threading.Lock()
         self.backend_lock = asyncio.Lock()
         self.lineage_lock = asyncio.Lock()
         self.debug = debug
@@ -1749,7 +1659,14 @@ class RouterState:
         self._trace_seq = 0
         self._response_id_seq = 0
         self._last_trace_by_model: dict[str, dict[str, Any]] = {}
-        self.lineage: dict[str, ResponseSnapshot] = {}
+        self.lineage_max_entries_per_model = max(
+            1,
+            _env_int(
+                "MARATHON_LINEAGE_MAX_ENTRIES_PER_MODEL",
+                DEFAULT_LINEAGE_MAX_ENTRIES_PER_MODEL,
+            ),
+        )
+        self.lineage: OrderedDict[str, ResponseSnapshot] = OrderedDict()
         self.last_response_by_model: dict[str, str] = {}
         self.live_slot_by_model: dict[str, str] = {}
         self.live_prompt_cache_key_by_model: dict[str, str] = {}
@@ -1788,6 +1705,72 @@ class RouterState:
         if profiles:
             self.available_profiles = profiles
         return self.available_profiles
+
+    def _materialize_conversation(
+        self,
+        snapshot: ResponseSnapshot,
+    ) -> list[dict[str, Any]]:
+        chain: list[ResponseSnapshot] = []
+        seen: set[str] = set()
+        current: ResponseSnapshot | None = snapshot
+        while current is not None:
+            if current.response_id in seen:
+                raise RuntimeError(
+                    f"response lineage cycle detected at {current.response_id}"
+                )
+            seen.add(current.response_id)
+            chain.append(current)
+            if current.parent_response_id is None:
+                break
+            current = self.lineage.get(current.parent_response_id)
+            if current is None:
+                raise RuntimeError(
+                    f"response lineage parent was pruned incorrectly: "
+                    f"{chain[-1].parent_response_id}"
+                )
+
+        items: list[dict[str, Any]] = []
+        for part in reversed(chain):
+            items.extend(part.input_items)
+            items.extend(part.output_items)
+        return items
+
+    def _store_response_snapshot(self, snapshot: ResponseSnapshot) -> None:
+        if not isinstance(self.lineage, OrderedDict):
+            self.lineage = OrderedDict(self.lineage)
+        self.lineage[snapshot.response_id] = snapshot
+        self.lineage.move_to_end(snapshot.response_id)
+        max_entries = max(
+            1,
+            int(
+                getattr(
+                    self,
+                    "lineage_max_entries_per_model",
+                    DEFAULT_LINEAGE_MAX_ENTRIES_PER_MODEL,
+                )
+            ),
+        )
+        while (
+            sum(
+                item.profile_slug == snapshot.profile_slug
+                for item in self.lineage.values()
+            )
+            > max_entries
+        ):
+            evicted_id = next(
+                response_id
+                for response_id, item in self.lineage.items()
+                if item.profile_slug == snapshot.profile_slug
+            )
+            evicted = self.lineage[evicted_id]
+            prefix = self._materialize_conversation(evicted)
+            for child in self.lineage.values():
+                if child.parent_response_id == evicted_id:
+                    child.input_items = prefix + child.input_items
+                    child.parent_response_id = None
+            self.lineage.pop(evicted_id)
+            if self.last_response_by_model.get(snapshot.profile_slug) == evicted_id:
+                self.last_response_by_model.pop(snapshot.profile_slug, None)
 
     async def open(self) -> None:
         self.http_client = ClientSession(timeout=ClientTimeout(total=3600))
@@ -1952,6 +1935,8 @@ class RouterState:
         path: str,
         method: str,
         lineage: dict[str, Any] | None = None,
+        raw_body_bytes: int | None = None,
+        normalized_body_bytes: int | None = None,
     ) -> None:
         telemetry_started = time.perf_counter()
         raw_input = raw_request.get("input")
@@ -1971,19 +1956,25 @@ class RouterState:
         instructions = normalized_request.get("instructions")
         instructions_text = instructions if isinstance(instructions, str) else ""
         tools_json = _stable_json(normalized_tools_list)
-        input_json = _stable_json(normalized_input_items)
-        normalized_json = _stable_json(normalized_request)
+        input_summary = _input_fingerprint_summary(
+            normalized_input_items,
+            max(
+                1,
+                _env_int(
+                    "MARATHON_TRACE_INPUT_FINGERPRINTS",
+                    DEFAULT_TRACE_INPUT_FINGERPRINTS,
+                ),
+            ),
+        )
 
         with self.lock:
             self._trace_seq += 1
             previous = self._last_trace_by_model.get(profile.slug)
             instructions_hash = _sha256_text(instructions_text)
             tools_hash = _sha256_text(tools_json)
-            input_hash = _sha256_text(input_json)
-            normalized_hash = _sha256_text(normalized_json)
             input_relation = _input_relation(
-                previous.get("input_items") if previous is not None else None,
-                normalized_input_items,
+                previous.get("input_summary") if previous is not None else None,
+                input_summary,
             )
             entry = {
                 "trace_id": self._trace_seq,
@@ -1996,19 +1987,18 @@ class RouterState:
                 "prompt_cache_key": normalized_request.get("prompt_cache_key"),
                 "previous_response_id": normalized_request.get("previous_response_id"),
                 "raw": {
-                    "body_bytes": len(_stable_json(raw_request).encode("utf-8")),
+                    "body_bytes": raw_body_bytes,
                     "input_items": len(raw_input_items),
                     "input_roles": _item_roles(raw_input_items),
                     "tool_count": len(raw_tools_list),
                     "developer_or_system_items": lifted_roles,
                 },
                 "normalized": {
-                    "body_bytes": len(normalized_json.encode("utf-8")),
-                    "body_hash": normalized_hash,
+                    "body_bytes": normalized_body_bytes,
                     "input_items": len(normalized_input_items),
                     "input_roles": _item_roles(normalized_input_items),
-                    "input_bytes": len(input_json.encode("utf-8")),
-                    "input_hash": input_hash,
+                    "input_bytes": input_summary["bytes"],
+                    "input_hash": input_summary["hash"],
                     "instructions_bytes": len(instructions_text.encode("utf-8")),
                     "instructions_hash": instructions_hash,
                     "tool_count": len(normalized_tools_list),
@@ -2023,18 +2013,15 @@ class RouterState:
                     "same_scaffold": previous is not None
                     and previous.get("instructions_hash") == instructions_hash
                     and previous.get("tools_hash") == tools_hash,
-                    "same_normalized_body": previous is not None
-                    and previous.get("body_hash") == normalized_hash,
                 },
             }
             if lineage is not None:
                 entry["lineage"] = lineage
             entry["telemetry_prepare_ms"] = (time.perf_counter() - telemetry_started) * 1000.0
             self._last_trace_by_model[profile.slug] = {
-                "input_items": copy.deepcopy(normalized_input_items),
+                "input_summary": input_summary,
                 "instructions_hash": instructions_hash,
                 "tools_hash": tools_hash,
-                "body_hash": normalized_hash,
             }
             self.telemetry.emit("router.request.normalized", entry)
             if self.debug:
@@ -2056,182 +2043,25 @@ class RouterState:
 
     def ensure_model(self, requested_model: str | None) -> ModelProfile:
         profile = self.resolve_model(requested_model)
-        with self.lock:
-            if self.current_model != profile.slug:
-                self._stop_other_backends(profile)
+        with self.model_lock:
             if not self._profile_ready(profile):
                 if profile.external:
                     raise RuntimeError(
                         f"external backend for {profile.slug} is unavailable at "
                         f"{profile.target}"
                     )
-                if profile.supervised:
-                    raise RuntimeError(
-                        f"Marathon's supervised backend for {profile.slug} is unavailable"
-                    )
-                self._stop_profile(profile)
-                self.live_slot_by_model.pop(profile.slug, None)
-                self._start_profile(profile)
-                self._wait_for_profile(profile)
+                raise RuntimeError(
+                    f"Marathon's supervised backend for {profile.slug} is unavailable"
+                )
+        with self.lock:
             self.current_model = profile.slug
         return profile
-
-    def _profile_pid_file(self, profile: ModelProfile) -> Path:
-        return self.state_dir / f"{profile.slug}.pid"
-
-    def _profile_log_file(self, profile: ModelProfile) -> Path:
-        return self.log_dir / f"{profile.slug}.log"
-
-    def _port_owner_pid(self, port: int) -> int | None:
-        proc = subprocess.run(
-            ["bash", "-lc", f"ss -ltnp '( sport = :{port} )' 2>/dev/null | sed -n 's/.*pid=\\\\([0-9]\\\\+\\\\).*/\\\\1/p' | head -n1"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-        )
-        text = proc.stdout.strip()
-        return int(text) if text.isdigit() else None
-
-    def _pid_cmdline(self, pid: int) -> str:
-        proc = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "cmd="],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-        )
-        return proc.stdout.strip()
-
-    def _pid_args(self, pid: int) -> tuple[str, ...]:
-        try:
-            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-        except OSError:
-            return ()
-        return tuple(
-            item.decode("utf-8", errors="replace")
-            for item in raw.split(b"\0")
-            if item
-        )
-
-    def _process_start_ticks(self, pid: int) -> str | None:
-        try:
-            fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        except OSError:
-            return None
-        return fields[21] if len(fields) > 21 else None
-
-    def _read_profile_pid(self, profile: ModelProfile) -> tuple[int, str | None] | None:
-        try:
-            fields = self._profile_pid_file(profile).read_text(encoding="utf-8").split()
-            pid = int(fields[0])
-        except (OSError, ValueError, IndexError):
-            return None
-        return pid, fields[1] if len(fields) > 1 else None
-
-    def _owns_profile_pid(self, profile: ModelProfile, pid: int, started: str | None) -> bool:
-        if started is not None and self._process_start_ticks(pid) != started:
-            return False
-        args = self._pid_args(pid)
-        if not args or "llama-server" not in Path(args[0]).name:
-            return False
-        return any(
-            args[index] == "--port" and args[index + 1] == str(profile.port)
-            for index in range(len(args) - 1)
-        )
 
     def _profile_ready(self, profile: ModelProfile) -> bool:
         return _json_model_matches(
             profile.target,
             profile.alias,
             headers=profile.upstream_headers(),
-        )
-
-    def _stop_other_backends(self, keep_profile: ModelProfile) -> None:
-        if keep_profile.external:
-            return
-        for slug, profile in self.available_profiles.items():
-            if slug == keep_profile.slug:
-                continue
-            self._stop_profile(profile)
-
-    def _stop_profile(self, profile: ModelProfile) -> None:
-        if profile.supervised:
-            return
-        record = self._read_profile_pid(profile)
-        port_pid = self._port_owner_pid(profile.port)
-        if record is None:
-            self.live_slot_by_model.pop(profile.slug, None)
-            self._profile_pid_file(profile).unlink(missing_ok=True)
-            if port_pid is not None:
-                cmd = self._pid_cmdline(port_pid)
-                raise RuntimeError(
-                    f"port {profile.port} is occupied by a process Marathon does not own: {cmd}"
-                )
-            return
-        pid, started = record
-        if not self._owns_profile_pid(profile, pid, started):
-            self._profile_pid_file(profile).unlink(missing_ok=True)
-            if port_pid is not None:
-                foreign = self._pid_cmdline(port_pid)
-                raise RuntimeError(
-                    f"port {profile.port} is occupied by a process Marathon does not own: {foreign}"
-                )
-            return
-        if port_pid is not None and port_pid != pid:
-            foreign = self._pid_cmdline(port_pid)
-            raise RuntimeError(
-                f"port {profile.port} is occupied by a process Marathon does not own: {foreign}"
-            )
-        owned_started = started or self._process_start_ticks(pid)
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        for _ in range(10):
-            time.sleep(1)
-            if self._process_start_ticks(pid) != owned_started:
-                self.live_slot_by_model.pop(profile.slug, None)
-                self._profile_pid_file(profile).unlink(missing_ok=True)
-                return
-        if self._process_start_ticks(pid) == owned_started:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        self.live_slot_by_model.pop(profile.slug, None)
-        self._profile_pid_file(profile).unlink(missing_ok=True)
-
-    def _start_profile(self, profile: ModelProfile) -> None:
-        env = os.environ.copy()
-        env["HOST"] = "127.0.0.1"
-        env["PORT"] = str(profile.port)
-        env["MODEL_ALIAS"] = profile.alias
-        model_path = profile.resolved_model_path()
-        if model_path:
-            env["MODEL_PATH"] = model_path
-        log_file = self._profile_log_file(profile)
-        with log_file.open("ab") as handle:
-            proc = subprocess.Popen(
-                [profile.launcher],
-                cwd=str(_repo_root()),
-                env=env,
-                stdout=handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        started = self._process_start_ticks(proc.pid) or ""
-        self._profile_pid_file(profile).write_text(
-            f"{proc.pid} {started}\n", encoding="utf-8"
-        )
-
-    def _wait_for_profile(self, profile: ModelProfile) -> None:
-        for _ in range(240):
-            if self._profile_ready(profile):
-                return
-            time.sleep(1)
-        raise RuntimeError(
-            f"backend for {profile.slug} did not become ready; see {self._profile_log_file(profile)}"
         )
 
     async def _request_json(
@@ -2318,7 +2148,7 @@ class RouterState:
         if self.http_client is None:
             raise RuntimeError("router HTTP client session is not open")
 
-        request = copy.deepcopy(payload)
+        request = dict(payload)
         request["stream"] = True
         url = f"{profile.target.rstrip('/')}/v1/responses"
         output_items: list[dict[str, Any]] = []
@@ -2554,9 +2384,9 @@ class RouterState:
 
         backend_response = completed_response or {}
         if output_items:
-            backend_response["output"] = copy.deepcopy(output_items)
+            backend_response["output"] = list(output_items)
         elif not isinstance(backend_response.get("output"), list):
-            backend_response["output"] = copy.deepcopy(output_items)
+            backend_response["output"] = []
         if "usage" not in backend_response:
             backend_response["usage"] = copy.deepcopy(DEFAULT_USAGE)
         return backend_response
@@ -2906,12 +2736,10 @@ class RouterState:
 
     async def backend_health(self, profile: ModelProfile | None = None) -> dict[str, Any]:
         target_profile = profile or self.resolve_model(self.current_model or self.default_model)
-        if target_profile.supervised:
-            return {
-                "status": "ok" if self._profile_ready(target_profile) else "error",
-                "supervised": True,
-            }
-        return await self._request_json(target_profile, "GET", "/health")
+        return {
+            "status": "ok" if self._profile_ready(target_profile) else "error",
+            "supervised": True,
+        }
 
     def mint_response_id(self, kind: str = "resp") -> str:
         """Generate a fresh, monotonic response id without touching the trace counter.
@@ -3460,8 +3288,8 @@ class RouterState:
         preset_response_id: str | None = None,
         event_sink: StreamEventSink | None = None,
     ) -> dict[str, Any]:
-        raw_snapshot = copy.deepcopy(payload)
-        request = copy.deepcopy(payload)
+        raw_snapshot = payload
+        request = dict(payload)
         request.pop("type", None)
 
         requested_model = str(request.get("model") or "").strip() or None
@@ -3471,9 +3299,16 @@ class RouterState:
             raise RuntimeError("previous_response_id must be a string when provided")
 
         parent_snapshot: ResponseSnapshot | None = None
+        parent_conversation_items: list[dict[str, Any]] = []
         if previous_response_id:
             async with self.lineage_lock:
                 parent_snapshot = self.lineage.get(previous_response_id)
+                if parent_snapshot is not None:
+                    parent_conversation_items = self._materialize_conversation(
+                        parent_snapshot
+                    )
+                    if isinstance(self.lineage, OrderedDict):
+                        self.lineage.move_to_end(previous_response_id)
             if parent_snapshot is None:
                 raise RuntimeError(f"unknown previous_response_id: {previous_response_id}")
             if requested_model and requested_model != parent_snapshot.profile_slug:
@@ -3557,9 +3392,9 @@ class RouterState:
         relation = "root"
         full_input: list[dict[str, Any]]
         if parent_snapshot is None:
-            full_input = copy.deepcopy(delta_input)
+            full_input = list(delta_input)
         else:
-            full_input = copy.deepcopy(parent_snapshot.conversation_items) + copy.deepcopy(delta_input)
+            full_input = parent_conversation_items + list(delta_input)
             relation = "continue" if self.last_response_by_model.get(profile.slug) == previous_response_id else "branch"
         scaffold_matches = (
             parent_snapshot is not None
@@ -3575,9 +3410,9 @@ class RouterState:
             and generate is not False
         )
 
-        forward_request = copy.deepcopy(request)
+        forward_request = dict(request)
         forward_request.pop("previous_response_id", None)
-        forward_request["input"] = copy.deepcopy(delta_input if delta_only_restore else full_input)
+        forward_request["input"] = delta_input if delta_only_restore else full_input
         if delta_only_restore:
             forward_request.pop("instructions", None)
             forward_request["tools"] = []
@@ -3628,17 +3463,27 @@ class RouterState:
         if generate is False:
             response_id = preset_response_id or self.mint_response_id("warm")
             async with self.lineage_lock:
-                self.lineage[response_id] = ResponseSnapshot(
-                    response_id=response_id,
-                    profile_slug=profile.slug,
-                    conversation_items=copy.deepcopy(full_input),
-                    snapshot_filename="",
-                    instructions_text=instructions_text,
-                    base_instructions_hash=base_instructions_hash,
-                    instructions_hash=instructions_hash,
-                    tools_hash=tools_hash,
-                    prompt_cache_key=prompt_cache_key,
-                    created_at=time.time(),
+                self._store_response_snapshot(
+                    ResponseSnapshot(
+                        response_id=response_id,
+                        profile_slug=profile.slug,
+                        parent_response_id=previous_response_id,
+                        input_items=list(delta_input),
+                        output_items=[],
+                        conversation_item_count=(
+                            parent_snapshot.conversation_item_count
+                            if parent_snapshot is not None
+                            else 0
+                        )
+                        + len(delta_input),
+                        snapshot_filename="",
+                        instructions_text=instructions_text,
+                        base_instructions_hash=base_instructions_hash,
+                        instructions_hash=instructions_hash,
+                        tools_hash=tools_hash,
+                        prompt_cache_key=prompt_cache_key,
+                        created_at=time.time(),
+                    )
                 )
                 self.last_response_by_model[profile.slug] = response_id
 
@@ -3849,23 +3694,34 @@ class RouterState:
 
         usage_payload = self.usage_payload(backend_response.get("usage"))
 
-        conversation_items = full_input + [
+        lineage_output_items = [
             _backend_lineage_item(item)
             for item in output_items
             if isinstance(item, dict)
         ]
         async with self.lineage_lock:
-            self.lineage[response_id] = ResponseSnapshot(
-                response_id=response_id,
-                profile_slug=profile.slug,
-                conversation_items=conversation_items,
-                snapshot_filename=snapshot_filename if snapshot_saved else "",
-                instructions_text=instructions_text,
-                base_instructions_hash=base_instructions_hash,
-                instructions_hash=instructions_hash,
-                tools_hash=tools_hash,
-                prompt_cache_key=prompt_cache_key,
-                created_at=time.time(),
+            self._store_response_snapshot(
+                ResponseSnapshot(
+                    response_id=response_id,
+                    profile_slug=profile.slug,
+                    parent_response_id=previous_response_id,
+                    input_items=list(delta_input),
+                    output_items=lineage_output_items,
+                    conversation_item_count=(
+                        parent_snapshot.conversation_item_count
+                        if parent_snapshot is not None
+                        else 0
+                    )
+                    + len(delta_input)
+                    + len(lineage_output_items),
+                    snapshot_filename=snapshot_filename if snapshot_saved else "",
+                    instructions_text=instructions_text,
+                    base_instructions_hash=base_instructions_hash,
+                    instructions_hash=instructions_hash,
+                    tools_hash=tools_hash,
+                    prompt_cache_key=prompt_cache_key,
+                    created_at=time.time(),
+                )
             )
             self.last_response_by_model[profile.slug] = response_id
 
@@ -3937,14 +3793,17 @@ class RouterState:
                 except Exception:
                     pass
 
-        codex_output_items = (
-            externalize_for_codex(copy.deepcopy(output_items))
+        presented_items = (
+            externalize_for_codex(output_items)
             if web_search_enabled
-            else copy.deepcopy(output_items)
+            else output_items
         )
-        for item in codex_output_items:
-            if isinstance(item, dict):
+        codex_output_items: list[dict[str, Any]] = []
+        for item in presented_items:
+            if _BACKEND_ARGUMENTS_KEY in item:
+                item = dict(item)
                 item.pop(_BACKEND_ARGUMENTS_KEY, None)
+            codex_output_items.append(item)
 
         return {
             "response_id": response_id,
@@ -4047,7 +3906,8 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
 
     body = raw_body
     if data is not None:
-        raw_snapshot = copy.deepcopy(data)
+        raw_snapshot = data
+        data = dict(data)
         data["model"] = profile.alias
         if profile.temperature is not None:
             data["temperature"] = profile.temperature
@@ -4107,6 +3967,8 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
                     },
                     level="warning",
                 )
+        body = json.dumps(data, separators=(",", ":")).encode()
+        if path == "/v1/responses":
             state.trace_request(
                 requested_model=requested_model,
                 profile=profile,
@@ -4114,8 +3976,9 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
                 normalized_request=data,
                 path=path,
                 method=request.method,
+                raw_body_bytes=len(raw_body),
+                normalized_body_bytes=len(body),
             )
-        body = json.dumps(data, separators=(",", ":")).encode()
 
     if state.http_client is None:
         return web.json_response({"error": {"message": "router HTTP client session is not open"}}, status=500)
@@ -4371,7 +4234,8 @@ def main() -> None:
     parser.add_argument(
         "--default-model",
         default=os.getenv("MARATHON_DEFAULT_MODEL")
-        or "qwen3.6-27b-q4-128k-single",
+        or os.getenv("MARATHON_MODEL_SLUG")
+        or "custom",
     )
     parser.add_argument("--state-dir", default=str(_repo_root() / ".marathon" / "state"))
     parser.add_argument("--log-dir", default=str(_repo_root() / "logs"))

@@ -18,3 +18,6 @@ prompt-toolkit>=3.0,<4.0
 
 # Resumable, revision-pinned GGUF downloads from Hugging Face.
 huggingface-hub>=0.34,<2.0
+
+# Official llama.cpp GGUF metadata reader for architecture and context discovery.
+gguf>=0.19,<1.0

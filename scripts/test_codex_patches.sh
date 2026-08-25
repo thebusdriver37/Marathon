@@ -34,18 +34,18 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
 (
   cd "$BUILD_CODEX_DIR/codex-rs"
   export RUST_MIN_STACK="${RUST_MIN_STACK:-8388608}"
-  cargo test -p codex-utils-cli
-  cargo test -p codex-protocol \
+  just test -p codex-utils-cli
+  just test -p codex-protocol \
     token_usage_percentage_uses_the_full_runtime_window
-  cargo test -p codex-tui \
+  just test -p codex-tui \
     context_percentage_uses_the_full_runtime_window
-  cargo test -p codex-tui \
+  just test -p codex-tui \
     status_line_context_tokens_renders_live_context_count
-  cargo test -p codex-tui turn_throughput
-  cargo test -p codex-tui \
+  just test -p codex-tui turn_throughput
+  just test -p codex-tui \
     status_line_tokens_per_second_renders_completed_turn_rate_snapshot
-  cargo test -p codex-tui distinguishes_unset_from_disabled
-  cargo test -p codex-tui ignores_sqlite_candidate_from_another_provider
+  just test -p codex-tui distinguishes_unset_from_disabled
+  just test -p codex-tui ignores_sqlite_candidate_from_another_provider
 )
 
 PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" \

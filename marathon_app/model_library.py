@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -73,6 +74,89 @@ class HuggingFaceGguf:
     mmproj_filename: str | None = None
     mmproj_size_bytes: int | None = None
     mmproj_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class GgufMetadata:
+    """Small, launch-relevant subset of a model's embedded GGUF metadata."""
+
+    architecture: str | None = None
+    name: str | None = None
+    context_length: int | None = None
+
+
+def _gguf_field_value(reader: object, key: str) -> object | None:
+    fields = getattr(reader, "fields", {})
+    field = fields.get(key) if isinstance(fields, dict) else None
+    if field is None:
+        return None
+    return field.contents()
+
+
+@functools.lru_cache(maxsize=256)
+def _read_gguf_metadata_cached(
+    resolved_path: str,
+    mtime_ns: int,
+    size_bytes: int,
+) -> GgufMetadata:
+    del mtime_ns, size_bytes
+    try:
+        from gguf import GGUFReader
+
+        reader = GGUFReader(resolved_path)
+        architecture_raw = _gguf_field_value(reader, "general.architecture")
+        architecture = (
+            str(architecture_raw).strip() if architecture_raw is not None else None
+        )
+        name = None
+        for key in ("general.name", "general.basename"):
+            value = _gguf_field_value(reader, key)
+            if value is not None and str(value).strip():
+                name = str(value).strip()
+                break
+        context_raw = (
+            _gguf_field_value(reader, f"{architecture}.context_length")
+            if architecture
+            else None
+        )
+        context_length = (
+            int(context_raw)
+            if isinstance(context_raw, int) and context_raw > 0
+            else None
+        )
+        return GgufMetadata(architecture, name, context_length)
+    except (
+        EOFError,
+        ImportError,
+        IndexError,
+        KeyError,
+        OSError,
+        OverflowError,
+        TypeError,
+        ValueError,
+    ):
+        return GgufMetadata()
+
+
+def read_gguf_metadata(
+    path: Path,
+    *,
+    mtime_ns: int | None = None,
+    size_bytes: int | None = None,
+) -> GgufMetadata:
+    """Read embedded model identity without loading tensor data into memory."""
+
+    resolved = path.expanduser().resolve(strict=False)
+    if mtime_ns is None or size_bytes is None:
+        try:
+            stat = resolved.stat()
+        except OSError:
+            return GgufMetadata()
+        mtime_ns = stat.st_mtime_ns
+        size_bytes = stat.st_size
+    return _read_gguf_metadata_cached(
+        str(resolved), mtime_ns, size_bytes
+    )
 
 
 def _config_dir() -> Path:

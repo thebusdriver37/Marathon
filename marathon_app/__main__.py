@@ -252,10 +252,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="marathon", description="One-command local AI runtime")
     parser.add_argument("--version", action="version", version=f"Marathon {__version__}")
     parser.add_argument(
-        "command", nargs="?", choices=("dashboard", "codex", "hermes", "direct", "remote", "remote-host", "tune", "setup", "models", "status", "stop", "report", "compare", "resume", "fork"),
+        "command",
+        nargs="?",
+        choices=(
+            "dashboard",
+            "codex",
+            "exec",
+            "hermes",
+            "direct",
+            "remote",
+            "remote-host",
+            "tune",
+            "setup",
+            "models",
+            "status",
+            "stop",
+            "report",
+            "compare",
+            "resume",
+            "fork",
+        ),
         default="codex",
     )
-    parser.add_argument("targets", nargs="*")
+    parser.add_argument("targets", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -286,8 +305,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_setup_dashboard()
     if args.command in {"resume", "fork"}:
         return run_codex_default([args.command, *args.targets])
+    if args.command == "exec":
+        return run_codex_default(["exec", *args.targets])
     if args.command == "codex":
-        return run_codex_default()
+        return run_codex_default(args.targets)
     return run_dashboard(
         args.command if args.command in {"hermes", "direct"} else None
     )

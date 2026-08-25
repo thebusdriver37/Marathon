@@ -67,7 +67,7 @@ WEB_SEARCH_TOOL_DESCRIPTION = (
     "URL, and a short snippet. Use this whenever you need information you do "
     "not already know, current events, library changelogs, error messages, or "
     "anything else that might have changed since training. Pass a focused "
-    "natural-language query. Snippets are short — when you need the full text "
+    "natural-language query. Snippets are short; when you need the full text "
     "of a page (verbatim quotes, full article, code from a docs site), follow "
     "up with web_fetch on the chosen URL."
 )
@@ -75,7 +75,7 @@ WEB_SEARCH_TOOL_DESCRIPTION = (
 WEB_FETCH_TOOL_DESCRIPTION = (
     "Fetch a single URL and return its main content as clean Markdown. Use "
     "this after web_search when you need full page content (verbatim quotes, "
-    "long articles, complete docs sections). Do NOT use shell curl/wget — "
+    "long articles, complete docs sections). Do NOT use shell curl/wget; "
     "this tool handles encoding, redirects, content extraction, and length "
     "limits in one call. For pages that depend on browser-rendered JavaScript, "
     "use web_browse instead."
@@ -246,7 +246,7 @@ def web_browse_available() -> bool:
 def request_has_web_search_tool(tools: list[Any] | None) -> bool:
     """True iff the original Codex request included a web_search tool.
 
-    web_fetch is unconditionally paired with web_search — if the user enabled
+    web_fetch is unconditionally paired with web_search. If the user enabled
     web search, they want fetch as well. Keeping a single trigger keeps the
     contract simple.
     """

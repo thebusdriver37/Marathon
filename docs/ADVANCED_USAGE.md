@@ -10,8 +10,8 @@ The same lifecycle works in a local terminal and through an ordinary SSH shell.
 
 The normal `marathon` command starts the remembered model and opens Codex directly.
 The `marathon dashboard` command exposes model profiles, alternate frontends, warm-backend reuse, and Dyno tuning.
-
-Legacy `marathon backend ...` commands remain available for compatibility, but the normal runtime does not use their detached-process lifecycle.
+`marathon exec PROMPT` uses the same supervised lifecycle for headless and CI work, including starting the remembered model and cleaning it up afterward.
+`marathon codex -- CODEX_ARGS` forwards Codex flags without bypassing supervision.
 
 ## Prompt Prefix Cache
 
@@ -28,6 +28,11 @@ After a cold backend start, the first conversation restores an exact matching di
 The cache fingerprint includes the model, projector, backend binary and arguments, instructions, and tools, so incompatible changes build a new snapshot automatically.
 Marathon retains up to eight starter snapshots within a 16 GiB default limit.
 The optional `MARATHON_STARTER_CACHE_MAX_COUNT` and `MARATHON_STARTER_CACHE_MAX_BYTES` environment variables adjust those limits.
+
+Full conversation slot snapshots are separate from the starter cache and are disabled by default because a long-context snapshot can be very large.
+Enable exact resume and fork snapshots with `MARATHON_SLOT_SNAPSHOTS_ENABLED=1` or `slot_snapshots_enabled = true` under `[settings]` in `~/.config/marathon/catalog.toml`.
+The defaults retain up to 16 snapshots and 32 GiB total.
+Override those limits with `MARATHON_SLOT_SNAPSHOT_MAX_COUNT` and `MARATHON_SLOT_SNAPSHOT_MAX_BYTES` or their matching catalog settings.
 
 ## Model and Backend Paths
 
@@ -66,7 +71,9 @@ Set `MARATHON_LLAMACPP_DIR` or `MARATHON_LLAMACPP_BUILD_DIR` to override the sou
 The default Qwen 3.8 profile requests 262,144 tokens, automatic GPU layers, Q8 KV cache, and llama.cpp memory fitting.
 The exact four-GPU 256K profile remains available through the dashboard for validated machines.
 
-Unrecognized GGUF models use a conservative automatic 32K profile.
+Marathon reads the embedded GGUF name, architecture, and trained context from the first shard and caches that inspection by file identity.
+This lets renamed models match architecture families without repeatedly scanning unchanged files.
+Unrecognized GGUF models still use a conservative automatic 32K profile.
 Use the dashboard or add a catalog family when a model has known, tested requirements.
 
 ## Native Mac Client with Linux GPUs
@@ -202,8 +209,8 @@ Hermes continues to use its normal configuration, memory, skills, tools, and ses
 
 ## DeepSeek and Distributed Profiles
 
-The catalog retains specialized DeepSeek V4 and legacy four-GPU DwarfStar profiles.
-These are advanced compatibility paths and are not part of the default Qwen setup.
+The catalog retains specialized DeepSeek V4 profiles.
+These are advanced paths and are not part of the default Qwen setup.
 
 DeepSeek V4 profiles expect the `ds4-longctx` llama.cpp fork under:
 
@@ -214,7 +221,7 @@ DeepSeek V4 profiles expect the `ds4-longctx` llama.cpp fork under:
 The MTP profiles also require the matching MTP GGUF beside the main model or an explicit `DSV4_MTP_GGUF` path.
 Run `marathon doctor` to identify a missing fork, worker, or sidecar before starting the model.
 
-The legacy DwarfStar profile uses three workers and one coordinator across four GPUs.
+The DwarfStar safe profile uses three workers and one coordinator across four GPUs.
 `MARATHON_DS4_GPUS` overrides its default `0,1,2,3` mapping.
 
 ## Runtime Storage and Telemetry
@@ -282,7 +289,7 @@ Fetch blocks loopback and private-network targets unless `MARATHON_WEB_FETCH_ALL
 
 ## Updating Codex
 
-Run this command to fetch upstream Codex, preflight Marathon's patches, run regression tests, build a release binary, and install it atomically:
+Run this command to fetch the stable Codex tag recorded in `config/codex.ref`, preflight Marathon's patches, run regression tests, build a release binary, and install it atomically:
 
 ```bash
 marathon update-codex

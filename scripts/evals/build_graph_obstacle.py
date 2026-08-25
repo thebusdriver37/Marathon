@@ -319,7 +319,7 @@ Requirements:
 6. Use the built-in web tools to perform one focused search for the official Node.js node:test documentation, then fetch the best official nodejs.org page. Write WEB_NOTES.md with the official URL and two accurate practical facts. Do not use shell networking.
 7. Finish with the tests, git diff --check, and a concise summary. Do not commit.
 
-Expected behavior must come from tests, source, fixtures, and the [REQUIRED] rules—not from hardcoded fixture totals. The hidden evaluation changes inputs.
+Expected behavior must come from tests, source, fixtures, and the [REQUIRED] rules, not from hardcoded fixture totals. The hidden evaluation changes inputs.
 '''
     write(workspace / "TASK.md", task)
 

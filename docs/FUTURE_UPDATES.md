@@ -3,15 +3,17 @@
 This file records worthwhile follow-up work that is intentionally outside the
 current iteration. Items here are not active runtime behavior.
 
-## Automatic GGUF metadata inspection
+## Deeper GGUF launch planning
 
-Allow an uncataloged GGUF model to get a safe, architecture-aware Marathon and
-Dyno baseline without adding a hand-written family entry first.
+Marathon now reads and caches each GGUF's embedded name, architecture, and
+trained context before matching its catalog family.
+The remaining work is to let an uncataloged model get a fully derived Marathon
+and Dyno baseline without adding a hand-written family entry first.
 
-The inspection pass should read metadata from the first GGUF shard and:
+The deeper planning pass should also:
 
-- identify architecture, quantization, trained context, layer count, dense or
-  MoE layout, chat template, and shard completeness;
+- identify quantization, layer count, dense or MoE layout, chat template, and
+  shard completeness;
 - select a compatible generic or architecture-specific backend and reject
   unsupported architectures with a useful explanation;
 - derive conservative context, batch, micro-batch, KV-cache, and GPU-placement
@@ -20,8 +22,7 @@ The inspection pass should read metadata from the first GGUF shard and:
   requirements and the presence of a usable chat template;
 - feed those facts into Dyno candidate generation while keeping failed-load and
   quality gates deterministic;
-- cache the inspection by model fingerprint and invalidate it when a shard or
-  backend changes.
+- cache derived launch plans by model and backend fingerprint.
 
 Do not infer model quality from metadata, silently rewrite weights, or claim a
 context length beyond the model's declared training context.

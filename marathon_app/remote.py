@@ -131,6 +131,8 @@ def remote_catalog_payload() -> dict[str, object]:
                 "path": str(model.path),
                 "size_bytes": model.size_bytes,
                 "quant": model.quant,
+                "architecture": model.architecture,
+                "native_context": model.native_context,
                 "family": {
                     "id": model.family.id,
                     "display_name": model.family.display_name,
@@ -201,6 +203,14 @@ def _models_from_payload(payload: dict[str, object]) -> list[Model]:
                 size_bytes=int(raw["size_bytes"]),
                 family=family,
                 quant=str(raw.get("quant") or "GGUF"),
+                architecture=(
+                    str(raw["architecture"]) if raw.get("architecture") else None
+                ),
+                native_context=(
+                    int(raw["native_context"])
+                    if raw.get("native_context") is not None
+                    else None
+                ),
             )
         )
     return result

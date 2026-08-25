@@ -8,6 +8,10 @@ router_port = 18111
 health_timeout = 360
 stop_timeout = 20
 prompt_cache_ram_mib = 8192
+slot_snapshots_enabled = false
+slot_snapshot_max_count = 16
+slot_snapshot_max_bytes = 34359738368
+slot_snapshot_clean_startup = false
 
 [[backends]]
 id = "upstream"
@@ -129,24 +133,6 @@ confidence = "verified"
 frontends = ["codex", "hermes", "direct"]
 backend = "deepseek-v4-longctx-mtp"
 temperature = 0.0
-
-[[families.profiles]]
-id = "legacy-ds4-64k"
-display_name = "Legacy DS4 64K"
-description = "Previous four-process DwarfStar pipeline retained as a rollback path."
-context = 65536
-batch = 512
-ubatch = 128
-parallel = 1
-gpu_layers = "auto"
-split_mode = "layer"
-cache_k = "f16"
-cache_v = "f16"
-flash_attention = "off"
-extra_args = ["--dist-prefill-chunk", "1024", "--dist-prefill-window", "4"]
-confidence = "benchmarked"
-frontends = ["codex", "hermes", "direct"]
-backend = "ds4-distributed"
 
 [[families]]
 id = "qwen3.6-27b"

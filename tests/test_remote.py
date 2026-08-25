@@ -23,6 +23,8 @@ def fixture_model() -> catalog.Model:
         size_bytes=28 * 1024**3,
         family=family,
         quant="Q8_0",
+        architecture="qwen3",
+        native_context=262_144,
     )
 
 
@@ -36,6 +38,8 @@ class RemoteCatalogTests(unittest.TestCase):
 
         self.assertEqual(decoded[0].id, model.id)
         self.assertEqual(decoded[0].size_bytes, model.size_bytes)
+        self.assertEqual(decoded[0].architecture, model.architecture)
+        self.assertEqual(decoded[0].native_context, model.native_context)
         self.assertEqual(decoded[0].family.default_profile, model.family.default_profile)
         self.assertEqual(
             decoded[0].family.default_reasoning_level,

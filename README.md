@@ -86,6 +86,7 @@ marathon models add ~/Downloads/gguf
 ```
 
 Marathon scans registered folders in place and does not copy their files.
+It reads each GGUF model's embedded name, architecture, and trained context, so a misleading filename no longer forces the model into the generic family.
 Registered folders are stored in `~/.config/marathon/models.json`.
 
 For temporary overrides, use an OS-path-separated list:
@@ -107,6 +108,8 @@ MARATHON_MODEL_DIRS=/mnt/models:/data/gguf marathon
 | `marathon models add PATH` | Register an existing model folder |
 | `marathon direct` | Open the clean Direct Chat frontend |
 | `marathon hermes` | Open Hermes for compatible profiles |
+| `marathon codex -- CODEX_ARGS` | Start the remembered model and pass flags through to Codex |
+| `marathon exec PROMPT` | Run headless Codex against the supervised remembered model |
 | `marathon resume [ID]` | Resume a Marathon session or open its session picker |
 | `marathon fork [ID]` | Fork a Marathon session or open its session picker |
 | `marathon tune` | Benchmark machine-specific llama.cpp profiles with Dyno |
@@ -195,6 +198,10 @@ That file is merged over the repository's `config/runtime_catalog.toml`, so mach
 Optional OpenAI-compatible external models can also be declared there and will appear in Codex's `/model` menu without changing the repository.
 Set `MARATHON_USER_CATALOG` to point the override elsewhere.
 
+Full conversation slot snapshots are an optional acceleration for long resumed sessions.
+Enable them with `MARATHON_SLOT_SNAPSHOTS_ENABLED=1` or `slot_snapshots_enabled = true` in the personal catalog's `[settings]` table.
+Their default limits are 16 files and 32 GiB, and `marathon doctor` reports both the configuration and disk use.
+
 ## Runtime Safety
 
 The foreground Marathon process owns its router and backend processes.
@@ -220,3 +227,5 @@ Run the test suite with Marathon's private environment:
 ```
 
 GitHub Actions runs shell syntax checks, Python compilation, and the complete unit test suite for every push and pull request.
+It tests both Python 3.10 and Python 3.12.
+The optional `patches/llama.cpp/` directory is intentionally empty until Marathon needs a versioned llama.cpp patch; the build uses upstream unchanged when no patch files are present.

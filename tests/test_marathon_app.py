@@ -7,12 +7,12 @@ import socket
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from marathon_app import __main__ as main_module
 from marathon_app import catalog
 from marathon_app import model_library
 from marathon_app.codex_home import SHARED_PROFILE_FILE, prepare_codex_home
@@ -60,6 +60,24 @@ def fixture_model(family_id: str = "qwen3.6-27b") -> catalog.Model:
 
 
 class CatalogTests(unittest.TestCase):
+    def test_catalog_reparses_only_when_a_source_file_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.toml"
+            path.write_text("[settings]\nvalue = 1\n", encoding="utf-8")
+            catalog._load_catalog_cached.cache_clear()
+            with mock.patch.object(
+                catalog.tomllib, "load", wraps=catalog.tomllib.load
+            ) as parse:
+                first = catalog.load_catalog(path)
+                second = catalog.load_catalog(path)
+                path.write_text("[settings]\nvalue = 200\n", encoding="utf-8")
+                third = catalog.load_catalog(path)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["settings"]["value"], 1)
+        self.assertEqual(third["settings"]["value"], 200)
+        self.assertEqual(parse.call_count, 2)
+
     def test_user_catalog_merges_profiles_over_base(self) -> None:
         base = {
             "settings": {"ai_root": "~/AI"},
@@ -188,6 +206,25 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(model.family.id, "qwen3.6-27b")
         self.assertEqual(model.quant, "UD-Q4_K_XL")
 
+    def test_embedded_gguf_metadata_identifies_a_renamed_model(self) -> None:
+        from gguf import GGUFWriter
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mystery-Q8_0.gguf"
+            writer = GGUFWriter(path, "qwen3")
+            writer.add_name("Qwen3.8-27B")
+            writer.add_context_length(262_144)
+            writer.write_header_to_file()
+            writer.write_kv_data_to_file()
+            writer.write_tensors_to_file()
+            writer.close()
+
+            model = catalog.discover_models(Path(directory))[0]
+
+        self.assertEqual(model.family.id, "qwen3.8-27b")
+        self.assertEqual(model.architecture, "qwen3")
+        self.assertEqual(model.native_context, 262_144)
+
     def test_qwen38_profile_has_bounded_post_tool_thinking(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -304,8 +341,11 @@ class CatalogTests(unittest.TestCase):
                 models = catalog.discover_models()
                 registered = model_library.load_registered_model_roots(library_file)
 
-        self.assertEqual({model.path.parent for model in models}, {first, second})
-        self.assertEqual(registered, (first, second))
+        self.assertEqual(
+            {model.path.parent for model in models},
+            {first.resolve(), second.resolve()},
+        )
+        self.assertEqual(registered, (first.resolve(), second.resolve()))
 
     def test_generic_automatic_profile_uses_conservative_context(self) -> None:
         model = fixture_model("generic")
@@ -345,7 +385,25 @@ class CatalogTests(unittest.TestCase):
 
         self.assertEqual(command[command.index("--cache-ram") + 1], "4096")
 
-    def test_deepseek_profiles_keep_optimized_and_legacy_paths_separate(self) -> None:
+    def test_slot_snapshot_settings_have_environment_overrides(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MARATHON_SLOT_SNAPSHOTS_ENABLED": "1",
+                "MARATHON_SLOT_SNAPSHOT_MAX_COUNT": "7",
+                "MARATHON_SLOT_SNAPSHOT_MAX_BYTES": "12345",
+                "MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP": "true",
+            },
+            clear=False,
+        ):
+            configured = catalog.settings()
+
+        self.assertTrue(configured.slot_snapshots_enabled)
+        self.assertEqual(configured.slot_snapshot_max_count, 7)
+        self.assertEqual(configured.slot_snapshot_max_bytes, 12_345)
+        self.assertTrue(configured.slot_snapshot_clean_startup)
+
+    def test_deepseek_profiles_keep_optimized_paths_separate(self) -> None:
         model = fixture_model("deepseek-v4-flash")
         self.assertEqual(model.family.backend, "ds4-distributed")
         safe_profile = catalog.find_profile(model, "safe", "direct")
@@ -354,7 +412,6 @@ class CatalogTests(unittest.TestCase):
         mtp_128k_profile = catalog.find_profile(
             model, "experimental-mtp-128k", "codex"
         )
-        legacy_profile = catalog.find_profile(model, "legacy-ds4-64k", "codex")
         self.assertEqual(
             safe_profile.extra_args,
             ("--dist-prefill-chunk", "512", "--dist-prefill-window", "4"),
@@ -378,8 +435,6 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(mtp_128k_profile.cache_v, "f16")
         self.assertIn("dsv4-mtp", mtp_128k_profile.extra_args)
         self.assertEqual(mtp_128k_profile.confidence, "verified")
-        self.assertEqual(legacy_profile.backend, "ds4-distributed")
-        self.assertIn("--dist-prefill-chunk", legacy_profile.extra_args)
         self.assertIsNone(long_profile.tool_thinking_budget)
         self.assertFalse(long_profile.parallel_tool_calls)
 
@@ -478,6 +533,22 @@ class CatalogTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_port_pid_finds_an_actual_listening_process(self) -> None:
+        if not (
+            runtime_module.shutil.which("ss")
+            or runtime_module.shutil.which("lsof")
+        ):
+            self.skipTest("port ownership tools are unavailable")
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+
+        self.assertEqual(
+            runtime_module._port_pid(listener.getsockname()[1]),
+            os.getpid(),
+        )
+
     def test_gpu_processes_include_physical_gpu_index(self) -> None:
         gpu_result = subprocess.CompletedProcess(
             args=[],
@@ -578,7 +649,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_ds4_backend_builds_three_workers_and_one_coordinator(self) -> None:
         model = fixture_model("deepseek-v4-flash")
-        profile = catalog.find_profile(model, "legacy-ds4-64k", "codex")
+        profile = catalog.find_profile(model, "safe", "direct")
         runtime = Runtime(model, profile)
         backend = catalog.Backend(
             "ds4",
@@ -809,7 +880,7 @@ class CodexHomeTests(unittest.TestCase):
             shared_config = (isolated / SHARED_PROFILE_FILE).read_text(
                 encoding="utf-8"
             )
-            self.assertEqual(home, isolated)
+            self.assertEqual(home, isolated.resolve())
             self.assertEqual(profile, "marathon-shared")
             self.assertEqual(
                 (isolated / "config.toml").read_text(encoding="utf-8"),
@@ -908,53 +979,9 @@ class CodexHomeTests(unittest.TestCase):
             )
             self.assertTrue(stock_session.is_file())
 
-    def test_legacy_launcher_resolves_user_home_instead_of_filesystem_root(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            fake_curl = fake_bin / "curl"
-            fake_curl.write_text(
-                "#!/bin/sh\n"
-                "case \"$*\" in\n"
-                "  */health) printf '%s\\n' "
-                "'{\"current_model\":\"local-model\",\"backend_health\":{\"status\":\"ok\"}}' ;;\n"
-                "  */v1/models) printf '%s\\n' '{\"data\":[]}' ;;\n"
-                "  *) exit 1 ;;\n"
-                "esac\n",
-                encoding="utf-8",
-            )
-            fake_curl.chmod(0o755)
-            environment = os.environ.copy()
-            environment.pop("CODEX_HOME", None)
-            environment.update(
-                {
-                    "HOME": str(root / "home"),
-                    "PATH": f"{fake_bin}:{environment['PATH']}",
-                    "MARATHON_CODEX_BIN": "/bin/true",
-                    "MARATHON_ROUTER_STATE_DIR": str(root / "state"),
-                    "MARATHON_RUNTIME_MODELS_FILE": str(root / "state" / "models.json"),
-                    "MARATHON_USE_USER_CONFIG": "1",
-                    "MARATHON_WEB_SEARCH_MODE": "disabled",
-                }
-            )
-
-            result = subprocess.run(
-                [str(Path("scripts/launchers/start_codex.sh").resolve())],
-                env=environment,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((root / "home" / ".codex" / "config.toml").is_file())
-
     def test_codex_binary_override_is_consistent_across_entry_points(self) -> None:
         paths = (
             Path("marathon_app/frontends.py"),
-            Path("scripts/launchers/start_codex.sh"),
             Path("scripts/build_codex.sh"),
             Path("scripts/ops/update_codex.sh"),
             Path("scripts/ops/doctor.sh"),
@@ -996,6 +1023,28 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("model_auto_compact_token_limit=229376", command)
         self.assertNotIn("--ignore-user-config", command)
 
+    def test_codex_cli_arguments_reach_the_supervised_frontend(self) -> None:
+        with mock.patch.object(
+            main_module, "run_codex_default", return_value=0
+        ) as run:
+            result = main_module.main(
+                ["codex", "--sandbox", "read-only", "--cd", "/tmp/project"]
+            )
+
+        self.assertEqual(result, 0)
+        run.assert_called_once_with(
+            ["--sandbox", "read-only", "--cd", "/tmp/project"]
+        )
+
+    def test_exec_uses_the_supervised_codex_runtime(self) -> None:
+        with mock.patch.object(
+            main_module, "run_codex_default", return_value=7
+        ) as run:
+            result = main_module.main(["exec", "--json", "check the project"])
+
+        self.assertEqual(result, 7)
+        run.assert_called_once_with(["exec", "--json", "check the project"])
+
     def test_codex_child_uses_marathon_resume_command(self) -> None:
         model = fixture_model()
         runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"))
@@ -1034,9 +1083,13 @@ class FrontendTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(run.call_args.kwargs["env"]["CODEX_CLI_NAME"], "marathon")
-        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], str(marathon_home))
         self.assertEqual(
-            run.call_args.kwargs["env"]["CODEX_SQLITE_HOME"], str(marathon_home)
+            run.call_args.kwargs["env"]["CODEX_HOME"],
+            str(marathon_home.resolve()),
+        )
+        self.assertEqual(
+            run.call_args.kwargs["env"]["CODEX_SQLITE_HOME"],
+            str(marathon_home.resolve()),
         )
         self.assertEqual(run.call_args.args[0][-2:], ["resume", "session-id"])
         self.assertEqual(summarize.call_args.kwargs["provider"], "marathon-local")
@@ -1470,65 +1523,6 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(summaries[0]["tool_metrics"][0]["duration_ms"], 250)
         self.assertNotIn("private", json.dumps(summaries[0]))
 
-    def test_legacy_backend_stop_leaves_unowned_llama_server_running(self) -> None:
-        if not Path("/usr/bin/ss").is_file():
-            self.skipTest("ss is required for the ownership regression test")
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with socket.socket() as probe:
-                probe.bind(("127.0.0.1", 0))
-                port = probe.getsockname()[1]
-            process = subprocess.Popen(
-                [
-                    "bash",
-                    "-c",
-                    'exec -a llama-server "$1" -m http.server "$2" --bind 127.0.0.1',
-                    "bash",
-                    sys.executable,
-                    str(port),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            try:
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    try:
-                        with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                            break
-                    except OSError:
-                        time.sleep(0.05)
-                else:
-                    self.fail("test llama-server did not start")
-
-                environment = os.environ.copy()
-                environment.update(
-                    {
-                        "MARATHON_MODEL_SLUG": "ownership-audit",
-                        "MARATHON_MODEL_PORT": str(port),
-                        "MARATHON_PROXY_PORT": str(port + 1),
-                        "MARATHON_ROUTER_STATE_DIR": str(root / "state"),
-                        "MARATHON_LOG_DIR": str(root / "logs"),
-                    }
-                )
-                subprocess.run(
-                    [str(Path("scripts/ops/backend.sh").resolve()), "stop"],
-                    env=environment,
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-
-                self.assertIsNone(process.poll())
-            finally:
-                if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=5)
-
-
 class UiTests(unittest.TestCase):
     def test_direct_frontend_does_not_require_codex(self) -> None:
         model = fixture_model("qwen3.8-27b")
@@ -1565,7 +1559,7 @@ class UiTests(unittest.TestCase):
             mock.patch("marathon_app.ui._ensure_local_tools", return_value=True),
             mock.patch("marathon_app.ui.save_selection") as save,
             mock.patch("marathon_app.ui.Runtime", return_value=runtime),
-            mock.patch("marathon_app.ui._launch_frontend") as launch,
+            mock.patch("marathon_app.ui._launch_frontend", return_value=0) as launch,
             mock.patch("marathon_app.ui._home") as home,
         ):
             result = run_codex_default()
@@ -1576,6 +1570,25 @@ class UiTests(unittest.TestCase):
         launch.assert_called_once_with(console, runtime, "codex", None)
         runtime.cleanup.assert_called_once()
         self.assertEqual(save.call_args.args[2], "codex")
+
+    def test_default_launch_returns_the_codex_exit_status(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        runtime = mock.Mock()
+        console = mock.MagicMock()
+        console.status.return_value.__enter__.return_value = mock.Mock()
+        with (
+            mock.patch("marathon_app.ui.Console", return_value=console),
+            mock.patch("marathon_app.ui.discover_models", return_value=[model]),
+            mock.patch("marathon_app.ui.load_selection", return_value={}),
+            mock.patch("marathon_app.ui._ensure_local_tools", return_value=True),
+            mock.patch("marathon_app.ui.save_selection"),
+            mock.patch("marathon_app.ui.Runtime", return_value=runtime),
+            mock.patch("marathon_app.ui._launch_frontend", return_value=7),
+        ):
+            result = run_codex_default(["exec", "check the project"])
+
+        self.assertEqual(result, 7)
+        runtime.cleanup.assert_called_once()
 
     def test_warm_model_change_returns_to_runtime_supervisor(self) -> None:
         model = fixture_model()

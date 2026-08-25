@@ -27,7 +27,6 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
         alias="dynamic-model",
         display_name="Dynamic model",
         description="Test model",
-        launcher="/bin/true",
         model_paths=("/tmp/model.gguf",),
         target="http://127.0.0.1:18000",
         context_window=context_window,
@@ -145,7 +144,6 @@ temperature = 0.0
         self.assertEqual(profile.truncation_limit, 221_184)
         self.assertEqual(profile.temperature, 0.0)
         self.assertTrue(profile.external)
-        self.assertTrue(profile.supervised)
         self.assertFalse(profile.supports_slots)
         self.assertIn("deepseek-spark", available)
         self.assertEqual(headers, {"Authorization": "Bearer test-secret"})
@@ -154,7 +152,6 @@ temperature = 0.0
         profile = replace(
             fixture_profile(),
             external=True,
-            supervised=True,
             supports_slots=False,
             api_key_env="MISSING_EXTERNAL_KEY",
         )
@@ -175,7 +172,6 @@ temperature = 0.0
             profile = replace(
                 fixture_profile(),
                 external=True,
-                supervised=True,
                 supports_slots=False,
                 api_key_env="SPARK_API_KEY",
                 api_key_file=str(key_file),
@@ -217,7 +213,7 @@ temperature = 0.0
             catalog_path.write_text(
                 """
 [[external_models]]
-id = "qwen3.6-27b-q4"
+id = "custom"
 model = "remote-model"
 display_name = "Collision"
 base_url = "http://127.0.0.1:9292/v1"
@@ -228,7 +224,10 @@ context = 32768
             )
             with mock.patch.dict(
                 router_module.os.environ,
-                {"MARATHON_USER_CATALOG": str(catalog_path)},
+                {
+                    "MARATHON_MODEL_PATH": "/tmp/local-model.gguf",
+                    "MARATHON_USER_CATALOG": str(catalog_path),
+                },
                 clear=True,
             ):
                 with self.assertRaisesRegex(ValueError, "conflicts with a local model"):
@@ -253,13 +252,12 @@ context = 32768
         )
         self.assertFalse(router_module._is_client_disconnect(RuntimeError("kernel failed")))
 
-    def test_custom_supervised_backend_can_use_native_alias_without_slots(self) -> None:
+    def test_custom_backend_can_use_native_alias_without_slots(self) -> None:
         environment = {
             "MARATHON_MODEL_PATH": "/tmp/model.gguf",
             "MARATHON_MODEL_SLUG": "public-model-id",
             "MARATHON_BACKEND_MODEL_ID": "deepseek-v4-flash",
             "MARATHON_BACKEND_SLOT_API": "0",
-            "MARATHON_MODEL_SUPERVISED": "1",
             "MARATHON_MODEL_TEMPERATURE": "0",
         }
         with mock.patch.dict(router_module.os.environ, environment, clear=True):
@@ -270,7 +268,6 @@ context = 32768
         self.assertEqual(profile.slug, "public-model-id")
         self.assertEqual(profile.alias, "deepseek-v4-flash")
         self.assertFalse(profile.supports_slots)
-        self.assertTrue(profile.supervised)
         self.assertEqual(profile.temperature, 0.0)
 
     def test_custom_profile_loads_reasoning_capabilities(self) -> None:
@@ -389,6 +386,46 @@ context = 32768
                 {"effort": "xhigh", "description": "Deep"},
             ],
         )
+
+    def test_trace_retains_only_bounded_input_fingerprints(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.lock = threading.Lock()
+        state._trace_seq = 0
+        state._last_trace_by_model = {}
+        state.telemetry = mock.Mock()
+        state.debug = False
+        request = {
+            "input": [
+                {"role": "user", "content": f"private-{index}"}
+                for index in range(5)
+            ],
+            "instructions": "policy",
+            "tools": [],
+        }
+
+        with mock.patch.dict(
+            router_module.os.environ,
+            {"MARATHON_TRACE_INPUT_FINGERPRINTS": "2"},
+            clear=False,
+        ):
+            state.trace_request(
+                requested_model=profile.slug,
+                profile=profile,
+                raw_request=request,
+                normalized_request=request,
+                path="/v1/responses",
+                method="POST",
+                raw_body_bytes=123,
+                normalized_body_bytes=100,
+            )
+
+        retained = state._last_trace_by_model[profile.slug]["input_summary"]
+        emitted = state.telemetry.emit.call_args.args[1]
+        self.assertEqual(len(retained["fingerprints"]), 2)
+        self.assertNotIn("private-", json.dumps(state._last_trace_by_model))
+        self.assertEqual(emitted["raw"]["body_bytes"], 123)
+        self.assertEqual(emitted["normalized"]["body_bytes"], 100)
 
     def test_native_reasoning_effort_reaches_llama_template(self) -> None:
         profile = replace(
@@ -826,7 +863,10 @@ context = 32768
         parent = router_module.ResponseSnapshot(
             response_id="resp_1",
             profile_slug="dynamic-model",
-            conversation_items=[],
+            parent_response_id=None,
+            input_items=[],
+            output_items=[],
+            conversation_item_count=0,
             snapshot_filename="",
             instructions_text="base\n\ndeveloper policy",
             base_instructions_hash="base-hash",
@@ -850,7 +890,10 @@ context = 32768
         warmup = router_module.ResponseSnapshot(
             response_id="warm_123",
             profile_slug="dynamic-model",
-            conversation_items=[],
+            parent_response_id=None,
+            input_items=[],
+            output_items=[],
+            conversation_item_count=0,
             snapshot_filename="",
             instructions_text="warmup",
             base_instructions_hash="base",
@@ -863,6 +906,46 @@ context = 32768
 
         self.assertTrue(router_module._is_warmup_root(warmup))
         self.assertFalse(router_module._is_warmup_root(generated))
+
+    def test_lineage_uses_parent_chains_and_rebases_at_the_lru_limit(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        state.lineage = router_module.OrderedDict()
+        state.lineage_max_entries_per_model = 2
+        state.last_response_by_model = {}
+
+        def snapshot(
+            response_id: str,
+            parent_response_id: str | None,
+            input_text: str,
+            output_text: str,
+            count: int,
+        ) -> router_module.ResponseSnapshot:
+            return router_module.ResponseSnapshot(
+                response_id=response_id,
+                profile_slug="model",
+                parent_response_id=parent_response_id,
+                input_items=[{"type": "input", "text": input_text}],
+                output_items=[{"type": "output", "text": output_text}],
+                conversation_item_count=count,
+                snapshot_filename="",
+                instructions_text="",
+                base_instructions_hash="",
+                instructions_hash="",
+                tools_hash="",
+                prompt_cache_key="",
+                created_at=0,
+            )
+
+        state._store_response_snapshot(snapshot("one", None, "u1", "a1", 2))
+        state._store_response_snapshot(snapshot("two", "one", "u2", "a2", 4))
+        state._store_response_snapshot(snapshot("three", "two", "u3", "a3", 6))
+
+        self.assertNotIn("one", state.lineage)
+        self.assertIsNone(state.lineage["two"].parent_response_id)
+        self.assertEqual(
+            [item["text"] for item in state._materialize_conversation(state.lineage["three"])],
+            ["u1", "a1", "u2", "a2", "u3", "a3"],
+        )
 
     def test_reconnect_root_reuses_only_same_live_prompt_cache_session(self) -> None:
         self.assertTrue(

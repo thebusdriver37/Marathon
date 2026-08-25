@@ -1,7 +1,8 @@
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index 7f8750616f71dd9fd06827970cfedadda6eef40b..2da0bd369f0af0b788a855bd72b3272d8cfa02a2 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -658,7 +658,21 @@ async fn lookup_session_target_with_app_server(
+@@ -660,7 +660,21 @@ async fn lookup_session_target_with_app_server(
              .thread_read(thread_id, /*include_turns*/ false)
              .await
          {
@@ -25,9 +26,10 @@ diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
                  warn!(
                      session = id_or_name,
 diff --git a/codex-rs/tui/src/named_session_lookup.rs b/codex-rs/tui/src/named_session_lookup.rs
+index f58cc1f5d11a9f83ae2c0cf25962af235129582d..116e4a84a9568b157a70eb2d631db40eb0d25a86 100644
 --- a/codex-rs/tui/src/named_session_lookup.rs
 +++ b/codex-rs/tui/src/named_session_lookup.rs
-@@ -39,6 +39,7 @@ pub(super) struct NamedSessionCandidate {
+@@ -40,6 +40,7 @@ pub(super) struct NamedSessionCandidate {
  pub(super) struct NamedSessionCandidates<'a> {
      name: &'a str,
      codex_home: &'a Path,
@@ -35,9 +37,9 @@ diff --git a/codex-rs/tui/src/named_session_lookup.rs b/codex-rs/tui/src/named_s
      collection: SessionCollection,
      mode: SessionNameLookupMode,
      search_term: Option<&'a str>,
-@@ -161,6 +162,9 @@ async fn lookup_from_app_server(
-         mode,
+@@ -164,6 +165,9 @@ async fn lookup_from_app_server(
          Some(name),
+         super::resume_source_kinds(/*include_non_interactive*/ false),
      );
 +    if !app_server.uses_remote_workspace() {
 +        candidates = candidates.with_model_provider(config.model_provider_id.clone());
@@ -45,7 +47,7 @@ diff --git a/codex-rs/tui/src/named_session_lookup.rs b/codex-rs/tui/src/named_s
      while let Some(candidate) = candidates.next(app_server).await? {
          if let Some(session_meta) = candidate.session_meta
              && (!RESUME_SESSION_SOURCES.contains(&session_meta.source)
-@@ -200,6 +204,7 @@ impl<'a> NamedSessionCandidates<'a> {
+@@ -204,6 +208,7 @@ impl<'a> NamedSessionCandidates<'a> {
          Self {
              name,
              codex_home,
@@ -53,7 +55,7 @@ diff --git a/codex-rs/tui/src/named_session_lookup.rs b/codex-rs/tui/src/named_s
              collection,
              mode,
              search_term,
-@@ -209,6 +214,11 @@ impl<'a> NamedSessionCandidates<'a> {
+@@ -214,6 +219,11 @@ impl<'a> NamedSessionCandidates<'a> {
          }
      }
  
@@ -65,16 +67,17 @@ diff --git a/codex-rs/tui/src/named_session_lookup.rs b/codex-rs/tui/src/named_s
      /// Returns the next exact-name match, advancing through server pages as needed.
      ///
      /// Local candidates must have a rollout in the requested collection with a matching session
-@@ -273,7 +283,7 @@ impl<'a> NamedSessionCandidates<'a> {
+@@ -278,7 +288,7 @@ impl<'a> NamedSessionCandidates<'a> {
                      limit: Some(100),
                      sort_key: Some(sort_key),
                      sort_direction: None,
 -                    model_providers: None,
 +                    model_providers: self.model_provider.clone().map(|provider| vec![provider]),
-                     source_kinds: Some(super::resume_source_kinds(
-                         /*include_non_interactive*/ false,
-                     )),
+                     source_kinds: Some(self.source_kinds.clone()),
+                     archived: Some(self.collection == SessionCollection::Archived),
+                     section_id: None,
 diff --git a/codex-rs/tui/src/named_session_lookup_tests.rs b/codex-rs/tui/src/named_session_lookup_tests.rs
+index eb6e01ad93ced6cb839bc6c88eb5558cda837c6e..31d351df5e690c917233b08c31402fc35a35b777 100644
 --- a/codex-rs/tui/src/named_session_lookup_tests.rs
 +++ b/codex-rs/tui/src/named_session_lookup_tests.rs
 @@ -299,6 +299,39 @@ async fn validates_sqlite_candidate_filters_against_rollout() -> color_eyre::Res
@@ -118,6 +121,7 @@ diff --git a/codex-rs/tui/src/named_session_lookup_tests.rs b/codex-rs/tui/src/n
  async fn recovers_legacy_index_name_without_requiring_sidecar_rewrite() -> color_eyre::Result<()> {
      let temp_dir = TempDir::new()?;
 diff --git a/codex-rs/utils/cli/src/resume_command.rs b/codex-rs/utils/cli/src/resume_command.rs
+index 868a67ed0b126d0444d38cbff77ca831ca8bf479..c98497ca7744e662a8e3893c4794344fe32ab000 100644
 --- a/codex-rs/utils/cli/src/resume_command.rs
 +++ b/codex-rs/utils/cli/src/resume_command.rs
 @@ -42,9 +42,12 @@ pub fn cli_command_for_action(action: &str) -> String {

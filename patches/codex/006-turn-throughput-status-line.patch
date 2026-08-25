@@ -5,13 +5,13 @@ index 96104b3f3d71f5daa2415a7f2dea0bfa1e789532..82e3cb5d74527304103471f320e518c5
 @@ -127,6 +127,9 @@ pub(crate) enum StatusLineItem {
      /// Total output tokens generated.
      TotalOutputTokens,
-
+ 
 +    /// Output generation speed for the current or most recent turn.
 +    TokensPerSecond,
 +
      /// Estimated credits attributed directly to the current enterprise thread.
      ThreadCredits,
-
+ 
 @@ -192,6 +195,7 @@ impl StatusLineItem {
              StatusLineItem::UsedTokens => "Total tokens used in session (omitted when zero)",
              StatusLineItem::TotalInputTokens => "Total input tokens used in session",
@@ -69,10 +69,10 @@ index 7553e9fb77e00f2471bcdeea943f657ee2ff6b19..2bb16e819ed8c47d0cd4e0569c68d06b
              Self::EstimatedThreadCost,
              Self::SessionId,
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index 03b51a17cc2efa96a8eafa2b169233d7f31a8a9e..d85d5e544b189e913a3ab16b2c1079218198afde 100644
+index 331b347bf340474f12d3f1ea0358f4d4205fa65d..433e3b3b596f2d86e5a6a6c50699a92c7255f0d3 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -435,6 +435,8 @@ use self::transcript::TranscriptState;
+@@ -438,6 +438,8 @@ use self::transcript::TranscriptState;
  mod turn_lifecycle;
  mod turn_runtime;
  use self::turn_lifecycle::TurnLifecycleState;
@@ -80,18 +80,18 @@ index 03b51a17cc2efa96a8eafa2b169233d7f31a8a9e..d85d5e544b189e913a3ab16b2c107921
 +use self::turn_throughput::TurnThroughput;
  mod usage;
  mod user_messages;
- use self::user_messages::PendingSteer;
-@@ -491,7 +493,8 @@ const ASK_FOR_APPROVAL_LABEL: &str = "Ask for approval";
+ mod working_directory;
+@@ -495,7 +497,8 @@ const ASK_FOR_APPROVAL_LABEL: &str = "Ask for approval";
  const APPROVE_FOR_ME_LABEL: &str = "Approve for me";
  const AUTO_REVIEW_DESCRIPTION: &str = "Only ask for actions detected as potentially unsafe.";
  const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 -const DEFAULT_STATUS_LINE_ITEMS: [&str; 2] = ["model-with-reasoning", "current-dir"];
 +const DEFAULT_STATUS_LINE_ITEMS: [&str; 3] =
 +    ["model-with-reasoning", "current-dir", "tokens-per-second"];
-
+ 
  /// Common initialization parameters shared by all `ChatWidget` constructors.
  pub(crate) struct ChatWidgetInit {
-@@ -607,6 +610,7 @@ pub(crate) struct ChatWidget {
+@@ -611,6 +614,7 @@ pub(crate) struct ChatWidget {
      last_unified_wait: Option<UnifiedExecWaitState>,
      unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
      turn_lifecycle: TurnLifecycleState,
@@ -100,7 +100,7 @@ index 03b51a17cc2efa96a8eafa2b169233d7f31a8a9e..d85d5e544b189e913a3ab16b2c107921
      task_complete_pending: bool,
      unified_exec_processes: Vec<UnifiedExecProcessSummary>,
 diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
-index 5198cc13ccf015210107704cd09218ec01177c9b..0a8476b1d3402db7830d20080b4ec2d5fa32ac40 100644
+index e772e5f48129628356f28a9bfb0f6c76ef794fd4..721f2cd515b7009ff87b342929636b6f03fd145e 100644
 --- a/codex-rs/tui/src/chatwidget/constructor.rs
 +++ b/codex-rs/tui/src/chatwidget/constructor.rs
 @@ -161,6 +161,7 @@ impl ChatWidget {
@@ -112,7 +112,7 @@ index 5198cc13ccf015210107704cd09218ec01177c9b..0a8476b1d3402db7830d20080b4ec2d5
              task_complete_pending: false,
              unified_exec_processes: Vec::new(),
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 5efc024bea5fbfabe02116c3b15307df64a95349..45e4f37e71d07fbfb6e213ba07d92394b2f90f5f 100644
+index 1f1408f13acd90c724a9f57584c2f79a2d8bde41..c95a96c6ff27e8662dc2f14df1455e1f3d244e5a 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
 @@ -32,6 +32,9 @@ impl ChatWidget {
@@ -154,7 +154,7 @@ index 5efc024bea5fbfabe02116c3b15307df64a95349..45e4f37e71d07fbfb6e213ba07d92394
                  if self.config.show_raw_agent_reasoning {
                      self.on_agent_reasoning_delta(notification.delta);
                  }
-@@ -204,7 +221,6 @@ impl ChatWidget {
+@@ -218,7 +235,6 @@ impl ChatWidget {
              | ServerNotification::ThreadDeleted(_)
              | ServerNotification::ThreadUnarchived(_)
              | ServerNotification::RawResponseItemCompleted(_)
@@ -162,9 +162,9 @@ index 5efc024bea5fbfabe02116c3b15307df64a95349..45e4f37e71d07fbfb6e213ba07d92394
              | ServerNotification::CommandExecOutputDelta(_)
              | ServerNotification::ProcessOutputDelta(_)
              | ServerNotification::ProcessExited(_)
-@@ -233,6 +249,13 @@ impl ChatWidget {
-             | ServerNotification::WindowsSandboxSetupCompleted(_)
-             | ServerNotification::AccountLoginCompleted(_) => {}
+@@ -249,6 +265,13 @@ impl ChatWidget {
+             | ServerNotification::ProjectChanged(_)
+             | ServerNotification::ThreadProjectUpdated(_) => {}
              ServerNotification::ContextCompacted(_) => {}
 +            ServerNotification::RawResponseCompleted(notification) => {
 +                if !from_replay {
@@ -199,7 +199,7 @@ index 258541ee4bbf4c742e175fda4b6a90c104d215a1..7f2c7bbe325deae5d9ad5cbdebda2948
 @@ -411,6 +411,13 @@ impl ChatWidget {
              .unwrap_or_default()
      }
-
+ 
 +    pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
 +        self.turn_throughput.sample(Instant::now()).map(|sample| {
 +            let prefix = if sample.estimated { "~" } else { "" };
@@ -237,7 +237,7 @@ index 83f56e166d081cc66386176233544d815cdf5654..a4e184c25949ca064b12a651544b06e0
 @@ -2854,6 +2854,49 @@ async fn status_line_context_tokens_renders_live_context_count() {
      );
  }
-
+ 
 +#[tokio::test]
 +async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
 +    use std::time::Duration;
@@ -285,7 +285,7 @@ index 83f56e166d081cc66386176233544d815cdf5654..a4e184c25949ca064b12a651544b06e0
  async fn status_line_legacy_context_usage_renders_context_used_percent() {
      let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index db05609d1c24ca43f3ec41231d18fb32034d49f4..ebb879ea5744a16d1923438d1227bf6d61544a24 100644
+index 2864dc1dd59d813ea72a08bf663f781d31c0604c..71dbf00056e74518ab9b7b05fa3421835931be97 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
 @@ -72,6 +72,7 @@ impl ChatWidget {
@@ -299,7 +299,7 @@ index db05609d1c24ca43f3ec41231d18fb32034d49f4..ebb879ea5744a16d1923438d1227bf6d
 @@ -102,6 +103,18 @@ impl ChatWidget {
          self.request_redraw();
      }
-
+ 
 +    pub(super) fn record_turn_output_delta(&mut self, delta: &str) {
 +        self.turn_throughput
 +            .record_output_delta(delta, Instant::now());
@@ -315,16 +315,16 @@ index db05609d1c24ca43f3ec41231d18fb32034d49f4..ebb879ea5744a16d1923438d1227bf6d
      pub(super) fn on_task_complete(
          &mut self,
          last_agent_message: Option<String>,
-@@ -145,6 +158,8 @@ impl ChatWidget {
-         }
+@@ -146,6 +159,8 @@ impl ChatWidget {
          self.flush_unified_exec_wait_streak();
+         self.flush_completed_command_activity();
          if !from_replay {
 +            self.turn_throughput.finish_turn(Instant::now());
 +            self.refresh_status_line();
              self.collect_runtime_metrics_delta();
              let runtime_metrics =
                  (!self.turn_runtime_metrics.is_empty()).then_some(self.turn_runtime_metrics);
-@@ -313,6 +328,8 @@ impl ChatWidget {
+@@ -314,6 +329,8 @@ impl ChatWidget {
      /// This does not clear MCP startup tracking, because MCP startup can overlap with turn cleanup
      /// and should continue to drive the bottom-pane running indicator while it is in progress.
      pub(super) fn finalize_turn(&mut self) {
@@ -335,7 +335,7 @@ index db05609d1c24ca43f3ec41231d18fb32034d49f4..ebb879ea5744a16d1923438d1227bf6d
          // failed-cell finalization, so transient tail cells are never persisted.
 diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..58253e6c5e73028d089955124ce0126b2059cf22
+index 0000000000000000000000000000000000000000..5eefec028e9a330d15f0f82348a530b6848309ec
 --- /dev/null
 +++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
 @@ -0,0 +1,107 @@
@@ -448,7 +448,7 @@ index 0000000000000000000000000000000000000000..58253e6c5e73028d089955124ce0126b
 +mod tests;
 diff --git a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..274729cd714b0d4eae750b726c44d7f63abf6591
+index 0000000000000000000000000000000000000000..4f575e359071ae877e0bf4c7de0a068d4e5db44c
 --- /dev/null
 +++ b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
 @@ -0,0 +1,94 @@

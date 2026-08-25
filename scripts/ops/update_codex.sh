@@ -4,7 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CODEX_DIR="${MARATHON_CODEX_DIR:-$ROOT_DIR/codex}"
 PATCHES_DIR="${MARATHON_PATCH_DIR:-$ROOT_DIR/patches/codex}"
-UPSTREAM_BRANCH="${MARATHON_CODEX_UPSTREAM:-origin/main}"
+CODEX_REF_FILE="$ROOT_DIR/config/codex.ref"
+if [[ -n "${MARATHON_CODEX_UPSTREAM:-}" ]]; then
+  UPSTREAM_REF="$MARATHON_CODEX_UPSTREAM"
+elif [[ -f "$CODEX_REF_FILE" ]]; then
+  UPSTREAM_REF="$(tr -d '[:space:]' <"$CODEX_REF_FILE")"
+else
+  echo "error: Codex ref is missing: $CODEX_REF_FILE" >&2
+  exit 1
+fi
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 INSTALL_BIN="${MARATHON_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
 
@@ -24,11 +32,11 @@ if [[ -n "$(git -C "$CODEX_DIR" ls-files --others --exclude-standard)" ]]; then
   exit 1
 fi
 
-echo "-> Fetching upstream Codex..."
-git -C "$CODEX_DIR" fetch origin
+echo "-> Fetching upstream Codex tags..."
+git -C "$CODEX_DIR" fetch origin --tags
 
 LOCAL_SHA="$(git -C "$CODEX_DIR" rev-parse HEAD)"
-UPSTREAM_SHA="$(git -C "$CODEX_DIR" rev-parse "$UPSTREAM_BRANCH")"
+UPSTREAM_SHA="$(git -C "$CODEX_DIR" rev-parse "$UPSTREAM_REF^{commit}")"
 
 shopt -s nullglob
 patches=("$PATCHES_DIR"/*.patch)
@@ -62,7 +70,7 @@ if (( ${#patches[@]} > 0 )); then
     if [[ -d "$PREFLIGHT_DIR" ]]; then
       git -C "$CODEX_DIR" worktree remove --force "$PREFLIGHT_DIR" >/dev/null 2>&1 || true
     fi
-    rm -rf "$PREFLIGHT_PARENT"
+    rm -r -- "$PREFLIGHT_PARENT"
   }
   trap cleanup_preflight EXIT
 
@@ -91,6 +99,6 @@ echo "-> Building patched Codex..."
 bash "$ROOT_DIR/scripts/build_codex.sh"
 
 echo
-echo "Codex synced and tested at ${UPSTREAM_SHA:0:8} with ${#patches[@]} Marathon patch(es)."
+echo "Codex $UPSTREAM_REF synced and tested at ${UPSTREAM_SHA:0:8} with ${#patches[@]} Marathon patch(es)."
 echo "Commit the submodule bump in the parent repo:"
 echo "  git -C '$ROOT_DIR' add codex && git -C '$ROOT_DIR' commit -m 'codex: sync to ${UPSTREAM_SHA:0:8}'"
