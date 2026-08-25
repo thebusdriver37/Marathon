@@ -169,6 +169,16 @@ def _merge_catalog(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
     for key, value in override.items():
         if key in {"backends", "families"} and isinstance(merged.get(key), list) and isinstance(value, list):
             merged[key] = _merge_keyed_list(merged[key], value)
+        elif key == "instances" and isinstance(merged.get(key), dict) and isinstance(value, dict):
+            configured = copy.deepcopy(merged[key])
+            for name, instance in value.items():
+                existing = configured.get(name)
+                configured[name] = (
+                    {**existing, **instance}
+                    if isinstance(existing, dict) and isinstance(instance, dict)
+                    else instance
+                )
+            merged[key] = configured
         elif key in {"settings",} and isinstance(merged.get(key), dict) and isinstance(value, dict):
             merged[key] = {**merged[key], **value}
         else:
@@ -770,8 +780,13 @@ def backend_files(model: Model, backend: Backend) -> dict[str, Path]:
     }
 
 
-def server_command(model: Model, profile: Profile, backend: Backend | None = None) -> list[str]:
-    cfg = settings()
+def server_command(
+    model: Model,
+    profile: Profile,
+    backend: Backend | None = None,
+    configured: Settings | None = None,
+) -> list[str]:
+    cfg = configured or settings()
     selected = backend or backend_for(model, profile)
     if selected.kind != "llama_cpp":
         raise ValueError(

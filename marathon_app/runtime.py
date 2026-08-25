@@ -32,6 +32,7 @@ from .catalog import (
     server_command,
     settings,
 )
+from .instance import InstanceConfig, instance_path, normalize_instance_name, resolve_instance
 from .telemetry import EventWriter, create_run_writer, redact_text, runs_dir
 
 
@@ -53,6 +54,58 @@ SLOT_ROOT = Path(
 SELECTION_FILE = CONFIG_DIR / "selection.json"
 SESSION_FILE = RUNTIME_DIR / "session.json"
 LOCK_FILE = RUNTIME_DIR / "runtime.lock"
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    """All writable paths owned by one Marathon instance."""
+
+    config_dir: Path
+    state_dir: Path
+    runtime_dir: Path
+    router_state_dir: Path
+    slot_root: Path
+    selection_file: Path
+    session_file: Path
+    lock_file: Path
+    runs_dir: Path
+
+
+def runtime_paths(instance: str | None = None) -> RuntimePaths:
+    """Resolve instance paths without changing the default layout."""
+
+    name = normalize_instance_name(instance)
+    if name is None:
+        return RuntimePaths(
+            CONFIG_DIR,
+            USER_STATE_DIR,
+            RUNTIME_DIR,
+            ROUTER_STATE_DIR,
+            SLOT_ROOT,
+            SELECTION_FILE,
+            SESSION_FILE,
+            LOCK_FILE,
+            runs_dir(),
+        )
+    config_dir = instance_path(CONFIG_DIR, name)
+    state_dir = instance_path(USER_STATE_DIR, name)
+    runtime_dir = instance_path(RUNTIME_DIR, name)
+    named_runs_dir = (
+        runs_dir(name)
+        if os.environ.get("MARATHON_RUNS_DIR")
+        else state_dir / "runs"
+    )
+    return RuntimePaths(
+        config_dir,
+        state_dir,
+        runtime_dir,
+        instance_path(ROUTER_STATE_DIR, name),
+        instance_path(SLOT_ROOT, name),
+        config_dir / "selection.json",
+        runtime_dir / "session.json",
+        runtime_dir / "runtime.lock",
+        named_runs_dir,
+    )
 
 
 @dataclass(frozen=True)
@@ -110,22 +163,37 @@ def _backend_cache_id(
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def ensure_dirs() -> None:
-    for path in (CONFIG_DIR, USER_STATE_DIR / "logs", runs_dir(), RUNTIME_DIR, ROUTER_STATE_DIR, SLOT_ROOT):
+def ensure_dirs(instance: str | None = None) -> None:
+    paths = runtime_paths(instance)
+    for path in (
+        paths.config_dir,
+        paths.state_dir / "logs",
+        paths.runs_dir,
+        paths.runtime_dir,
+        paths.router_state_dir,
+        paths.slot_root,
+    ):
         path.mkdir(parents=True, exist_ok=True)
 
 
-def load_selection() -> dict[str, str]:
+def load_selection(instance: str | None = None) -> dict[str, str]:
+    selection_file = runtime_paths(instance).selection_file
     try:
-        value = json.loads(SELECTION_FILE.read_text(encoding="utf-8"))
+        value = json.loads(selection_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return {key: str(value[key]) for key in ("model", "profile", "frontend") if value.get(key)}
 
 
-def save_selection(model: Model, profile: Profile, frontend: str) -> None:
-    ensure_dirs()
-    temporary = SELECTION_FILE.with_suffix(".tmp")
+def save_selection(
+    model: Model,
+    profile: Profile,
+    frontend: str,
+    instance: str | None = None,
+) -> None:
+    ensure_dirs(instance)
+    selection_file = runtime_paths(instance).selection_file
+    temporary = selection_file.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(
             {"schema": 1, "model": model.id, "profile": profile.id, "frontend": frontend},
@@ -133,7 +201,7 @@ def save_selection(model: Model, profile: Profile, frontend: str) -> None:
         ) + "\n",
         encoding="utf-8",
     )
-    temporary.replace(SELECTION_FILE)
+    temporary.replace(selection_file)
 
 
 def _http_json(url: str, timeout: float = 3) -> dict[str, object]:
@@ -239,6 +307,38 @@ def _cmdline(pid: int) -> str:
     return result.stdout.strip()
 
 
+def _process_arguments(pid: int) -> tuple[str, ...]:
+    """Read exact argv boundaries for safe instance ownership checks."""
+
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ()
+    return tuple(
+        value.decode("utf-8", errors="replace")
+        for value in raw.split(b"\0")
+        if value
+    )
+
+
+def _process_matches_instance(pid: int, instance: str | None) -> bool:
+    arguments = _process_arguments(pid)
+    if "marathon_app" not in arguments:
+        return False
+    configured: str | None = None
+    for index, argument in enumerate(arguments):
+        if argument == "--instance" and index + 1 < len(arguments):
+            configured = arguments[index + 1]
+            break
+        if argument.startswith("--instance="):
+            configured = argument.partition("=")[2]
+            break
+    try:
+        return normalize_instance_name(configured) == instance
+    except ValueError:
+        return False
+
+
 def _gpu_processes() -> list[dict[str, str]]:
     try:
         gpu_result = subprocess.run(
@@ -287,24 +387,36 @@ def _gpu_processes() -> list[dict[str, str]]:
     return processes
 
 
-def request_stop() -> bool:
+def request_stop(instance: str | None = None) -> bool:
     """Ask an active foreground Marathon supervisor to shut down."""
 
-    ensure_dirs()
+    name = normalize_instance_name(instance)
+    ensure_dirs(name)
+    session_file = runtime_paths(name).session_file
     stopped = False
     try:
-        session = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        session = json.loads(session_file.read_text(encoding="utf-8"))
         pid = int(session.get("supervisor_pid", 0))
+        raw_instance = session.get("instance")
+        session_instance = normalize_instance_name(
+            str(raw_instance) if raw_instance is not None else None
+        )
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         pid = 0
-    if pid > 1 and "marathon_app" in _cmdline(pid):
+        session_instance = None
+    owned = (
+        session_instance == name
+        and pid > 1
+        and _process_matches_instance(pid, name)
+    )
+    if pid > 1 and owned:
         try:
             os.kill(pid, signal.SIGTERM)
             stopped = True
         except ProcessLookupError:
             pass
     elif pid:
-        SESSION_FILE.unlink(missing_ok=True)
+        session_file.unlink(missing_ok=True)
     return stopped
 
 
@@ -315,11 +427,18 @@ def _set_parent_death_signal() -> None:
 
 
 class Runtime:
-    def __init__(self, model: Model, profile: Profile) -> None:
+    def __init__(
+        self,
+        model: Model,
+        profile: Profile,
+        instance: str | None = None,
+    ) -> None:
         self.model = model
-        self.profile = profile
-        self.config = settings()
-        self._context_window = profile.context
+        self.instance: InstanceConfig = resolve_instance(instance)
+        self.profile = self.instance.apply_profile(profile)
+        self.config = self.instance.settings
+        self.paths = runtime_paths(self.instance.name)
+        self._context_window = self.profile.context
         self.llama: subprocess.Popen[str] | None = None
         self.router: subprocess.Popen[str] | None = None
         self._backend: Backend | None = None
@@ -348,7 +467,7 @@ class Runtime:
 
     @property
     def log_dir(self) -> Path:
-        return USER_STATE_DIR / "logs"
+        return self.paths.state_dir / "logs"
 
     @property
     def model_log(self) -> Path:
@@ -360,7 +479,7 @@ class Runtime:
 
     @property
     def catalog_file(self) -> Path:
-        return RUNTIME_DIR / "codex-models.json"
+        return self.paths.runtime_dir / "codex-models.json"
 
     @property
     def run_id(self) -> str | None:
@@ -405,8 +524,8 @@ class Runtime:
         return max(1, self.auto_compact_token_limit - guard)
 
     def acquire(self) -> None:
-        ensure_dirs()
-        self._lock = LOCK_FILE.open("a+", encoding="utf-8")
+        ensure_dirs(self.instance.name)
+        self._lock = self.paths.lock_file.open("a+", encoding="utf-8")
         try:
             fcntl.flock(self._lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
@@ -422,10 +541,20 @@ class Runtime:
                 detail = f" on {terminal}" + (f" (PID {pid})" if pid else "")
             except (json.JSONDecodeError, AttributeError):
                 pass
-            raise RuntimeError(
-                f"Marathon is already open{detail}. Return to that terminal, "
-                "or run 'marathon stop' if you want to close it."
-            ) from error
+            if self.instance.name is None:
+                message = (
+                    f"Marathon is already open{detail}. Return to that terminal, "
+                    "or run 'marathon stop' if you want to close it."
+                )
+            else:
+                stop_command = " ".join(
+                    ("marathon", *self.instance.cli_arguments, "stop")
+                )
+                message = (
+                    f"Marathon instance '{self.instance.name}' is already open{detail}. "
+                    f"Return to that terminal, or run '{stop_command}' if you want to close it."
+                )
+            raise RuntimeError(message) from error
         self._owns_lock = True
         self._lock.seek(0)
         self._lock.truncate()
@@ -433,6 +562,7 @@ class Runtime:
             json.dumps(
                 {
                     "pid": os.getpid(),
+                    "instance": self.instance.name,
                     "terminal": os.ttyname(sys.stdin.fileno()) if sys.stdin.isatty() else None,
                     "started_at": int(time.time()),
                 }
@@ -449,11 +579,28 @@ class Runtime:
         self.cleanup()
         raise SystemExit(128 + signum)
 
-    def _check_conflicts(self) -> None:
-        for port in (self.config.llama_port, self.config.router_port):
+    def _check_conflicts(
+        self,
+        specs: list[BackendProcessSpec] | None = None,
+    ) -> None:
+        ports = {self.config.llama_port, self.config.router_port}
+        for spec in specs or ():
+            command = spec.command
+            for index, argument in enumerate(command):
+                value: str | None = None
+                if argument == "--port" and index + 1 < len(command):
+                    value = command[index + 1]
+                elif argument == "--listen" and index + 2 < len(command):
+                    value = command[index + 2]
+                if value and value.isdigit():
+                    ports.add(int(value))
+        for port in sorted(ports):
             pid = _port_pid(port)
             if pid:
-                raise RuntimeError(f"port {port} is still occupied by PID {pid}: {_cmdline(pid)}")
+                raise RuntimeError(
+                    f"Marathon instance '{self.instance.label}' cannot use port {port}; "
+                    f"PID {pid} is listening: {_cmdline(pid) or '(command unavailable)'}"
+                )
         processes = _gpu_processes()
         if self.profile.gpus:
             selected_gpus = {str(gpu) for gpu in self.profile.gpus}
@@ -464,18 +611,41 @@ class Runtime:
                 or process["gpu_index"] in selected_gpus
             ]
         if processes:
-            detail = "; ".join(
-                f"GPU {item.get('gpu_index') or '?'} PID {item['pid']} "
-                f"{item['name']} ({item['memory_mib']} MiB)"
-                for item in processes
+            grouped: dict[str, list[dict[str, str]]] = {}
+            for item in processes:
+                grouped.setdefault(item["pid"], []).append(item)
+            details: list[str] = []
+            for pid, items in grouped.items():
+                locations = ", ".join(
+                    f"GPU {item.get('gpu_index') or '?'} "
+                    f"({item['memory_mib']} MiB)"
+                    for item in items
+                )
+                details.append(
+                    f"{locations}: PID {pid} {items[0]['name']}, command: "
+                    f"{_cmdline(int(pid)) or '(command unavailable)'}"
+                )
+            detail = "; ".join(details)
+            requested = (
+                ",".join(str(gpu) for gpu in self.profile.gpus)
+                if self.profile.gpus
+                else "all visible GPUs"
             )
-            raise RuntimeError(f"GPU compute processes are already active: {detail}")
+            raise RuntimeError(
+                f"Marathon instance '{self.instance.label}' cannot use GPUs {requested}; "
+                f"compute processes are already active: {detail}"
+            )
 
     def _backend_specs(self, backend: Backend, slot_path: Path) -> list[BackendProcessSpec]:
         """Build the complete foreground process set for the selected backend."""
 
         if backend.kind == "llama_cpp":
-            command = server_command(self.model, self.profile, backend)
+            command = server_command(
+                self.model,
+                self.profile,
+                backend,
+                configured=self.config,
+            )
             if _slot_api_enabled(self.model, backend):
                 command.extend(["--slot-save-path", str(slot_path)])
             environment = backend_environment(self.model, backend)
@@ -495,7 +665,7 @@ class Runtime:
             raise ValueError(f"backend '{backend.id}' has no worker executable")
 
         slices = backend.layer_slices
-        gpu_ids = backend.gpu_ids
+        gpu_ids = self.instance.gpus or backend.gpu_ids
         configured_gpus = os.environ.get("MARATHON_DS4_GPUS")
         if configured_gpus:
             try:
@@ -527,7 +697,9 @@ class Runtime:
             process_environment = {
                 **defaults,
                 "CUDA_VISIBLE_DEVICES": str(gpu_ids[index]),
-                "DS4_LOCK_FILE": str(RUNTIME_DIR / f"ds4-worker-{index}.lock"),
+                "DS4_LOCK_FILE": str(
+                    self.paths.runtime_dir / f"ds4-worker-{index}.lock"
+                ),
             }
             command = [
                 str(backend.worker),
@@ -552,7 +724,7 @@ class Runtime:
         coordinator_environment = {
             **defaults,
             "CUDA_VISIBLE_DEVICES": str(gpu_ids[0]),
-            "DS4_LOCK_FILE": str(RUNTIME_DIR / "ds4-coordinator.lock"),
+            "DS4_LOCK_FILE": str(self.paths.runtime_dir / "ds4-coordinator.lock"),
         }
         coordinator = [
             str(backend.server),
@@ -634,11 +806,11 @@ class Runtime:
     def start(self, progress: Callable[[str], None] | None = None) -> None:
         self.acquire()
         self._install_handlers()
-        self.telemetry = create_run_writer(self.model.id)
+        self.telemetry = create_run_writer(self.model.id, self.instance.name)
         self._run_started_mono = time.monotonic()
         self._backend = backend_for(self.model, self.profile)
         slot_api_enabled = _slot_api_enabled(self.model, self._backend)
-        slot_path = SLOT_ROOT / self.model.alias
+        slot_path = self.paths.slot_root / self.model.alias
         backend_specs = self._backend_specs(self._backend, slot_path)
         backend_cache_id = _backend_cache_id(self.model, backend_specs)
         backend_commands = [list(spec.command) for spec in backend_specs]
@@ -646,6 +818,7 @@ class Runtime:
         self.record(
             "run.started",
             {
+                "instance": self.instance.name,
                 "model": {
                     "id": self.model.id,
                     "display_name": self.model.display_name,
@@ -672,6 +845,7 @@ class Runtime:
                     "backend": self.profile.backend,
                     "temperature": self.profile.temperature,
                     "confidence": self.profile.confidence,
+                    "gpus": list(self.profile.gpus),
                 },
                 "backend": {
                     "id": self._backend.id,
@@ -698,8 +872,8 @@ class Runtime:
                     if Path(primary_command[0]).exists() else None,
                 },
                 "trace_disk": {
-                    "free_bytes": shutil.disk_usage(runs_dir()).free,
-                    "total_bytes": shutil.disk_usage(runs_dir()).total,
+                    "free_bytes": shutil.disk_usage(self.paths.runs_dir).free,
+                    "total_bytes": shutil.disk_usage(self.paths.runs_dir).total,
                 },
                 "telemetry": {
                     "process_output": os.environ.get("MARATHON_TELEMETRY_PROCESS_OUTPUT", "1"),
@@ -713,7 +887,7 @@ class Runtime:
         )
         self._start_sampler()
         try:
-            self._check_conflicts()
+            self._check_conflicts(backend_specs)
         except Exception as error:
             self.record("runtime.conflict", {"error": str(error)}, level="error")
             raise
@@ -749,7 +923,8 @@ class Runtime:
         router_env.update(
             {
                 "PYTHONDONTWRITEBYTECODE": "1",
-                "MARATHON_AI_ROOT": str(AI_ROOT),
+                "MARATHON_AI_ROOT": str(self.config.ai_root),
+                "MARATHON_INSTANCE": self.instance.name or "",
                 "MARATHON_MODELS_DIR": str(self.config.model_root),
                 "MARATHON_MODEL_PATH": str(self.model.path),
                 "MARATHON_MODEL_SLUG": self.model.alias,
@@ -788,7 +963,7 @@ class Runtime:
                 "MARATHON_MODEL_DEFAULT_REASONING_LEVEL": (
                     self.model.family.default_reasoning_level or ""
                 ),
-                "MARATHON_SLOT_SAVE_ROOT": str(SLOT_ROOT),
+                "MARATHON_SLOT_SAVE_ROOT": str(self.paths.slot_root),
                 "MARATHON_SLOT_SNAPSHOTS_ENABLED": (
                     "1" if self.config.slot_snapshots_enabled else "0"
                 ),
@@ -828,7 +1003,8 @@ class Runtime:
             [
                 str(python), str(ROOT_DIR / "scripts" / "routers" / "codex_local_router.py"),
                 "--host", self.config.router_host, "--port", str(self.config.router_port),
-                "--default-model", self.model.alias, "--state-dir", str(ROUTER_STATE_DIR),
+                "--default-model", self.model.alias,
+                "--state-dir", str(self.paths.router_state_dir),
                 "--log-dir", str(self.log_dir),
             ],
             self._open_log(self.router_log),
@@ -1112,9 +1288,10 @@ class Runtime:
         temporary.replace(self.catalog_file)
 
     def _write_session(self) -> None:
-        ensure_dirs()
+        ensure_dirs(self.instance.name)
         payload = {
             "schema": 1,
+            "instance": self.instance.name,
             "supervisor_pid": os.getpid(),
             "backend": self._backend.id if self._backend else None,
             "backend_pids": {
@@ -1129,12 +1306,13 @@ class Runtime:
             "run_id": self.run_id,
             "run_log": str(self.run_log) if self.run_log else None,
         }
-        temporary = SESSION_FILE.with_suffix(".tmp")
+        temporary = self.paths.session_file.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(SESSION_FILE)
+        temporary.replace(self.paths.session_file)
 
     def status(self) -> dict[str, object]:
         return {
+            "instance": self.instance.name,
             "model": self.model.display_name,
             "model_id": self.model.id,
             "profile": self.profile.display_name,
@@ -1199,7 +1377,7 @@ class Runtime:
             },
         )
         if self._owns_lock:
-            SESSION_FILE.unlink(missing_ok=True)
+            self.paths.session_file.unlink(missing_ok=True)
             self.catalog_file.unlink(missing_ok=True)
         for signum, handler in self._old_handlers.items():
             signal.signal(signum, handler)

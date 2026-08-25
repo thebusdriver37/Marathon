@@ -9,6 +9,8 @@ import shutil
 from pathlib import Path
 from typing import Mapping
 
+from .instance import instance_path, normalize_instance_name
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SHARED_PROFILE = "marathon-shared"
@@ -49,19 +51,25 @@ def stock_codex_home(environment: Mapping[str, str] | None = None) -> Path:
     marathon_home = marathon_codex_home(environment)
     if configured:
         candidate = Path(configured).expanduser().resolve()
-        if candidate != marathon_home:
+        if candidate != marathon_home and marathon_home not in candidate.parents:
             return candidate
     return (Path.home() / ".codex").resolve()
 
 
-def marathon_codex_home(environment: Mapping[str, str] | None = None) -> Path:
+def marathon_codex_home(
+    environment: Mapping[str, str] | None = None,
+    instance: str | None = None,
+) -> Path:
     """Return Marathon's writable Codex state root."""
 
     environment = os.environ if environment is None else environment
+    name = normalize_instance_name(instance)
     configured = environment.get("MARATHON_CODEX_HOME")
     if configured:
-        return Path(configured).expanduser().resolve()
-    return (ROOT_DIR / ".marathon" / "codex-home").resolve()
+        root = Path(configured).expanduser().resolve()
+    else:
+        root = (ROOT_DIR / ".marathon" / "codex-home").resolve()
+    return instance_path(root, name)
 
 
 def _path_present(path: Path) -> bool:
@@ -205,33 +213,37 @@ def _migrate_marathon_sessions(stock_home: Path, isolated_home: Path) -> None:
 
 def prepare_codex_home(
     environment: Mapping[str, str] | None = None,
+    instance: str | None = None,
 ) -> tuple[Path, str | None]:
     """Create Marathon's Codex boundary and return its home and base profile."""
 
     environment = os.environ if environment is None else environment
+    name = normalize_instance_name(instance)
     stock_home = stock_codex_home(environment)
-    if environment.get("MARATHON_USE_USER_CONFIG") == "1":
+    if environment.get("MARATHON_USE_USER_CONFIG") == "1" and name is None:
         stock_home.mkdir(parents=True, exist_ok=True)
         return stock_home, None
 
-    isolated_home = marathon_codex_home(environment)
+    isolated_home = marathon_codex_home(environment, name)
     isolated_home.mkdir(parents=True, exist_ok=True)
-    for name in SHARED_PATHS:
-        source = stock_home / name
-        destination = isolated_home / name
+    for shared_name in SHARED_PATHS:
+        source = stock_home / shared_name
+        destination = isolated_home / shared_name
         _share_path(source, destination)
     _write_shared_profile(stock_home, isolated_home)
-    _migrate_marathon_sessions(stock_home, isolated_home)
+    if name is None:
+        _migrate_marathon_sessions(stock_home, isolated_home)
     return isolated_home, SHARED_PROFILE
 
 
 def codex_environment(
     environment: Mapping[str, str] | None = None,
+    instance: str | None = None,
 ) -> tuple[dict[str, str], Path, str | None]:
     """Return a child environment configured for Marathon's Codex state."""
 
     child = dict(os.environ if environment is None else environment)
-    home, profile = prepare_codex_home(child)
+    home, profile = prepare_codex_home(child, instance)
     child["CODEX_HOME"] = str(home)
     if profile is not None:
         child["CODEX_SQLITE_HOME"] = str(home)

@@ -13,6 +13,50 @@ The `marathon dashboard` command exposes model profiles, alternate frontends, wa
 `marathon exec PROMPT` uses the same supervised lifecycle for headless and CI work, including starting the remembered model and cleaning it up afterward.
 `marathon codex -- CODEX_ARGS` forwards Codex flags without bypassing supervision.
 
+## Named Instances
+
+The default instance preserves Marathon's original paths and configured ports.
+A named instance uses the same model catalog and runtime profiles but owns independent mutable state.
+
+Configure local GPU policy in `~/.config/marathon/catalog.toml`:
+
+```toml
+[instances.gpu23]
+gpus = [2, 3]
+```
+
+If the default profile is pinned to GPUs 0 and 1, the following commands run two copies of that profile concurrently:
+
+```bash
+marathon
+marathon --instance gpu23
+```
+
+The instance GPU list overrides the selected profile's `gpus` value without duplicating the profile.
+This makes one tested model and profile reusable across several GPU groups.
+A new named instance initially copies the default remembered model and profile choice, then writes its own selection file.
+
+Marathon derives backend and router ports from a stable hash of the instance name.
+Use explicit values when a machine has a fixed port policy or a derived port conflicts with another service:
+
+```toml
+[instances.gpu23]
+gpus = [2, 3]
+llama_port = 18082
+router_port = 28111
+```
+
+Before launching any child process, Marathon checks every requested listener and selected GPU.
+An occupied resource produces an error containing the port or GPU, PID, process name, and command.
+Marathon never stops or evicts an occupying external process.
+
+Instance identity applies to `dashboard`, `codex`, `exec`, `hermes`, `direct`, `remote`, `setup`, `status`, `stop`, `report`, `compare`, `resume`, and `fork`.
+For example, `marathon --instance gpu23 resume` sees only that instance's Codex sessions and starts only that instance's backend.
+
+Named writable data uses `instances/NAME/` below each normal root.
+This includes the runtime lock and session, logs, traces, generated model catalog, router state, slot prompt cache, remembered selection, and Marathon Codex home.
+The default instance never moves, so existing installs and scripts retain their original behavior.
+
 ## Prompt Prefix Cache
 
 Marathon enables llama.cpp prompt caching and keeps completed prompt prefixes available when a new conversation starts.

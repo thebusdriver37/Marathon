@@ -812,6 +812,15 @@ def _initial_selection(
     return Selection(model, profile, frontend)
 
 
+def _remembered_instance_selection(instance: str | None) -> dict[str, str]:
+    """Seed a new named instance from the default, then keep it independent."""
+
+    remembered = load_selection(instance)
+    if not remembered and instance is not None:
+        remembered = load_selection()
+    return remembered
+
+
 def _launch_frontend(
     console: Console,
     runtime: Runtime | RemoteRuntime,
@@ -936,7 +945,10 @@ def _run_runtime_dashboard(
             return 0
 
 
-def run_dashboard(initial_frontend: str | None = None) -> int:
+def run_dashboard(
+    initial_frontend: str | None = None,
+    instance: str | None = None,
+) -> int:
     console = Console()
     models = discover_models()
     if not models:
@@ -947,17 +959,22 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
         models = discover_models()
     else:
         selection = _apply_initial_frontend(
-            _initial_selection(models), initial_frontend
+            _initial_selection(models, _remembered_instance_selection(instance)),
+            initial_frontend,
         )
     return _run_runtime_dashboard(
         console,
         models,
         selection,
         initial_frontend=initial_frontend,
-        runtime_factory=lambda current: Runtime(current.model, current.profile),
-        remember=save_selection,
+        runtime_factory=lambda current: Runtime(
+            current.model, current.profile, instance
+        ),
+        remember=lambda model, profile, frontend: save_selection(
+            model, profile, frontend, instance
+        ),
         allow_tune=True,
-        location=None,
+        location=f"Local instance · {instance}" if instance else None,
         library_context=None,
         preparing_message="[bold magenta]Preparing GPUs…[/bold magenta]",
         stopping_message="[yellow]Stopping backend and freeing GPUs…[/yellow]",
@@ -967,21 +984,27 @@ def run_dashboard(initial_frontend: str | None = None) -> int:
     )
 
 
-def run_codex_default(codex_args: list[str] | None = None) -> int:
+def run_codex_default(
+    codex_args: list[str] | None = None,
+    instance: str | None = None,
+) -> int:
     """Start the remembered model and Codex without an intermediate menu."""
 
     console = Console()
     models = discover_models()
     if models:
-        selection = _apply_initial_frontend(_initial_selection(models), "codex")
+        selection = _apply_initial_frontend(
+            _initial_selection(models, _remembered_instance_selection(instance)),
+            "codex",
+        )
     else:
         selection = _setup_model_selection(console)
         if selection is None:
             return 0
     if not _ensure_local_tools(console, selection):
         return 2
-    save_selection(selection.model, selection.profile, "codex")
-    runtime = Runtime(selection.model, selection.profile)
+    save_selection(selection.model, selection.profile, "codex", instance)
+    runtime = Runtime(selection.model, selection.profile, instance)
     result = 0
     try:
         with console.status("[bold magenta]Preparing local Codex...[/bold magenta]", spinner="dots") as status:
@@ -1000,7 +1023,7 @@ def run_codex_default(codex_args: list[str] | None = None) -> int:
     return result
 
 
-def run_setup_dashboard() -> int:
+def run_setup_dashboard(instance: str | None = None) -> int:
     """Configure the local model library without starting a backend."""
 
     console = Console()
@@ -1009,7 +1032,7 @@ def run_setup_dashboard() -> int:
         return 0
     if not _ensure_local_tools(console, selection):
         return 2
-    save_selection(selection.model, selection.profile, "codex")
+    save_selection(selection.model, selection.profile, "codex", instance)
     console.clear()
     console.print(
         Panel.fit(
@@ -1023,7 +1046,11 @@ def run_setup_dashboard() -> int:
     return 0
 
 
-def run_remote_dashboard(host: str, initial_frontend: str | None = None) -> int:
+def run_remote_dashboard(
+    host: str,
+    initial_frontend: str | None = None,
+    instance: str | None = None,
+) -> int:
     """Run Codex on this machine against a foreground GPU host over SSH."""
 
     console = Console()
@@ -1032,7 +1059,7 @@ def run_remote_dashboard(host: str, initial_frontend: str | None = None) -> int:
             f"[bold magenta]Reading models from {host}…[/bold magenta]",
             spinner="dots",
         ):
-            remote = fetch_remote_catalog(host)
+            remote = fetch_remote_catalog(host, instance)
     except Exception as error:
         console.print(Panel(str(error), title="Remote Marathon unavailable", border_style="red"))
         return 2
@@ -1041,7 +1068,8 @@ def run_remote_dashboard(host: str, initial_frontend: str | None = None) -> int:
         console.print(f"[bold red]No GGUF models found on {host}.[/bold red]")
         return 2
     selection = _apply_initial_frontend(
-        _initial_selection(models, load_remote_selection(host)), initial_frontend
+        _initial_selection(models, load_remote_selection(host, instance)),
+        initial_frontend,
     )
     return _run_runtime_dashboard(
         console,
@@ -1049,10 +1077,14 @@ def run_remote_dashboard(host: str, initial_frontend: str | None = None) -> int:
         selection,
         initial_frontend=initial_frontend,
         runtime_factory=lambda current: RemoteRuntime(
-            host, remote.router_port, current.model, current.profile
+            host,
+            remote.router_port,
+            current.model,
+            current.profile,
+            instance,
         ),
         remember=lambda model, profile, frontend: save_remote_selection(
-            host, model, profile, frontend
+            host, model, profile, frontend, instance
         ),
         allow_tune=False,
         location=f"Remote GPU host · {host}",
@@ -1069,7 +1101,7 @@ def run_remote_dashboard(host: str, initial_frontend: str | None = None) -> int:
     )
 
 
-def run_dyno_dashboard() -> int:
+def run_dyno_dashboard(instance: str | None = None) -> int:
     """Open Dyno directly without adding complexity to the normal launcher."""
 
     console = Console()
@@ -1077,7 +1109,9 @@ def run_dyno_dashboard() -> int:
     if not models:
         console.print("[bold red]No GGUF models found.[/bold red]")
         return 2
-    selection = _initial_selection(models)
+    selection = _initial_selection(
+        models, _remembered_instance_selection(instance)
+    )
     try:
         tuned = _run_dyno_flow(console, selection)
     except KeyboardInterrupt:
@@ -1087,5 +1121,5 @@ def run_dyno_dashboard() -> int:
         console.print(Panel(str(error), title="Dyno could not finish", border_style="red"))
         return 2
     if tuned:
-        save_selection(tuned.model, tuned.profile, tuned.frontend)
+        save_selection(tuned.model, tuned.profile, tuned.frontend, instance)
     return 0

@@ -13,9 +13,10 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .catalog import discover_models, format_size, settings
+from .catalog import discover_models, format_size
+from .instance import normalize_instance_name, resolve_instance
 from .model_library import register_model_root
-from .runtime import SESSION_FILE, request_stop
+from .runtime import request_stop, runtime_paths
 from .telemetry import resolve_run, summarize_run
 from .remote import run_remote_host_command
 from .ui import (
@@ -51,19 +52,30 @@ def _models(targets: list[str]) -> int:
     return 0 if models else 1
 
 
-def _status() -> int:
+def _status(instance: str | None = None) -> int:
     console = Console()
-    config = settings()
+    resolved = resolve_instance(instance)
+    config = resolved.settings
+    session_file = runtime_paths(resolved.name).session_file
     try:
-        session = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        session = json.loads(session_file.read_text(encoding="utf-8"))
         with urllib.request.urlopen(
             f"http://{config.router_host}:{config.router_port}/health", timeout=2
         ) as response:
             health = json.loads(response.read().decode("utf-8"))
     except (OSError, json.JSONDecodeError, urllib.error.URLError):
-        console.print("[dim]Marathon is stopped.[/dim]")
+        if resolved.name:
+            console.print(
+                f"[dim]Marathon instance '{resolved.name}' is stopped.[/dim]"
+            )
+        else:
+            console.print("[dim]Marathon is stopped.[/dim]")
         return 1
-    console.print(f"[green]● Marathon running[/green] · {session.get('model')} / {session.get('profile')}")
+    label = f" instance '{resolved.name}'" if resolved.name else ""
+    console.print(
+        f"[green]● Marathon{label} running[/green] · "
+        f"{session.get('model')} / {session.get('profile')}"
+    )
     console.print(f"Supervisor PID {session.get('supervisor_pid')} · backend {health.get('backend_health') or 'ready'}")
     if session.get("run_log"):
         console.print(f"Trace: {session['run_log']}", style="dim")
@@ -76,9 +88,10 @@ def _format_duration(seconds: float) -> str:
     return f"{int(seconds // 60)}m {seconds % 60:.0f}s"
 
 
-def _run_is_active(path: Path) -> bool:
+def _run_is_active(path: Path, instance: str | None = None) -> bool:
+    session_file = runtime_paths(instance).session_file
     try:
-        session = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        session = json.loads(session_file.read_text(encoding="utf-8"))
         pid = int(session["supervisor_pid"])
         run_log = Path(session["run_log"]).expanduser().resolve()
         os.kill(pid, 0)
@@ -87,11 +100,11 @@ def _run_is_active(path: Path) -> bool:
     return run_log == path.resolve()
 
 
-def _report(target: str | None) -> int:
+def _report(target: str | None, instance: str | None = None) -> int:
     console = Console()
     try:
-        path = resolve_run(target)
-        summary = summarize_run(path, live=_run_is_active(path))
+        path = resolve_run(target, instance)
+        summary = summarize_run(path, live=_run_is_active(path, instance))
     except (OSError, ValueError) as error:
         console.print(f"[bold red]Cannot read run:[/bold red] {error}")
         return 2
@@ -208,15 +221,16 @@ def _report(target: str | None) -> int:
     return 0
 
 
-def _compare(targets: list[str]) -> int:
+def _compare(targets: list[str], instance: str | None = None) -> int:
     console = Console()
     if len(targets) != 2:
         console.print("[bold red]Usage:[/bold red] marathon compare <run-a> <run-b>")
         return 2
     try:
-        paths = [resolve_run(target) for target in targets]
+        paths = [resolve_run(target, instance) for target in targets]
         left, right = (
-            summarize_run(path, live=_run_is_active(path)) for path in paths
+            summarize_run(path, live=_run_is_active(path, instance))
+            for path in paths
         )
     except (OSError, ValueError) as error:
         console.print(f"[bold red]Cannot compare runs:[/bold red] {error}")
@@ -248,9 +262,22 @@ def _compare(targets: list[str]) -> int:
     return 0
 
 
+def _instance_name(value: str) -> str | None:
+    try:
+        return normalize_instance_name(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="marathon", description="One-command local AI runtime")
     parser.add_argument("--version", action="version", version=f"Marathon {__version__}")
+    parser.add_argument(
+        "--instance",
+        type=_instance_name,
+        metavar="NAME",
+        help="use an independent named runtime instance",
+    )
     parser.add_argument(
         "command",
         nargs="?",
@@ -280,37 +307,70 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        instance = resolve_instance(args.instance).name
+    except ValueError as error:
+        Console().print(f"[bold red]Invalid instance configuration:[/bold red] {error}")
+        return 2
     if args.command == "models":
         return _models(args.targets)
     if args.command == "status":
-        return _status()
+        return _status(instance)
     if args.command == "stop":
-        stopped = request_stop()
-        Console().print("[green]Stop requested.[/green]" if stopped else "[dim]Marathon is already stopped.[/dim]")
+        stopped = request_stop(instance)
+        if instance:
+            Console().print(
+                f"[green]Stop requested for Marathon instance '{instance}'.[/green]"
+                if stopped
+                else f"[dim]Marathon instance '{instance}' is already stopped.[/dim]"
+            )
+        else:
+            Console().print(
+                "[green]Stop requested.[/green]"
+                if stopped
+                else "[dim]Marathon is already stopped.[/dim]"
+            )
         return 0
     if args.command == "report":
-        return _report(args.targets[0] if args.targets else None)
+        return _report(args.targets[0] if args.targets else None, instance)
     if args.command == "compare":
-        return _compare(args.targets)
+        return _compare(args.targets, instance)
     if args.command == "remote-host":
-        return run_remote_host_command(args.targets)
+        return run_remote_host_command(args.targets, instance)
     if args.command == "remote":
         if len(args.targets) != 1:
             Console().print("[bold red]Usage:[/bold red] marathon remote <ssh-host>")
             return 2
-        return run_remote_dashboard(args.targets[0])
+        return run_remote_dashboard(args.targets[0], instance=instance)
     if args.command == "tune":
-        return run_dyno_dashboard()
+        return run_dyno_dashboard(instance)
     if args.command == "setup":
-        return run_setup_dashboard()
+        return run_setup_dashboard(instance)
     if args.command in {"resume", "fork"}:
-        return run_codex_default([args.command, *args.targets])
+        codex_args = [args.command, *args.targets]
+        return (
+            run_codex_default(codex_args)
+            if instance is None
+            else run_codex_default(codex_args, instance)
+        )
     if args.command == "exec":
-        return run_codex_default(["exec", *args.targets])
+        codex_args = ["exec", *args.targets]
+        return (
+            run_codex_default(codex_args)
+            if instance is None
+            else run_codex_default(codex_args, instance)
+        )
     if args.command == "codex":
-        return run_codex_default(args.targets)
-    return run_dashboard(
-        args.command if args.command in {"hermes", "direct"} else None
+        return (
+            run_codex_default(args.targets)
+            if instance is None
+            else run_codex_default(args.targets, instance)
+        )
+    frontend = args.command if args.command in {"hermes", "direct"} else None
+    return (
+        run_dashboard(frontend)
+        if instance is None
+        else run_dashboard(frontend, instance)
     )
 
 

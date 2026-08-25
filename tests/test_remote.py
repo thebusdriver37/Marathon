@@ -111,6 +111,30 @@ class RemoteRuntimeTests(unittest.TestCase):
         self.assertNotIn("0.0.0.0", command)
         self.assertEqual(runtime.router_url, "http://127.0.0.1:31415")
 
+    def test_named_remote_runtime_starts_the_same_host_instance(self) -> None:
+        model = fixture_model()
+        profile = catalog.find_profile(model, "balanced", "codex")
+        with (
+            mock.patch("marathon_app.remote._available_port", return_value=31415),
+            mock.patch(
+                "marathon_app.remote._ssh_binary", return_value="/usr/bin/ssh"
+            ),
+        ):
+            runtime = remote.RemoteRuntime(
+                "gpu-rig",
+                19698,
+                model,
+                profile,
+                "gpu23",
+            )
+            command = runtime._command()
+
+        self.assertIn(
+            "--instance gpu23 remote-host run",
+            command[-1],
+        )
+        self.assertIn("127.0.0.1:31415:127.0.0.1:19698", command)
+
     def test_frontend_events_are_sent_to_host_supervisor(self) -> None:
         model = fixture_model()
         profile = catalog.find_profile(model, "balanced", "codex")

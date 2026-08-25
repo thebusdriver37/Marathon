@@ -11,7 +11,10 @@ ROOT_DIR="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
 usage() {
   cat <<USAGE
-Usage: marathon [command] [args...]
+Usage: marathon [--instance NAME] [command] [args...]
+
+Named instances:
+  --instance NAME  Use independent ports, runtime state, logs, cache, and selection
 
 Commands:
   codex           Start the remembered model and open Codex (default)
@@ -74,10 +77,42 @@ run_app() {
   PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" exec "$python" -m marathon_app "$@"
 }
 
+instance_args=()
+case "${1:-}" in
+  --instance)
+    if [[ $# -lt 2 || -z "${2:-}" ]]; then
+      echo "marathon: --instance requires a name" >&2
+      exit 2
+    fi
+    instance_args=(--instance "$2")
+    shift 2
+    ;;
+  --instance=*)
+    instance_name="${1#--instance=}"
+    if [[ -z "$instance_name" ]]; then
+      echo "marathon: --instance requires a name" >&2
+      exit 2
+    fi
+    instance_args=(--instance "$instance_name")
+    shift
+    ;;
+esac
+
 cmd="${1:-codex}"
 if [[ $# -gt 0 ]]; then
   shift
 fi
+
+case "$cmd" in
+  dashboard|codex|exec|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare|resume|fork|help|--help|-h|--version|-V)
+    ;;
+  *)
+    if [[ ${#instance_args[@]} -gt 0 ]]; then
+      echo "marathon: '$cmd' does not accept --instance" >&2
+      exit 2
+    fi
+    ;;
+esac
 
 if [[ "$cmd" == "codex" && "${MARATHON_AUTO_INSTALL_CLI:-1}" == "1" ]]; then
   install_dir="${MARATHON_INSTALL_BIN_DIR:-$HOME/.local/bin}"
@@ -90,10 +125,10 @@ fi
 
 case "$cmd" in
   dashboard)
-    run_app dashboard "$@"
+    run_app "${instance_args[@]}" dashboard "$@"
     ;;
   codex|exec|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare|resume|fork)
-    run_app "$cmd" "$@"
+    run_app "${instance_args[@]}" "$cmd" "$@"
     ;;
   doctor)
     exec "$ROOT_DIR/scripts/ops/doctor.sh" "$@"

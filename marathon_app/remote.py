@@ -34,7 +34,8 @@ from .catalog import (
     profiles_for_model,
     settings,
 )
-from .runtime import CONFIG_DIR, USER_STATE_DIR, Runtime
+from .instance import normalize_instance_name, resolve_instance
+from .runtime import CONFIG_DIR, Runtime, runtime_paths
 
 
 PROTOCOL_VERSION = 1
@@ -62,8 +63,8 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-def _require_loopback_bindings() -> None:
-    configured = settings()
+def _require_loopback_bindings(instance: str | None = None) -> None:
+    configured = settings() if instance is None else resolve_instance(instance).settings
     exposed: list[str] = []
     if not _is_loopback(configured.llama_host):
         exposed.append(f"llama_host={configured.llama_host}")
@@ -118,10 +119,11 @@ def _profile_from_payload(payload: dict[str, object]) -> Profile:
     )
 
 
-def remote_catalog_payload() -> dict[str, object]:
+def remote_catalog_payload(instance: str | None = None) -> dict[str, object]:
     """Describe models on the GPU host without starting a backend."""
 
-    _require_loopback_bindings()
+    resolved = resolve_instance(instance)
+    _require_loopback_bindings(resolved.name)
     models: list[dict[str, object]] = []
     for model in discover_models():
         models.append(
@@ -151,7 +153,7 @@ def remote_catalog_payload() -> dict[str, object]:
     return {
         "protocol": PROTOCOL_VERSION,
         "marathon_version": __version__,
-        "router_port": settings().router_port,
+        "router_port": resolved.settings.router_port,
         "models": models,
     }
 
@@ -258,14 +260,18 @@ def _extract_protocol_payload(output: str, prefix: str) -> dict[str, object]:
     raise ValueError(f"remote Marathon did not emit {prefix.strip()}")
 
 
-def fetch_remote_catalog(host: str) -> RemoteCatalog:
+def fetch_remote_catalog(
+    host: str,
+    instance: str | None = None,
+) -> RemoteCatalog:
     if not host or host.startswith("-") or any(character.isspace() for character in host):
         raise ValueError("SSH host must be a hostname, alias, or user@hostname")
+    remote_arguments = [*resolve_instance(instance).cli_arguments, "remote-host", "catalog"]
     command = [
         _ssh_binary(),
         *_ssh_options(),
         host,
-        _remote_shell_command("remote-host", "catalog"),
+        _remote_shell_command(*remote_arguments),
     ]
     try:
         result = subprocess.run(
@@ -298,9 +304,20 @@ def fetch_remote_catalog(host: str) -> RemoteCatalog:
     )
 
 
-def load_remote_selection(host: str) -> dict[str, str]:
+def _remote_selection_file(instance: str | None = None) -> Path:
+    name = normalize_instance_name(instance)
+    if name is None:
+        return REMOTE_SELECTION_FILE
+    return runtime_paths(name).config_dir / "remote-selections.json"
+
+
+def load_remote_selection(
+    host: str,
+    instance: str | None = None,
+) -> dict[str, str]:
+    selection_file = _remote_selection_file(instance)
     try:
-        payload = json.loads(REMOTE_SELECTION_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(selection_file.read_text(encoding="utf-8"))
         value = payload.get("hosts", {}).get(host, {})
     except (OSError, AttributeError, json.JSONDecodeError):
         return {}
@@ -311,9 +328,16 @@ def load_remote_selection(host: str) -> dict[str, str]:
     }
 
 
-def save_remote_selection(host: str, model: Model, profile: Profile, frontend: str) -> None:
+def save_remote_selection(
+    host: str,
+    model: Model,
+    profile: Profile,
+    frontend: str,
+    instance: str | None = None,
+) -> None:
+    selection_file = _remote_selection_file(instance)
     try:
-        payload = json.loads(REMOTE_SELECTION_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(selection_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         payload = {"schema": 1, "hosts": {}}
     hosts = payload.setdefault("hosts", {})
@@ -325,10 +349,10 @@ def save_remote_selection(host: str, model: Model, profile: Profile, frontend: s
         "profile": profile.id,
         "frontend": frontend,
     }
-    REMOTE_SELECTION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temporary = REMOTE_SELECTION_FILE.with_suffix(".tmp")
+    selection_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = selection_file.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(REMOTE_SELECTION_FILE)
+    temporary.replace(selection_file)
 
 
 def _available_port() -> int:
@@ -346,11 +370,13 @@ class RemoteRuntime:
         router_port: int,
         model: Model,
         profile: Profile,
+        instance: str | None = None,
     ) -> None:
         self.host = host
         self.remote_router_port = router_port
         self.model = model
         self.profile = profile
+        self.instance = resolve_instance(instance)
         self.local_port = _available_port()
         self._context_window = profile.context
         self._auto_compact_token_limit: int | None = None
@@ -365,7 +391,10 @@ class RemoteRuntime:
         self.run_log: str | None = None
         safe_host = re.sub(r"[^a-zA-Z0-9_.-]+", "-", host).strip("-") or "host"
         self.catalog_file = (
-            USER_STATE_DIR / "remote" / safe_host / "codex-models.json"
+            runtime_paths(self.instance.name).state_dir
+            / "remote"
+            / safe_host
+            / "codex-models.json"
         )
 
     @property
@@ -423,7 +452,11 @@ class RemoteRuntime:
             "-L", forward,
             self.host,
             _remote_shell_command(
-                "remote-host", "run", self.model.id, self.profile.id
+                *self.instance.cli_arguments,
+                "remote-host",
+                "run",
+                self.model.id,
+                self.profile.id,
             ),
         ]
 
@@ -566,18 +599,22 @@ def _protocol_print(prefix: str, payload: dict[str, object]) -> None:
     print(prefix + json.dumps(payload, separators=(",", ":")), flush=True)
 
 
-def print_remote_catalog() -> int:
-    _protocol_print(CATALOG_PREFIX, remote_catalog_payload())
+def print_remote_catalog(instance: str | None = None) -> int:
+    _protocol_print(CATALOG_PREFIX, remote_catalog_payload(instance))
     return 0
 
 
-def run_remote_host(model_id: str, profile_id: str) -> int:
+def run_remote_host(
+    model_id: str,
+    profile_id: str,
+    instance: str | None = None,
+) -> int:
     runtime: Runtime | None = None
     try:
-        _require_loopback_bindings()
+        _require_loopback_bindings(instance)
         model = find_model(model_id, discover_models())
         profile = find_profile(model, profile_id)
-        runtime = Runtime(model, profile)
+        runtime = Runtime(model, profile, instance)
         runtime.start(
             lambda message: _protocol_print(
                 PROGRESS_PREFIX, {"message": message}
@@ -625,10 +662,13 @@ def run_remote_host(model_id: str, profile_id: str) -> int:
             runtime.cleanup()
 
 
-def run_remote_host_command(arguments: list[str]) -> int:
+def run_remote_host_command(
+    arguments: list[str],
+    instance: str | None = None,
+) -> int:
     if arguments == ["catalog"]:
-        return print_remote_catalog()
+        return print_remote_catalog(instance)
     if len(arguments) == 3 and arguments[0] == "run":
-        return run_remote_host(arguments[1], arguments[2])
+        return run_remote_host(arguments[1], arguments[2], instance)
     print("Usage: marathon remote-host catalog | run <model> <profile>", file=sys.stderr)
     return 2

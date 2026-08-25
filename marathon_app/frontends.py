@@ -49,13 +49,15 @@ def _hermes_binary() -> str:
     return os.environ.get("MARATHON_HERMES_BIN") or "hermes"
 
 
-def _marathon_cli_name() -> str:
+def _marathon_cli_name(instance: str | None = None) -> str:
     configured = os.environ.get("CODEX_CLI_NAME")
     if configured and configured.strip():
-        return configured.strip()
-    if shutil.which("marathon"):
-        return "marathon"
-    return str(Path(__file__).resolve().parents[1] / "bin" / "marathon")
+        command = configured.strip()
+    elif shutil.which("marathon"):
+        command = "marathon"
+    else:
+        command = str(Path(__file__).resolve().parents[1] / "bin" / "marathon")
+    return f"{command} --instance {instance}" if instance else command
 
 
 def _codex_features(binary: str) -> set[str]:
@@ -107,9 +109,10 @@ def codex_command(
 
 
 def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
-    environment, codex_home, shared_profile = codex_environment()
+    instance = getattr(getattr(runtime, "instance", None), "name", None)
+    environment, codex_home, shared_profile = codex_environment(instance=instance)
     command = codex_command(runtime, extra_args, shared_profile=shared_profile)
-    environment.setdefault("CODEX_CLI_NAME", _marathon_cli_name())
+    environment["CODEX_CLI_NAME"] = _marathon_cli_name(instance)
     before = snapshot_sessions(codex_home)
     started = time.monotonic()
     runtime.record(

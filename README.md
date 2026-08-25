@@ -39,6 +39,39 @@ marathon
 Marathon loads the remembered model and opens Codex directly.
 Its writable Codex configuration and sessions stay separate from stock Codex while personal instructions, skills, plugins, hooks, and rules remain available.
 
+## Multiple Instances
+
+Use a name to run another independent Marathon runtime on the same machine:
+
+```bash
+marathon --instance gpu23
+```
+
+The default command keeps its existing ports and storage paths.
+Each named instance gets stable independent backend and router ports, runtime locks, sessions, logs, traces, generated catalogs, router state, prompt caches, Codex sessions, and remembered selections.
+A named instance starts with the default instance's current model and profile the first time, then remembers its own choices.
+
+Pin a named instance to local GPUs in `~/.config/marathon/catalog.toml`:
+
+```toml
+[instances.gpu23]
+gpus = [2, 3]
+```
+
+For a two-instance machine, select a default profile pinned to GPUs 0 and 1, add the `gpu23` entry above, and run these in separate terminals:
+
+```bash
+# Uses the default profile's GPUs 0 and 1.
+marathon
+
+# Uses the same profile settings, overridden to GPUs 2 and 3.
+marathon --instance gpu23
+```
+
+Marathon derives stable ports from the instance name unless `llama_port` and `router_port` are set in its instance table.
+It checks requested ports and GPUs before launching and reports the occupying PID and command without killing or evicting that process.
+Commands such as `status`, `stop`, `resume`, `fork`, `report`, and `compare` accept the same leading `--instance NAME` option.
+
 ## Choosing a Quant
 
 For Qwen 3.8 27B:
@@ -102,6 +135,7 @@ MARATHON_MODEL_DIRS=/mnt/models:/data/gguf marathon
 | Command | Purpose |
 |---|---|
 | `marathon` | Load the remembered model and open Codex |
+| `marathon --instance NAME` | Start an independent named instance |
 | `marathon setup` | Find, add, or download a model |
 | `marathon dashboard` | Open advanced model, profile, frontend, and tuning controls |
 | `marathon models` | List discovered GGUF models |
@@ -190,6 +224,8 @@ Useful storage locations:
 | Runtime traces | `~/.local/state/marathon/runs/` |
 | Runtime logs | `~/.local/state/marathon/logs/` |
 | Persistent prompt cache | `~/AI/cache/marathon/slots/` |
+
+Named instance data is stored below `instances/NAME/` within the corresponding configuration, state, runtime, router, slot-cache, and Codex-home roots.
 
 Set `MARATHON_AI_ROOT` to move the complete models, backends, and cache hierarchy.
 

@@ -15,9 +15,14 @@ from unittest import mock
 from marathon_app import __main__ as main_module
 from marathon_app import catalog
 from marathon_app import model_library
-from marathon_app.codex_home import SHARED_PROFILE_FILE, prepare_codex_home
+from marathon_app.codex_home import (
+    SHARED_PROFILE_FILE,
+    marathon_codex_home,
+    prepare_codex_home,
+)
 from marathon_app.frontends import (
     _codex_binary,
+    _marathon_cli_name,
     _stream_chat,
     codex_command,
     hermes_command,
@@ -26,11 +31,15 @@ from marathon_app.frontends import (
 )
 from marathon_app.codex_telemetry import snapshot_sessions, summarize_session_changes
 from marathon_app import runtime as runtime_module
+from marathon_app.instance import normalize_instance_name, resolve_instance
 from marathon_app.runtime import (
     Runtime,
     _loaded_model_context,
     _model_is_loaded,
     _props_context_window,
+    load_selection,
+    runtime_paths,
+    save_selection,
 )
 from marathon_app.ui import (
     Selection,
@@ -40,7 +49,13 @@ from marathon_app.ui import (
     _initial_selection,
     run_codex_default,
 )
-from marathon_app.telemetry import EventWriter, read_events, summarize_run
+from marathon_app.telemetry import (
+    EventWriter,
+    create_run_writer,
+    read_events,
+    runs_dir,
+    summarize_run,
+)
 
 
 TEST_EXECUTABLE = Path(sys.executable)
@@ -133,6 +148,31 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(family["profiles"][0]["tensor_split"], "1,1,1,1")
         self.assertEqual(merged["backends"], base["backends"])
         self.assertEqual(merged["settings"], base["settings"])
+
+    def test_user_catalog_merges_named_instance_fields(self) -> None:
+        base = {
+            "instances": {
+                "gpu23": {"llama_port": 18082, "router_port": 28111}
+            }
+        }
+        override = {
+            "instances": {
+                "gpu23": {"gpus": [2, 3]},
+                "gpu45": {"gpus": [4, 5]},
+            }
+        }
+
+        merged = catalog._merge_catalog(base, override)
+
+        self.assertEqual(
+            merged["instances"]["gpu23"],
+            {
+                "llama_port": 18082,
+                "router_port": 28111,
+                "gpus": [2, 3],
+            },
+        )
+        self.assertEqual(merged["instances"]["gpu45"]["gpus"], [4, 5])
 
     def test_reasoning_catalog_requires_structured_levels(self) -> None:
         loaded = catalog.load_catalog()
@@ -547,7 +587,183 @@ class CatalogTests(unittest.TestCase):
         )
 
 
+class InstanceTests(unittest.TestCase):
+    def test_default_alias_preserves_existing_identity_and_settings(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            default = resolve_instance(None)
+            alias = resolve_instance("default")
+            expected = catalog.settings()
+
+        self.assertIsNone(normalize_instance_name("default"))
+        self.assertIsNone(default.name)
+        self.assertEqual(alias, default)
+        self.assertEqual(default.settings, expected)
+
+    def test_named_instance_ports_are_stable_and_distinct(self) -> None:
+        loaded = catalog.load_catalog()
+        loaded.pop("instances", None)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            first = resolve_instance("gpu23", loaded)
+            second = resolve_instance("gpu23", loaded)
+            other = resolve_instance("gpu01", loaded)
+            default = resolve_instance(None, loaded)
+
+        self.assertEqual(first.settings.llama_port, second.settings.llama_port)
+        self.assertEqual(first.settings.router_port, second.settings.router_port)
+        self.assertNotEqual(first.settings.llama_port, default.settings.llama_port)
+        self.assertNotEqual(first.settings.router_port, default.settings.router_port)
+        self.assertNotEqual(
+            (first.settings.llama_port, first.settings.router_port),
+            (other.settings.llama_port, other.settings.router_port),
+        )
+
+    def test_instance_catalog_can_override_profile_gpus_and_ports(self) -> None:
+        loaded = catalog.load_catalog()
+        loaded["instances"] = {
+            "gpu23": {
+                "gpus": [2, 3],
+                "llama_port": 18082,
+                "router_port": 28111,
+            }
+        }
+        with mock.patch.dict(os.environ, {}, clear=True):
+            instance = resolve_instance("gpu23", loaded)
+        model = fixture_model("qwen3.8-27b")
+        profile = catalog.find_profile(model, "native-256k", "codex")
+
+        pinned = instance.apply_profile(profile)
+        command = catalog.server_command(
+            model,
+            pinned,
+            catalog.Backend("test", "Test", TEST_EXECUTABLE),
+            configured=instance.settings,
+        )
+
+        self.assertEqual(pinned.id, profile.id)
+        self.assertEqual(pinned.gpus, (2, 3))
+        self.assertEqual(instance.settings.llama_port, 18082)
+        self.assertEqual(instance.settings.router_port, 28111)
+        self.assertEqual(command[command.index("--port") + 1], "18082")
+
+    def test_named_instances_have_independent_paths_selections_and_locks(self) -> None:
+        model = fixture_model()
+        profile = catalog.find_profile(model, None)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            patches = (
+                mock.patch.object(runtime_module, "CONFIG_DIR", root / "config"),
+                mock.patch.object(runtime_module, "USER_STATE_DIR", root / "state"),
+                mock.patch.object(runtime_module, "RUNTIME_DIR", root / "runtime"),
+                mock.patch.object(runtime_module, "ROUTER_STATE_DIR", root / "router"),
+                mock.patch.object(runtime_module, "SLOT_ROOT", root / "slots"),
+                mock.patch.object(
+                    runtime_module,
+                    "SELECTION_FILE",
+                    root / "config" / "selection.json",
+                ),
+                mock.patch.object(
+                    runtime_module,
+                    "SESSION_FILE",
+                    root / "runtime" / "session.json",
+                ),
+                mock.patch.object(
+                    runtime_module,
+                    "LOCK_FILE",
+                    root / "runtime" / "runtime.lock",
+                ),
+            )
+            with (
+                patches[0],
+                patches[1],
+                patches[2],
+                patches[3],
+                patches[4],
+                patches[5],
+                patches[6],
+                patches[7],
+            ):
+                default_paths = runtime_paths()
+                named_paths = runtime_paths("gpu23")
+                save_selection(model, profile, "codex")
+                save_selection(model, profile, "direct", "gpu23")
+                default = Runtime(model, profile)
+                named = Runtime(model, profile, "gpu23")
+                default.acquire()
+                named.acquire()
+                try:
+                    self.assertNotEqual(
+                        default.config.llama_port, named.config.llama_port
+                    )
+                    self.assertNotEqual(
+                        default.config.router_port, named.config.router_port
+                    )
+                    self.assertNotEqual(
+                        default_paths.session_file, named_paths.session_file
+                    )
+                    self.assertNotEqual(default.log_dir, named.log_dir)
+                    self.assertNotEqual(
+                        default.paths.router_state_dir,
+                        named.paths.router_state_dir,
+                    )
+                    self.assertNotEqual(
+                        default.paths.slot_root, named.paths.slot_root
+                    )
+                    self.assertEqual(load_selection()["frontend"], "codex")
+                    self.assertEqual(
+                        load_selection("gpu23")["frontend"], "direct"
+                    )
+                finally:
+                    named.cleanup()
+                    default.cleanup()
+
+    def test_named_codex_home_is_separate_from_default_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {
+                "MARATHON_CODEX_HOME": str(Path(directory) / "codex-home")
+            }
+
+            default = marathon_codex_home(environment)
+            named = marathon_codex_home(environment, "gpu23")
+
+        self.assertEqual(named, default / "instances" / "gpu23")
+
+    def test_invalid_instance_names_are_rejected(self) -> None:
+        for value in ("GPU23", "gpu.23", "../gpu23", "gpu 23", ""):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize_instance_name(value)
+
+
 class RuntimeTests(unittest.TestCase):
+    def test_stop_ownership_matches_exact_instance_argument(self) -> None:
+        arguments = (
+            "/usr/bin/python3",
+            "-m",
+            "marathon_app",
+            "--instance",
+            "gpu23",
+            "codex",
+        )
+        with mock.patch(
+            "marathon_app.runtime._process_arguments",
+            return_value=arguments,
+        ):
+            self.assertTrue(
+                runtime_module._process_matches_instance(123, "gpu23")
+            )
+            self.assertFalse(
+                runtime_module._process_matches_instance(123, "gpu2")
+            )
+            self.assertFalse(runtime_module._process_matches_instance(123, None))
+
+    def test_stop_ownership_rejects_external_python_process(self) -> None:
+        with mock.patch(
+            "marathon_app.runtime._process_arguments",
+            return_value=("/usr/bin/python3", "external_service.py"),
+        ):
+            self.assertFalse(
+                runtime_module._process_matches_instance(123, "gpu23")
+            )
+
     def test_port_pid_finds_an_actual_listening_process(self) -> None:
         if not (
             runtime_module.shutil.which("ss")
@@ -630,9 +846,72 @@ class RuntimeTests(unittest.TestCase):
         with (
             mock.patch("marathon_app.runtime._port_pid", return_value=None),
             mock.patch("marathon_app.runtime._gpu_processes", return_value=processes),
-            self.assertRaisesRegex(RuntimeError, "GPU 1 PID 123"),
+            self.assertRaisesRegex(RuntimeError, "GPU 1.*PID 123"),
         ):
             runtime._check_conflicts()
+
+    def test_gpu_conflict_names_occupying_process_without_killing_it(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        profile = replace(
+            catalog.find_profile(model, "native-256k", "codex"),
+            gpus=(2, 3),
+        )
+        runtime = Runtime(model, profile)
+        processes = [
+            {
+                "gpu_uuid": "GPU-c",
+                "gpu_index": "2",
+                "pid": "123",
+                "name": "external-worker",
+                "memory_mib": "16000",
+            }
+        ]
+
+        with (
+            mock.patch("marathon_app.runtime._port_pid", return_value=None),
+            mock.patch(
+                "marathon_app.runtime._gpu_processes", return_value=processes
+            ),
+            mock.patch(
+                "marathon_app.runtime._cmdline",
+                return_value="external-worker --serve",
+            ),
+            mock.patch("marathon_app.runtime.os.kill") as kill,
+            self.assertRaisesRegex(
+                RuntimeError,
+                "GPU 2.*PID 123 external-worker.*external-worker --serve",
+            ),
+        ):
+            runtime._check_conflicts()
+
+        kill.assert_not_called()
+
+    def test_port_conflict_names_listener_without_killing_it(self) -> None:
+        model = fixture_model()
+        profile = catalog.find_profile(model, None)
+        runtime = Runtime(model, profile, "port-check")
+
+        def port_pid(port: int) -> int | None:
+            return 456 if port == runtime.config.router_port else None
+
+        with (
+            mock.patch(
+                "marathon_app.runtime._port_pid",
+                side_effect=port_pid,
+            ),
+            mock.patch(
+                "marathon_app.runtime._cmdline",
+                return_value="external-router --listen",
+            ),
+            mock.patch("marathon_app.runtime.os.kill") as kill,
+            self.assertRaisesRegex(
+                RuntimeError,
+                f"port {runtime.config.router_port}.*PID 456.*external-router",
+            ),
+        ):
+            runtime._check_conflicts()
+
+        kill.assert_not_called()
 
     def test_loaded_context_uses_backend_runtime_value(self) -> None:
         payload = {
@@ -1010,6 +1289,31 @@ class CodexHomeTests(unittest.TestCase):
 
 
 class FrontendTests(unittest.TestCase):
+    def test_named_codex_sessions_print_instance_aware_resume_command(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch(
+                "marathon_app.frontends.shutil.which",
+                return_value="/usr/bin/marathon",
+            ),
+        ):
+            command = _marathon_cli_name("gpu23")
+
+        self.assertEqual(command, "marathon --instance gpu23")
+
+    def test_named_resume_keeps_a_configured_launcher_name(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_CLI_NAME": "/opt/marathon/bin/marathon"},
+            clear=True,
+        ):
+            command = _marathon_cli_name("gpu23")
+
+        self.assertEqual(
+            command,
+            "/opt/marathon/bin/marathon --instance gpu23",
+        )
+
     def test_patched_codex_is_preferred_when_installed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "marathon" / "bin" / "codex"
@@ -1059,6 +1363,53 @@ class FrontendTests(unittest.TestCase):
 
         self.assertEqual(result, 7)
         run.assert_called_once_with(["exec", "--json", "check the project"])
+
+    def test_named_resume_reaches_the_matching_supervised_runtime(self) -> None:
+        with mock.patch.object(
+            main_module, "run_codex_default", return_value=0
+        ) as run:
+            result = main_module.main(
+                ["--instance", "gpu23", "resume", "session-id"]
+            )
+
+        self.assertEqual(result, 0)
+        run.assert_called_once_with(["resume", "session-id"], "gpu23")
+
+    def test_named_fork_reaches_the_matching_supervised_runtime(self) -> None:
+        with mock.patch.object(
+            main_module, "run_codex_default", return_value=0
+        ) as run:
+            result = main_module.main(
+                ["--instance", "gpu23", "fork", "session-id"]
+            )
+
+        self.assertEqual(result, 0)
+        run.assert_called_once_with(["fork", "session-id"], "gpu23")
+
+    def test_named_stop_targets_only_that_instance(self) -> None:
+        with mock.patch.object(
+            main_module, "request_stop", return_value=True
+        ) as stop:
+            result = main_module.main(["--instance", "gpu23", "stop"])
+
+        self.assertEqual(result, 0)
+        stop.assert_called_once_with("gpu23")
+
+    def test_named_status_reads_only_that_instance(self) -> None:
+        with mock.patch.object(main_module, "_status", return_value=0) as status:
+            result = main_module.main(["--instance", "gpu23", "status"])
+
+        self.assertEqual(result, 0)
+        status.assert_called_once_with("gpu23")
+
+    def test_named_default_command_starts_that_instance(self) -> None:
+        with mock.patch.object(
+            main_module, "run_codex_default", return_value=0
+        ) as run:
+            result = main_module.main(["--instance", "gpu23"])
+
+        self.assertEqual(result, 0)
+        run.assert_called_once_with([], "gpu23")
 
     def test_codex_child_uses_marathon_resume_command(self) -> None:
         model = fixture_model()
@@ -1241,6 +1592,19 @@ class FrontendTests(unittest.TestCase):
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_named_run_traces_do_not_share_the_default_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {"MARATHON_RUNS_DIR": directory},
+            clear=False,
+        ):
+            default = create_run_writer("model")
+            named = create_run_writer("model", "gpu23")
+
+            self.assertEqual(default.path.parent, runs_dir())
+            self.assertEqual(named.path.parent, runs_dir("gpu23"))
+            self.assertNotEqual(default.path.parent, named.path.parent)
+
     def test_event_writer_appends_redacted_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "run.jsonl"

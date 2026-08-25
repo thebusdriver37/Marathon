@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .codex_telemetry import refresh_legacy_tool_metrics, summarize_active_sessions
+from .instance import instance_path, normalize_instance_name
 
 
 SCHEMA_VERSION = 1
@@ -48,9 +49,13 @@ def _xdg_state_home() -> Path:
     return Path(configured).expanduser() if configured else Path.home() / ".local" / "state"
 
 
-def runs_dir() -> Path:
+def runs_dir(instance: str | None = None) -> Path:
+    name = normalize_instance_name(instance)
     configured = os.environ.get("MARATHON_RUNS_DIR")
-    return Path(configured).expanduser() if configured else _xdg_state_home() / "marathon" / "runs"
+    if configured:
+        return instance_path(Path(configured).expanduser(), name)
+    state_root = instance_path(_xdg_state_home() / "marathon", name)
+    return state_root / "runs"
 
 
 def _utc_now() -> str:
@@ -141,8 +146,8 @@ class EventWriter:
                 self.dropped_events += 1
 
 
-def create_run_writer(model_id: str) -> EventWriter:
-    directory = runs_dir()
+def create_run_writer(model_id: str, instance: str | None = None) -> EventWriter:
+    directory = runs_dir(instance)
     directory.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex[:12]
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
@@ -150,21 +155,26 @@ def create_run_writer(model_id: str) -> EventWriter:
     return EventWriter(directory / f"{stamp}_{slug}_{run_id}.jsonl", run_id, "runtime")
 
 
-def list_runs() -> list[Path]:
-    directory = runs_dir()
+def list_runs(instance: str | None = None) -> list[Path]:
+    directory = runs_dir(instance)
     return sorted(directory.glob("*.jsonl"), key=lambda path: path.stat().st_mtime_ns if path.exists() else 0)
 
 
-def resolve_run(value: str | Path | None = None) -> Path:
+def resolve_run(
+    value: str | Path | None = None,
+    instance: str | None = None,
+) -> Path:
     if value is None or str(value) in {"", "last", "latest"}:
-        available = list_runs()
+        available = list_runs(instance)
         if not available:
-            raise FileNotFoundError(f"no Marathon traces found under {runs_dir()}")
+            raise FileNotFoundError(
+                f"no Marathon traces found under {runs_dir(instance)}"
+            )
         return available[-1]
     candidate = Path(value).expanduser()
     if candidate.is_file():
         return candidate.resolve()
-    matches = [path for path in list_runs() if str(value) in path.name]
+    matches = [path for path in list_runs(instance) if str(value) in path.name]
     if len(matches) == 1:
         return matches[0]
     if not matches:
