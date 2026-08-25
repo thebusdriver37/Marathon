@@ -1071,7 +1071,17 @@ context = 32768
 
         self.assertEqual(
             scaffold["messages"],
-            [{"role": "system", "content": "stable system prompt"}],
+            [
+                {"role": "system", "content": "stable system prompt"},
+                {
+                    "role": "user",
+                    "content": router_module.STARTER_CACHE_SENTINEL,
+                },
+            ],
+        )
+        self.assertNotEqual(
+            scaffold["messages"][-1]["content"],
+            "not cached",
         )
         self.assertFalse(scaffold["add_generation_prompt"])
         self.assertEqual(len(scaffold["tools"]), 1)
@@ -1104,11 +1114,45 @@ context = 32768
                 state.slot_id = 0
                 state.erase_slot = mock.AsyncMock(return_value={"status": "erased"})
                 state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})
+
+                async def qwen_compatible_request(
+                    _profile: router_module.ModelProfile,
+                    method: str,
+                    path: str,
+                    payload: dict[str, object],
+                    **_kwargs: object,
+                ) -> dict[str, object]:
+                    self.assertEqual(method, "POST")
+                    if path == "/apply-template":
+                        messages = payload.get("messages")
+                        self.assertIsInstance(messages, list)
+                        roles = [message.get("role") for message in messages]
+                        if "user" not in roles:
+                            raise RuntimeError("No user query found in messages.")
+                        user_message = next(
+                            message for message in messages if message.get("role") == "user"
+                        )
+                        return {
+                            "prompt": f"stable starter prefix{user_message['content']}"
+                        }
+                    if path == "/tokenize":
+                        content = payload.get("content")
+                        self.assertIsInstance(content, str)
+                        self.assertTrue(payload.get("add_special"))
+                        self.assertTrue(payload.get("parse_special"))
+                        suffix = (
+                            10
+                            if router_module.STARTER_CACHE_SENTINEL in content
+                            else 11
+                        )
+                        return {"tokens": [1, 2, 3, 4, 5, 6, 7, suffix]}
+                    if path == "/completion":
+                        self.assertEqual(payload.get("prompt"), [1, 2, 3])
+                        return {"timings": {"prompt_n": 10_000}}
+                    raise AssertionError(f"unexpected backend path: {path}")
+
                 state._request_json = mock.AsyncMock(
-                    side_effect=[
-                        {"prompt": "rendered starter prompt"},
-                        {"timings": {"prompt_n": 10_000}},
-                    ]
+                    side_effect=qwen_compatible_request
                 )
 
                 async def save_slot(
@@ -1127,10 +1171,10 @@ context = 32768
             built = asyncio.run(first.prepare_starter_cache(profile, request))
 
             self.assertEqual(built["mode"], "build-starter-cache")
-            self.assertEqual(first._request_json.await_count, 2)
-            completion = first._request_json.await_args_list[1].args[3]
+            self.assertEqual(first._request_json.await_count, 5)
+            completion = first._request_json.await_args_list[4].args[3]
             self.assertEqual(completion["n_predict"], 0)
-            self.assertEqual(completion["prompt"], "rendered starter prompt")
+            self.assertEqual(completion["prompt"], [1, 2, 3])
 
             restarted = make_state()
             restored = asyncio.run(restarted.prepare_starter_cache(profile, request))

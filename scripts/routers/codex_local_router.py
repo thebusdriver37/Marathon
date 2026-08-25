@@ -117,6 +117,10 @@ DEFAULT_SLOT_SNAPSHOTS_ENABLED = False
 DEFAULT_STARTER_CACHE_ENABLED = True
 DEFAULT_STARTER_CACHE_MAX_COUNT = 8
 DEFAULT_STARTER_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
+STARTER_CACHE_SCHEMA = 5
+STARTER_CACHE_SENTINEL = "__MARATHON_STARTER_CACHE_SENTINEL__"
+STARTER_CACHE_ALTERNATE_SENTINEL = "Z_CACHE_BOUNDARY_SENTINEL"
+STARTER_CACHE_ROLLBACK_TOKENS = 4
 DEFAULT_TOOL_OUTPUT_MAX_CHARS = 16_384
 DEFAULT_WEB_TOOL_CACHE_MAX_ENTRIES = 256
 DEFAULT_WEB_TURN_PROGRESS_MAX_ENTRIES = 64
@@ -337,20 +341,31 @@ def _is_warmup_root(snapshot: ResponseSnapshot | None) -> bool:
     )
 
 
-def _starter_scaffold_chat_body(request: dict[str, Any]) -> dict[str, Any]:
-    """Build the token-exact chat-template input before conversation messages."""
+def _starter_scaffold_chat_body(
+    request: dict[str, Any],
+    user_content: str = STARTER_CACHE_SENTINEL,
+) -> dict[str, Any]:
+    """Build a template-valid cache seed for the stable request scaffold."""
 
-    body: dict[str, Any] = {"add_generation_prompt": False}
+    messages: list[dict[str, str]] = []
     if "instructions" in request:
         instructions = request.get("instructions")
-        body["messages"] = [
+        messages.append(
             {
                 "role": "system",
                 "content": instructions if isinstance(instructions, str) else "",
             }
-        ]
-    else:
-        body["messages"] = []
+        )
+
+    # Qwen and other strict templates refuse to render a system-only prompt.
+    # The sentinel makes the seed a valid conversation while remaining after
+    # the stable system-and-tools prefix. On a real request, llama.cpp's
+    # cache_prompt prefix match discards this suffix at the first mismatch.
+    messages.append({"role": "user", "content": user_content})
+    body: dict[str, Any] = {
+        "add_generation_prompt": False,
+        "messages": messages,
+    }
 
     chat_tools: list[dict[str, Any]] = []
     tools = request.get("tools")
@@ -377,13 +392,40 @@ def _starter_scaffold_chat_body(request: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def _starter_common_token_prefix(
+    first_tokens: list[int],
+    second_tokens: list[int],
+) -> list[int]:
+    """Return the token-exact prefix before synthetic user content diverges."""
+
+    common_count = 0
+    for first, second in zip(first_tokens, second_tokens):
+        if first != second:
+            break
+        common_count += 1
+    if common_count <= STARTER_CACHE_ROLLBACK_TOKENS:
+        raise RuntimeError("llama.cpp starter prompts have no common token prefix")
+    if common_count == len(first_tokens) or common_count == len(second_tokens):
+        raise RuntimeError("llama.cpp starter prompt boundary is ambiguous")
+    return first_tokens[: common_count - STARTER_CACHE_ROLLBACK_TOKENS]
+
+
+def _token_ids(payload: dict[str, Any]) -> list[int]:
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, list) or not tokens:
+        raise RuntimeError("llama.cpp returned no starter prompt tokens")
+    if any(isinstance(token, bool) or not isinstance(token, int) for token in tokens):
+        raise RuntimeError("llama.cpp returned invalid starter prompt tokens")
+    return tokens
+
+
 def _starter_cache_fingerprint(
     profile: ModelProfile,
     backend_cache_id: str,
     scaffold_body: dict[str, Any],
 ) -> str:
     payload = {
-        "schema": 1,
+        "schema": STARTER_CACHE_SCHEMA,
         "profile_slug": profile.slug,
         "profile_alias": profile.alias,
         "backend_cache_id": backend_cache_id,
@@ -2487,6 +2529,10 @@ class RouterState:
             }
 
         scaffold_body = _starter_scaffold_chat_body(request)
+        alternate_scaffold_body = _starter_scaffold_chat_body(
+            request,
+            STARTER_CACHE_ALTERNATE_SENTINEL,
+        )
         fingerprint = _starter_cache_fingerprint(
             profile,
             self.backend_cache_id,
@@ -2518,22 +2564,41 @@ class RouterState:
 
         try:
             erased = await self.erase_slot(profile)
-            rendered = await self._request_json(
-                profile,
-                "POST",
-                "/apply-template",
-                scaffold_body,
-                retry_connection_error=True,
-            )
-            prompt = rendered.get("prompt")
-            if not isinstance(prompt, str) or not prompt:
-                raise RuntimeError("llama.cpp returned an empty starter prompt")
+            rendered_prompts: list[str] = []
+            for body in (scaffold_body, alternate_scaffold_body):
+                rendered = await self._request_json(
+                    profile,
+                    "POST",
+                    "/apply-template",
+                    body,
+                    retry_connection_error=True,
+                )
+                prompt = rendered.get("prompt")
+                if not isinstance(prompt, str) or not prompt:
+                    raise RuntimeError("llama.cpp returned an empty starter prompt")
+                rendered_prompts.append(prompt)
+
+            tokenized_prompts: list[list[int]] = []
+            for prompt in rendered_prompts:
+                tokenized = await self._request_json(
+                    profile,
+                    "POST",
+                    "/tokenize",
+                    {
+                        "content": prompt,
+                        "add_special": True,
+                        "parse_special": True,
+                    },
+                    retry_connection_error=True,
+                )
+                tokenized_prompts.append(_token_ids(tokenized))
+            prompt_tokens = _starter_common_token_prefix(*tokenized_prompts)
             prefilled = await self._request_json(
                 profile,
                 "POST",
                 "/completion",
                 {
-                    "prompt": prompt,
+                    "prompt": prompt_tokens,
                     "n_predict": 0,
                     "id_slot": self.slot_id,
                     "cache_prompt": True,
