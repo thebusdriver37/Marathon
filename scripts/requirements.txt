@@ -4,6 +4,9 @@
 #
 # Keep upper bounds below the next major version for router compatibility.
 
+# Python 3.10 compatibility for the standard-library tomllib module.
+tomli>=2.0,<3.0; python_version < "3.11"
+
 # HTML / page-content extraction backing the web_fetch tool.
 trafilatura>=2.0,<3.0
 
