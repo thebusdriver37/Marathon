@@ -210,7 +210,8 @@ class CatalogTests(unittest.TestCase):
         from gguf import GGUFWriter
 
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "mystery-Q8_0.gguf"
+            root = Path(directory)
+            path = root / "mystery-Q8_0.gguf"
             writer = GGUFWriter(path, "qwen3")
             writer.add_name("Qwen3.8-27B")
             writer.add_context_length(262_144)
@@ -219,11 +220,25 @@ class CatalogTests(unittest.TestCase):
             writer.write_tensors_to_file()
             writer.close()
 
-            model = catalog.discover_models(Path(directory))[0]
+            with mock.patch.dict(
+                os.environ,
+                {"MARATHON_GGUF_METADATA_CACHE": str(root / "metadata.json")},
+            ):
+                model = catalog.discover_models(root)[0]
 
         self.assertEqual(model.family.id, "qwen3.8-27b")
         self.assertEqual(model.architecture, "qwen3")
         self.assertEqual(model.native_context, 262_144)
+
+    def test_known_model_filename_skips_gguf_metadata_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Qwen3.8-27B-Q8_0.gguf").write_bytes(b"model")
+            with mock.patch.object(catalog, "read_gguf_metadata") as inspect:
+                model = catalog.discover_models(root)[0]
+
+        self.assertEqual(model.family.id, "qwen3.8-27b")
+        inspect.assert_not_called()
 
     def test_qwen38_profile_has_bounded_post_tool_thinking(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

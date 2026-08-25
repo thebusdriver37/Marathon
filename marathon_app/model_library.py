@@ -7,11 +7,14 @@ import json
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 
 RECOMMENDED_QWEN_REPOSITORY = "unsloth/Qwen3.8-27B-GGUF"
+GGUF_METADATA_CACHE_SCHEMA = 1
+GGUF_METADATA_CACHE_MAX_ENTRIES = 512
 
 
 def is_model_sidecar(filename: str) -> bool:
@@ -94,7 +97,7 @@ def _gguf_field_value(reader: object, key: str) -> object | None:
 
 
 @functools.lru_cache(maxsize=256)
-def _read_gguf_metadata_cached(
+def _inspect_gguf_metadata_cached(
     resolved_path: str,
     mtime_ns: int,
     size_bytes: int,
@@ -138,6 +141,99 @@ def _read_gguf_metadata_cached(
         return GgufMetadata()
 
 
+def gguf_metadata_cache_file() -> Path:
+    configured = os.environ.get("MARATHON_GGUF_METADATA_CACHE")
+    if configured:
+        return Path(configured).expanduser()
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    root = Path(cache_home).expanduser() if cache_home else Path.home() / ".cache"
+    return root / "marathon" / "gguf-metadata.json"
+
+
+def _load_gguf_metadata_cache(path: Path) -> dict[str, dict[str, object]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("schema") != GGUF_METADATA_CACHE_SCHEMA:
+        return {}
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        key: value
+        for key, value in entries.items()
+        if isinstance(key, str) and isinstance(value, dict)
+    }
+
+
+def _cached_gguf_metadata(
+    entry: dict[str, object] | None,
+    *,
+    mtime_ns: int,
+    size_bytes: int,
+) -> GgufMetadata | None:
+    if (
+        entry is None
+        or entry.get("mtime_ns") != mtime_ns
+        or entry.get("size_bytes") != size_bytes
+    ):
+        return None
+    architecture = entry.get("architecture")
+    name = entry.get("name")
+    context_length = entry.get("context_length")
+    if architecture is not None and not isinstance(architecture, str):
+        return None
+    if name is not None and not isinstance(name, str):
+        return None
+    if context_length is not None and (
+        not isinstance(context_length, int)
+        or isinstance(context_length, bool)
+        or context_length <= 0
+    ):
+        return None
+    return GgufMetadata(architecture, name, context_length)
+
+
+def _save_gguf_metadata_cache(
+    path: Path,
+    entries: dict[str, dict[str, object]],
+) -> None:
+    if len(entries) > GGUF_METADATA_CACHE_MAX_ENTRIES:
+        def checked_ns(item: tuple[str, dict[str, object]]) -> int:
+            value = item[1].get("checked_ns")
+            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+        newest = sorted(
+            entries.items(),
+            key=checked_ns,
+            reverse=True,
+        )[:GGUF_METADATA_CACHE_MAX_ENTRIES]
+        entries = dict(newest)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(
+                {"schema": GGUF_METADATA_CACHE_SCHEMA, "entries": entries},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except OSError:
+        pass
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
 def read_gguf_metadata(
     path: Path,
     *,
@@ -154,9 +250,28 @@ def read_gguf_metadata(
             return GgufMetadata()
         mtime_ns = stat.st_mtime_ns
         size_bytes = stat.st_size
-    return _read_gguf_metadata_cached(
-        str(resolved), mtime_ns, size_bytes
+    cache_path = gguf_metadata_cache_file()
+    entries = _load_gguf_metadata_cache(cache_path)
+    cache_key = str(resolved)
+    cached = _cached_gguf_metadata(
+        entries.get(cache_key),
+        mtime_ns=mtime_ns,
+        size_bytes=size_bytes,
     )
+    if cached is not None:
+        return cached
+
+    metadata = _inspect_gguf_metadata_cached(cache_key, mtime_ns, size_bytes)
+    entries[cache_key] = {
+        "mtime_ns": mtime_ns,
+        "size_bytes": size_bytes,
+        "architecture": metadata.architecture,
+        "name": metadata.name,
+        "context_length": metadata.context_length,
+        "checked_ns": time.time_ns(),
+    }
+    _save_gguf_metadata_cache(cache_path, entries)
+    return metadata
 
 
 def _config_dir() -> Path:

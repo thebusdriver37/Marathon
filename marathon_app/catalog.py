@@ -628,23 +628,26 @@ def discover_models(model_root: Path | None = None) -> list[Model]:
             continue
         if _model_sidecar(path) or not _first_shard(path) or discovered_sizes[path] == 0:
             continue
-        metadata = read_gguf_metadata(
-            path,
-            mtime_ns=discovered_mtimes[path],
-            size_bytes=discovered_sizes[path],
-        )
-        family = _family_for(
-            path,
-            known,
-            metadata_name=metadata.name,
-            architecture=metadata.architecture,
-        )
+        family = _family_for(path, known)
+        metadata = None
+        if family.id == "generic":
+            metadata = read_gguf_metadata(
+                path,
+                mtime_ns=discovered_mtimes[path],
+                size_bytes=discovered_sizes[path],
+            )
+            family = _family_for(
+                path,
+                known,
+                metadata_name=metadata.name,
+                architecture=metadata.architecture,
+            )
         quant = _quant(path.name)
         if family.id == "generic":
             base = re.sub(r"-\d{5}-of-\d{5}\.gguf$", "", path.name, flags=re.IGNORECASE)
             base = re.sub(r"\.gguf$", "", base, flags=re.IGNORECASE)
             model_id = _slug(base)
-            display = metadata.name or base
+            display = metadata.name if metadata and metadata.name else base
         else:
             model_id = f"{family.id}-{_slug(quant)}"
             display = f"{family.display_name} {quant}"
@@ -660,8 +663,8 @@ def discover_models(model_root: Path | None = None) -> list[Model]:
                 family,
                 quant,
                 find_multimodal_projector(path),
-                metadata.architecture,
-                metadata.context_length,
+                metadata.architecture if metadata else None,
+                metadata.context_length if metadata else None,
             )
         )
     return sorted(result, key=lambda model: (model.family.id, model.display_name.lower()))

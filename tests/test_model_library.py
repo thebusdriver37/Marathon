@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import types
@@ -8,14 +9,45 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from marathon_app import model_library
 from marathon_app.model_library import (
+    GgufMetadata,
     HuggingFaceGguf,
     download_huggingface_gguf,
     list_huggingface_ggufs,
+    read_gguf_metadata,
 )
 
 
 class ModelLibraryTests(unittest.TestCase):
+    def test_gguf_metadata_cache_survives_between_process_caches(self) -> None:
+        expected = GgufMetadata("qwen3", "Renamed Qwen", 262_144)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "mystery.gguf"
+            model.write_bytes(b"gguf")
+            cache = root / "cache" / "metadata.json"
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"MARATHON_GGUF_METADATA_CACHE": str(cache)},
+                ),
+                mock.patch.object(
+                    model_library,
+                    "_inspect_gguf_metadata_cached",
+                    return_value=expected,
+                ) as inspect,
+            ):
+                first = read_gguf_metadata(model)
+                second = read_gguf_metadata(model)
+
+            payload = json.loads(cache.read_text(encoding="utf-8"))
+
+        self.assertEqual(first, expected)
+        self.assertEqual(second, expected)
+        self.assertEqual(inspect.call_count, 1)
+        self.assertEqual(payload["schema"], 1)
+
     def test_huggingface_listing_filters_sidecars_and_prefers_q4(self) -> None:
         siblings = [
             types.SimpleNamespace(
