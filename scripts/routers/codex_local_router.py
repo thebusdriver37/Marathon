@@ -131,6 +131,11 @@ DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 DEFAULT_STALLED_RESPONSE_RECOVERIES = 1
 DEFAULT_TOOL_PROTOCOL_RECOVERIES = 1
 DEFAULT_TOOL_ARGUMENT_MAX_CHARS = 24_576
+MARATHON_RUNTIME_INSTRUCTIONS = (
+    "Never use `pkill`, `killall`, or pattern-based termination for inference processes. "
+    "Stop only a separately verified PID started by this task or explicitly authorized by "
+    "the user; stop Marathon only through its instance-aware launcher."
+)
 _BACKEND_ARGUMENTS_KEY = "_marathon_backend_arguments"
 _WEB_REPLAYED_COMPLETION_KEY = "_marathon_web_replayed_completion"
 
@@ -452,7 +457,10 @@ def _base_instructions() -> str:
             "Codex prompt file not found. Expected "
             f"{prompt_path}. Initialize the Codex submodule or set MARATHON_PROMPT_FILE."
         )
-    return prompt_path.read_text(encoding="utf-8")
+    upstream_instructions = prompt_path.read_text(encoding="utf-8").rstrip()
+    return "\n\n".join(
+        part for part in (upstream_instructions, MARATHON_RUNTIME_INSTRUCTIONS) if part
+    )
 
 
 def _target_override(env_var: str, default: str) -> str:

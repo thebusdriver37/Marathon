@@ -36,6 +36,23 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_base_instructions_include_marathon_runtime_safety(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            prompt_path = Path(directory) / "prompt.md"
+            prompt_path.write_text("Upstream Codex prompt.\n", encoding="utf-8")
+            with mock.patch.dict(
+                router_module.os.environ,
+                {"MARATHON_PROMPT_FILE": str(prompt_path)},
+                clear=False,
+            ):
+                instructions = router_module._base_instructions()
+
+        self.assertEqual(
+            instructions,
+            "Upstream Codex prompt.\n\n"
+            + router_module.MARATHON_RUNTIME_INSTRUCTIONS,
+        )
+
     def test_web_search_cache_signature_normalizes_but_distinguishes_time_range(self) -> None:
         def call(query: str, time_range: str) -> dict[str, object]:
             return {
