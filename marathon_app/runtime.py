@@ -455,6 +455,8 @@ class Runtime:
         self._lock: TextIO | None = None
         self._owns_lock = False
         self._cleaned = False
+        self._backend_watch_enabled = False
+        self._backend_failure_reported = False
         self._old_handlers: dict[int, object] = {}
 
     @property
@@ -1030,6 +1032,7 @@ class Runtime:
                 "router_pid": self.router.pid if self.router else None,
             },
         )
+        self._backend_watch_enabled = True
 
     @staticmethod
     def _parse_number(value: str) -> float | int | None:
@@ -1196,6 +1199,7 @@ class Runtime:
         ).lower() in {"1", "true", "yes", "on"}
         while not self._sample_stop.is_set():
             started = time.monotonic()
+            self._check_backend_processes()
             self._sample_gpus()
             self._sample_host()
             if sample_backend:
@@ -1203,6 +1207,31 @@ class Runtime:
             self._sample_kernel_events()
             elapsed = time.monotonic() - started
             self._sample_stop.wait(max(0.1, interval - elapsed))
+
+    def _check_backend_processes(self) -> None:
+        if (
+            not self._backend_watch_enabled
+            or self._backend_failure_reported
+            or self._cleaned
+        ):
+            return
+        for name, process in self._backend_processes:
+            returncode = process.poll()
+            if returncode is None:
+                continue
+            self._backend_failure_reported = True
+            self.record(
+                "backend.process.exited",
+                {
+                    "process": name,
+                    "pid": process.pid,
+                    "returncode": returncode,
+                },
+                level="error",
+            )
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(os.getpid(), signal.SIGTERM)
+            return
 
     def _start_sampler(self) -> None:
         self._sample_stop.clear()
@@ -1344,6 +1373,7 @@ class Runtime:
         if self._cleaned:
             return
         self._cleaned = True
+        self._backend_watch_enabled = False
         self._sample_stop.set()
         if self._sampler is not None:
             self._sampler.join(timeout=5)

@@ -1101,6 +1101,29 @@ class RuntimeTests(unittest.TestCase):
         runtime.cleanup()
         runtime.cleanup()
 
+    def test_backend_exit_stops_the_supervised_runtime(self) -> None:
+        model = fixture_model()
+        profile = catalog.find_profile(model, None)
+        runtime = Runtime(model, profile)
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = -signal.SIGTERM
+        runtime._backend_processes = [("llama", process)]
+        runtime._backend_watch_enabled = True
+
+        with (
+            mock.patch.object(runtime, "record") as record,
+            mock.patch("marathon_app.runtime.os.kill") as kill,
+        ):
+            runtime._check_backend_processes()
+            runtime._check_backend_processes()
+
+        kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+        record.assert_called_once_with(
+            "backend.process.exited",
+            {"process": "llama", "pid": 4321, "returncode": -signal.SIGTERM},
+            level="error",
+        )
+
     def test_failed_second_runtime_does_not_remove_owner_session(self) -> None:
         model = fixture_model()
         profile = catalog.find_profile(model, None)

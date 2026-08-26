@@ -132,9 +132,9 @@ DEFAULT_STALLED_RESPONSE_RECOVERIES = 1
 DEFAULT_TOOL_PROTOCOL_RECOVERIES = 1
 DEFAULT_TOOL_ARGUMENT_MAX_CHARS = 24_576
 MARATHON_RUNTIME_INSTRUCTIONS = (
-    "Never use `pkill`, `killall`, or pattern-based termination for inference processes. "
-    "Stop only a separately verified PID started by this task or explicitly authorized by "
-    "the user; stop Marathon only through its instance-aware launcher."
+    "Never use pattern-based termination for inference processes. Never stop, restart, "
+    "signal, or replace Marathon or its supervised backend from inside a Marathon session, "
+    "even with a verified PID; ask the user to exit and use its instance-aware launcher."
 )
 _BACKEND_ARGUMENTS_KEY = "_marathon_backend_arguments"
 _WEB_REPLAYED_COMPLETION_KEY = "_marathon_web_replayed_completion"
