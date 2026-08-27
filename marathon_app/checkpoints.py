@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Iterator
 
 
-CHECKPOINT_SCHEMA = 1
+# Schema 2 checkpoints are canonical next-turn prefixes. Schema 1 snapshots
+# captured the generated tail and cannot be reused by recurrent models.
+CHECKPOINT_SCHEMA = 2
 CHECKPOINT_PREFIX = "conversation__"
 MAX_CHECKPOINT_CACHE_BYTES = 32 * 1024**3
 PENDING_MAX_AGE_SECONDS = 60 * 60

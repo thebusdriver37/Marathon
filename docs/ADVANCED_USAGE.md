@@ -75,6 +75,8 @@ The optional `MARATHON_STARTER_CACHE_MAX_COUNT` and `MARATHON_STARTER_CACHE_MAX_
 
 Rolling conversation checkpoints are separate from the starter cache and are enabled by default for llama.cpp backends with slot support.
 Marathon waits for 60 seconds of conversation inactivity before saving, which keeps the large disk write off the response path.
+Before writing the checkpoint, Marathon moves the live slot to a token boundary that any next user turn can extend.
+This preserves disk-cache reuse for recurrent and hybrid models whose generated tail cannot be rolled backward after a restore.
 The first checkpoint starts at 16,384 context tokens, and another save is needed only after at least 4,096 tokens of growth or a clean shutdown.
 Each conversation atomically replaces its previous checkpoint instead of accumulating one file per response.
 Each Marathon instance keeps at most two recent conversations, while all instances share a hard 32 GiB ceiling.

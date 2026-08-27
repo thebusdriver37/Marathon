@@ -84,7 +84,9 @@ class RollingCheckpointStoreTests(unittest.TestCase):
             self.assertNotIn("synthetic-session", metadata_text)
             self.assertNotIn("response-one", metadata_text)
             self.assertNotIn("response-two", metadata_text)
-            self.assertEqual(json.loads(metadata_text)["context_tokens"], 24_096)
+            metadata = json.loads(metadata_text)
+            self.assertEqual(metadata["schema"], checkpoints.CHECKPOINT_SCHEMA)
+            self.assertEqual(metadata["context_tokens"], 24_096)
 
     def test_retention_keeps_only_two_recent_conversations_per_instance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

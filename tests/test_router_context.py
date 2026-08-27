@@ -1370,6 +1370,66 @@ context = 32768
             restarted._request_json.assert_not_awaited()
             restarted.erase_slot.assert_not_awaited()
 
+    def test_conversation_checkpoint_body_ends_before_next_user(self) -> None:
+        body = router_module._conversation_checkpoint_chat_body(
+            {
+                "instructions": "synthetic system prompt",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "first question"}
+                        ],
+                    },
+                    {
+                        "type": "reasoning",
+                        "summary": [],
+                        "content": [{"type": "text", "text": "brief thought"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "call_1",
+                        "arguments": '{"path":"synthetic"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "synthetic result",
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "finished"}
+                        ],
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "read_file",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+            }
+        )
+
+        self.assertFalse(body["add_generation_prompt"])
+        self.assertEqual(body["messages"][-1], {
+            "role": "user",
+            "content": router_module.STARTER_CACHE_SENTINEL,
+        })
+        self.assertEqual(body["messages"][2]["reasoning_content"], "brief thought")
+        self.assertEqual(
+            body["messages"][2]["tool_calls"][0]["function"]["name"],
+            "read_file",
+        )
+        self.assertEqual(body["messages"][3]["role"], "tool")
+        self.assertEqual(body["messages"][4]["content"][0]["text"], "finished")
+        self.assertTrue(body["tools"][0]["function"]["strict"])
+
     def test_rolling_conversation_checkpoint_survives_router_restart(self) -> None:
         profile = fixture_profile()
         request = {
@@ -1450,6 +1510,111 @@ context = 32768
                 profile,
                 restored["snapshot_filename"],
             )
+
+    def test_rolling_checkpoint_saves_a_stable_prefilled_boundary(self) -> None:
+        profile = fixture_profile()
+        with tempfile.TemporaryDirectory() as temporary:
+            slot_root = Path(temporary)
+            state = object.__new__(router_module.RouterState)
+            state.available_profiles = {profile.slug: profile}
+            state.backend_cache_id = "backend-v1"
+            state.slot_save_root = slot_root
+            state.slot_id = 0
+            state.slot_snapshot_min_token_growth = 4_096
+            state.slot_checkpoint_store = router_module.RollingCheckpointStore(
+                slot_root,
+                slot_root,
+                max_count=2,
+                max_bytes=32 * 1024**3,
+                ttl_seconds=172_800,
+            )
+            state.backend_lock = asyncio.Lock()
+            state.live_slot_by_model = {profile.slug: "response-one"}
+            state.live_prompt_cache_key_by_model = {
+                profile.slug: "synthetic-session"
+            }
+
+            async def backend_request(
+                _profile: router_module.ModelProfile,
+                method: str,
+                path: str,
+                payload: dict[str, object],
+                **_kwargs: object,
+            ) -> dict[str, object]:
+                self.assertEqual(method, "POST")
+                if path == "/apply-template":
+                    messages = payload["messages"]
+                    self.assertIsInstance(messages, list)
+                    return {"prompt": str(messages[-1]["content"])}
+                if path == "/tokenize":
+                    suffix = (
+                        10
+                        if router_module.STARTER_CACHE_SENTINEL
+                        in str(payload["content"])
+                        else 11
+                    )
+                    return {"tokens": [1, 2, 3, 4, 5, 6, 7, 8, suffix]}
+                if path == "/completion":
+                    self.assertEqual(payload["prompt"], [1, 2, 3, 4])
+                    self.assertEqual(payload["n_predict"], 0)
+                    self.assertTrue(payload["cache_prompt"])
+                    return {"timings": {"prompt_n": 4}}
+                raise AssertionError(f"unexpected backend path: {path}")
+
+            state._request_json = mock.AsyncMock(side_effect=backend_request)
+
+            async def save_slot(
+                saved_profile: router_module.ModelProfile,
+                filename: str,
+            ) -> dict[str, object]:
+                directory = state._slot_save_dir(saved_profile)
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / filename).write_bytes(b"synthetic slot checkpoint")
+                return {"status": "saved"}
+
+            state.save_slot = mock.AsyncMock(side_effect=save_slot)
+            checkpoint_request = {
+                "instructions": "synthetic system prompt",
+                "tools": [],
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "question"}
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "answer"}
+                        ],
+                    },
+                ],
+            }
+            candidate = router_module.ConversationCheckpointCandidate(
+                profile_slug=profile.slug,
+                profile_alias=profile.alias,
+                prompt_cache_key="synthetic-session",
+                response_id="response-one",
+                scaffold_fingerprint=state._conversation_scaffold_fingerprint(
+                    profile,
+                    checkpoint_request,
+                ),
+                context_tokens=20_000,
+                checkpoint_request=checkpoint_request,
+            )
+
+            result = asyncio.run(
+                state._save_conversation_checkpoint(candidate, force=False)
+            )
+
+            self.assertEqual(result["status"], "saved")
+            self.assertEqual(result["context_tokens"], 4)
+            self.assertEqual(result["boundary"]["context_tokens"], 4)
+            self.assertEqual(state._request_json.await_count, 5)
+            state.save_slot.assert_awaited_once()
 
     def test_rolling_checkpoint_rejects_changed_scaffold(self) -> None:
         profile = fixture_profile()

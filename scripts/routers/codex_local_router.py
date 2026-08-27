@@ -29,6 +29,7 @@ from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any
 
@@ -286,7 +287,7 @@ class ResponseSnapshot:
 
 @dataclass(frozen=True)
 class ConversationCheckpointCandidate:
-    """Content-free description of the latest llama.cpp slot worth saving."""
+    """Description of the latest llama.cpp slot worth saving."""
 
     profile_slug: str
     profile_alias: str
@@ -294,6 +295,13 @@ class ConversationCheckpointCandidate:
     response_id: str
     scaffold_fingerprint: str
     context_tokens: int
+    # Kept only in router memory until the idle save runs. Excluding this from
+    # repr prevents prompt content from leaking into diagnostics or telemetry.
+    checkpoint_request: dict[str, Any] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass
@@ -414,6 +422,210 @@ def _starter_scaffold_chat_body(
     ):
         if key in request:
             body[key] = copy.deepcopy(request[key])
+    return body
+
+
+def _conversation_checkpoint_chat_body(
+    request: dict[str, Any],
+    user_content: str = STARTER_CACHE_SENTINEL,
+) -> dict[str, Any]:
+    """Convert a Responses conversation into a stable next-turn chat prefix."""
+
+    messages: list[dict[str, Any]] = []
+    instructions = request.get("instructions")
+    if isinstance(instructions, str):
+        messages.append({"role": "system", "content": instructions})
+
+    input_items = request.get("input")
+    if not isinstance(input_items, list):
+        raise RuntimeError("conversation checkpoint requires list input")
+
+    for original in input_items:
+        if not isinstance(original, dict):
+            raise RuntimeError("conversation checkpoint received an invalid input item")
+        item = copy.deepcopy(original)
+        merge_previous = bool(
+            messages and messages[-1].get("role") == "assistant"
+        )
+        content = item.get("content")
+        if isinstance(content, str):
+            item["content"] = [{"type": "input_text", "text": content}]
+            content = item["content"]
+
+        role = item.get("role")
+        if (
+            isinstance(content, list)
+            and role in {"user", "system", "developer"}
+        ):
+            chat_content: list[dict[str, Any]] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    raise RuntimeError("conversation checkpoint received invalid message content")
+                part_type = part.get("type")
+                if part_type == "input_text" and isinstance(part.get("text"), str):
+                    chat_content.append({"type": "text", "text": part["text"]})
+                    continue
+                if part_type == "input_image":
+                    raise RuntimeError(
+                        "rolling conversation checkpoints do not yet support image input"
+                    )
+                raise RuntimeError(
+                    "conversation checkpoint received unsupported message content"
+                )
+            item.pop("type", None)
+            item.pop("status", None)
+            item["content"] = chat_content
+            messages.append(item)
+            continue
+
+        if role == "assistant" and item.get("type") == "message":
+            chat_content = []
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        raise RuntimeError(
+                            "conversation checkpoint received invalid assistant content"
+                        )
+                    part_type = part.get("type")
+                    if part_type in {"output_text", "input_text"} and isinstance(
+                        part.get("text"), str
+                    ):
+                        chat_content.append({"type": "text", "text": part["text"]})
+                        continue
+                    if part_type == "refusal" and isinstance(
+                        part.get("refusal"), str
+                    ):
+                        chat_content.append(
+                            {"type": "refusal", "refusal": part["refusal"]}
+                        )
+                        continue
+                    raise RuntimeError(
+                        "conversation checkpoint received unsupported assistant content"
+                    )
+            if merge_previous:
+                previous_content = messages[-1].setdefault("content", [])
+                if not isinstance(previous_content, list):
+                    previous_content = []
+                    messages[-1]["content"] = previous_content
+                previous_content.extend(chat_content)
+            else:
+                item.pop("status", None)
+                item.pop("type", None)
+                item["content"] = chat_content
+                messages.append(item)
+            continue
+
+        if (
+            item.get("type") == "function_call"
+            and isinstance(item.get("arguments"), str)
+            and isinstance(item.get("call_id"), str)
+            and isinstance(item.get("name"), str)
+        ):
+            tool_call = {
+                "id": item["call_id"],
+                "type": "function",
+                "function": {
+                    "name": item["name"],
+                    "arguments": item["arguments"],
+                },
+            }
+            if merge_previous:
+                messages[-1].setdefault("tool_calls", []).append(tool_call)
+            else:
+                messages.append(
+                    {"role": "assistant", "tool_calls": [tool_call]}
+                )
+            continue
+
+        if (
+            item.get("type") == "function_call_output"
+            and isinstance(item.get("call_id"), str)
+        ):
+            output = item.get("output")
+            if isinstance(output, list):
+                converted_output: list[dict[str, Any]] = []
+                for part in output:
+                    if (
+                        not isinstance(part, dict)
+                        or part.get("type") != "input_text"
+                        or not isinstance(part.get("text"), str)
+                    ):
+                        raise RuntimeError(
+                            "conversation checkpoint received unsupported tool output"
+                        )
+                    converted_output.append({"type": "text", "text": part["text"]})
+                output = converted_output
+            if not isinstance(output, (str, list)):
+                raise RuntimeError(
+                    "conversation checkpoint received unsupported tool output"
+                )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": item["call_id"],
+                    "content": output,
+                }
+            )
+            continue
+
+        if item.get("type") == "reasoning" and isinstance(item.get("summary"), list):
+            reasoning_content = item.get("content")
+            if (
+                not isinstance(reasoning_content, list)
+                or not reasoning_content
+                or not isinstance(reasoning_content[0], dict)
+                or not isinstance(reasoning_content[0].get("text"), str)
+            ):
+                raise RuntimeError(
+                    "conversation checkpoint received unsupported reasoning content"
+                )
+            if merge_previous:
+                messages[-1]["reasoning_content"] = reasoning_content[0]["text"]
+            else:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": [],
+                        "reasoning_content": reasoning_content[0]["text"],
+                    }
+                )
+            continue
+
+        raise RuntimeError(
+            f"conversation checkpoint received unsupported item type: {item.get('type')}"
+        )
+
+    messages.append({"role": "user", "content": user_content})
+    body: dict[str, Any] = {
+        "add_generation_prompt": False,
+        "messages": messages,
+    }
+
+    chat_tools: list[dict[str, Any]] = []
+    tools = request.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict) or tool.get("type") != "function":
+                continue
+            function = copy.deepcopy(tool)
+            function.pop("type", None)
+            function.setdefault("strict", True)
+            chat_tools.append({"type": "function", "function": function})
+    if chat_tools:
+        body["tools"] = chat_tools
+
+    for key in (
+        "chat_template_kwargs",
+        "enable_thinking",
+        "parallel_tool_calls",
+        "reasoning_format",
+        "tool_choice",
+    ):
+        if key in request:
+            body[key] = copy.deepcopy(request[key])
+    reasoning = request.get("reasoning")
+    if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
+        body["reasoning_effort"] = reasoning["effort"]
     return body
 
 
@@ -2842,6 +3054,7 @@ class RouterState:
         forward_request: dict[str, Any],
         response_id: str,
         backend_response: dict[str, Any],
+        conversation_input: list[dict[str, Any]],
     ) -> dict[str, Any]:
         if not self.slot_snapshots_enabled or not profile.supports_slots:
             return {
@@ -2866,6 +3079,8 @@ class RouterState:
                 "min_tokens": self.slot_snapshot_min_tokens,
             }
 
+        checkpoint_request = copy.deepcopy(forward_request)
+        checkpoint_request["input"] = copy.deepcopy(conversation_input)
         candidate = ConversationCheckpointCandidate(
             profile_slug=profile.slug,
             profile_alias=profile.alias,
@@ -2876,6 +3091,7 @@ class RouterState:
                 forward_request,
             ),
             context_tokens=context_tokens,
+            checkpoint_request=checkpoint_request,
         )
         self.pending_checkpoints[profile.slug] = candidate
         previous = self.checkpoint_tasks.get(profile.slug)
@@ -2927,6 +3143,69 @@ class RouterState:
         finally:
             if self.checkpoint_tasks.get(profile_slug) is current_task:
                 self.checkpoint_tasks.pop(profile_slug, None)
+
+    async def _prefill_conversation_checkpoint_boundary(
+        self,
+        profile: ModelProfile,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Move the live slot to a prefix that the next turn can extend."""
+
+        bodies = (
+            _conversation_checkpoint_chat_body(request),
+            _conversation_checkpoint_chat_body(
+                request,
+                STARTER_CACHE_ALTERNATE_SENTINEL,
+            ),
+        )
+        rendered_prompts: list[str] = []
+        for body in bodies:
+            rendered = await self._request_json(
+                profile,
+                "POST",
+                "/apply-template",
+                body,
+                retry_connection_error=True,
+            )
+            prompt = rendered.get("prompt")
+            if not isinstance(prompt, str) or not prompt:
+                raise RuntimeError(
+                    "llama.cpp returned an empty conversation checkpoint prompt"
+                )
+            rendered_prompts.append(prompt)
+
+        tokenized_prompts: list[list[int]] = []
+        for prompt in rendered_prompts:
+            tokenized = await self._request_json(
+                profile,
+                "POST",
+                "/tokenize",
+                {
+                    "content": prompt,
+                    "add_special": True,
+                    "parse_special": True,
+                },
+                retry_connection_error=True,
+            )
+            tokenized_prompts.append(_token_ids(tokenized))
+
+        prompt_tokens = _starter_common_token_prefix(*tokenized_prompts)
+        prefilled = await self._request_json(
+            profile,
+            "POST",
+            "/completion",
+            {
+                "prompt": prompt_tokens,
+                "n_predict": 0,
+                "id_slot": self.slot_id,
+                "cache_prompt": True,
+            },
+            retry_connection_error=True,
+        )
+        return {
+            "context_tokens": len(prompt_tokens),
+            "timings": prefilled.get("timings"),
+        }
 
     async def _save_conversation_checkpoint(
         self,
@@ -3010,7 +3289,20 @@ class RouterState:
                     profile.alias,
                     pending_filename,
                 )
+                boundary_result: dict[str, Any] | None = None
+                if candidate.checkpoint_request is not None:
+                    boundary_result = (
+                        await self._prefill_conversation_checkpoint_boundary(
+                            profile,
+                            candidate.checkpoint_request,
+                        )
+                    )
                 await self.save_slot(profile, pending_filename)
+                saved_context_tokens = (
+                    int(boundary_result["context_tokens"])
+                    if boundary_result is not None
+                    else candidate.context_tokens
+                )
                 result = await asyncio.to_thread(
                     self.slot_checkpoint_store.commit,
                     profile_slug=profile.slug,
@@ -3019,7 +3311,7 @@ class RouterState:
                     backend_cache_id=self.backend_cache_id,
                     scaffold_fingerprint=candidate.scaffold_fingerprint,
                     response_id=candidate.response_id,
-                    context_tokens=candidate.context_tokens,
+                    context_tokens=saved_context_tokens,
                     pending_filename=pending_filename,
                 )
             except BaseException:
@@ -3029,7 +3321,10 @@ class RouterState:
                     pending_filename,
                 )
                 raise
-            return dict(result)
+            return {
+                **dict(result),
+                "boundary": boundary_result,
+            }
 
     async def flush_conversation_checkpoints(self) -> list[dict[str, Any]]:
         tasks = list(self.checkpoint_tasks.values())
@@ -4256,6 +4551,7 @@ class RouterState:
             forward_request,
             response_id,
             backend_response,
+            list(full_input) + copy.deepcopy(lineage_output_items),
         )
         slot_save_ms = (time.perf_counter() - save_start) * 1000.0
 
