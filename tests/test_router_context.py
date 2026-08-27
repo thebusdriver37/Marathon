@@ -474,6 +474,62 @@ context = 32768
             },
         )
 
+    def test_local_reasoning_survives_session_resume_for_slot_reuse(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        backend_item = {
+            "id": "reasoning-one",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "content": [
+                {"type": "reasoning_text", "text": "synthetic reasoning"}
+            ],
+            "encrypted_content": "",
+        }
+
+        persisted_item = state.sanitize_output_item(backend_item)
+        resumed = router_module.normalize_responses_request(
+            {
+                "input": [
+                    persisted_item,
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "synthetic follow-up"}
+                        ],
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(persisted_item["content"][0]["type"], "text")
+        self.assertNotIn("status", persisted_item)
+        self.assertEqual(resumed["input"][0], persisted_item)
+
+    def test_opaque_reasoning_is_still_dropped_before_llama(self) -> None:
+        opaque = {
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-upstream-payload",
+        }
+
+        normalized = router_module.normalize_responses_request(
+            {
+                "input": [
+                    opaque,
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "synthetic follow-up",
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(len(normalized["input"]), 1)
+        self.assertEqual(normalized["input"][0]["type"], "message")
+
     def test_image_tool_output_becomes_backend_image_message(self) -> None:
         image_url = "data:image/png;base64,aGVsbG8="
         request = {
@@ -1546,6 +1602,67 @@ context = 32768
         self.assertEqual(response["id"], "resp_slow")
         self.assertEqual(response["usage"]["output_tokens"], 1)
         self.assertEqual(state.http_client.headers, {})
+
+    def test_streamed_reasoning_uses_resume_safe_content_type(self) -> None:
+        profile = fixture_profile(65_536)
+        reasoning = {
+            "id": "reasoning-one",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [],
+            "content": [
+                {"type": "reasoning_text", "text": "synthetic reasoning"}
+            ],
+            "encrypted_content": "",
+        }
+
+        class Content:
+            async def iter_chunked(self, _size: int):
+                events = [
+                    {"type": "response.output_item.done", "item": reasoning},
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_reasoning", "usage": {}},
+                    },
+                ]
+                for event in events:
+                    yield f"data: {json.dumps(event)}\n\n".encode()
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Client:
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+        state = object.__new__(router_module.RouterState)
+        state.http_client = Client()
+        streamed: list[dict[str, object]] = []
+
+        async def sink(event: dict[str, object]) -> bool:
+            streamed.append(event)
+            return True
+
+        response = asyncio.run(
+            state._request_responses_stream(
+                profile,
+                {"input": [], "tools": []},
+                event_sink=sink,
+            )
+        )
+
+        done = next(
+            event for event in streamed if event["type"] == "response.output_item.done"
+        )
+        self.assertEqual(done["item"]["content"][0]["type"], "text")
+        self.assertEqual(response["output"][0]["content"][0]["type"], "text")
 
     def test_output_budget_scales_and_is_profile_overrideable(self) -> None:
         self.assertEqual(router_module._max_output_tokens(fixture_profile(32_768)), 4_096)

@@ -1466,6 +1466,20 @@ def _backend_lineage_item(item: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
+def _is_replayable_reasoning_item(item: dict[str, Any]) -> bool:
+    """Return whether llama.cpp can reconstruct this saved reasoning item."""
+
+    if item.get("type") != "reasoning" or not isinstance(item.get("summary"), list):
+        return False
+    content = item.get("content")
+    return bool(
+        isinstance(content, list)
+        and content
+        and isinstance(content[0], dict)
+        and isinstance(content[0].get("text"), str)
+    )
+
+
 def _apply_reasoning_effort(
     data: dict[str, Any], profile: ModelProfile | None
 ) -> None:
@@ -1587,6 +1601,10 @@ def normalize_responses_request(
         if item.get("type") == "custom_tool_call_output":
             normalized_input.append(_apply_patch_custom_output_to_function_output(item))
             input_changed = True
+            continue
+
+        if item.get("type") == "reasoning" and _is_replayable_reasoning_item(item):
+            normalized_input.append(item)
             continue
 
         if item.get("type") in BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES:
@@ -2476,6 +2494,9 @@ class RouterState:
                             pending_message_done["item"] = sanitized
                             continue
                         output_items.append(sanitized)
+                        if sanitized != item:
+                            event = copy.deepcopy(event)
+                            event["item"] = sanitized
                         if collect_managed_calls([sanitized]):
                             await flush_pending_message("commentary")
                             if item_id:
@@ -3235,6 +3256,16 @@ class RouterState:
     def sanitize_output_item(self, item: dict[str, Any]) -> dict[str, Any]:
         sanitized = copy.deepcopy(item)
         sanitized.pop("status", None)
+        # Codex intentionally omits `reasoning_text` when serializing history
+        # for a resumed request. Its equivalent `text` variant is persisted,
+        # and llama.cpp accepts both as reasoning content. Normalize local
+        # output here so a restored slot sees the same prompt after restart.
+        if sanitized.get("type") == "reasoning":
+            content = sanitized.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "reasoning_text":
+                        part["type"] = "text"
         return sanitized
 
     def usage_payload(self, usage: Any) -> dict[str, Any]:
