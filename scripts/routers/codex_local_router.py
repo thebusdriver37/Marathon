@@ -112,6 +112,7 @@ BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES = {
 
 WS_KEEPALIVE_INTERVAL_SECONDS = float(os.getenv("MARATHON_WS_KEEPALIVE_INTERVAL_SECONDS", "15"))
 WS_SEND_TIMEOUT_SECONDS = float(os.getenv("MARATHON_WS_SEND_TIMEOUT_SECONDS", "5"))
+ROUTER_MAX_REQUEST_BYTES = 32 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 2
 DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_TTL_SECONDS = 2 * 24 * 60 * 60
@@ -142,6 +143,7 @@ MARATHON_RUNTIME_INSTRUCTIONS = (
     "signal, or replace Marathon or its supervised backend from inside a Marathon session, "
     "even with a verified PID; ask the user to exit and use its instance-aware launcher."
 )
+MARATHON_LOCAL_REASONING_MARKER = "marathon-local-reasoning-v1"
 _BACKEND_ARGUMENTS_KEY = "_marathon_backend_arguments"
 _WEB_REPLAYED_COMPLETION_KEY = "_marathon_web_replayed_completion"
 
@@ -1469,7 +1471,11 @@ def _backend_lineage_item(item: dict[str, Any]) -> dict[str, Any]:
 def _is_replayable_reasoning_item(item: dict[str, Any]) -> bool:
     """Return whether llama.cpp can reconstruct this saved reasoning item."""
 
-    if item.get("type") != "reasoning" or not isinstance(item.get("summary"), list):
+    if (
+        item.get("type") != "reasoning"
+        or item.get("encrypted_content") != MARATHON_LOCAL_REASONING_MARKER
+        or not isinstance(item.get("summary"), list)
+    ):
         return False
     content = item.get("content")
     return bool(
@@ -2488,7 +2494,10 @@ class RouterState:
                             apply_patch_argument_buffers.pop(call_id, None)
                             continue
 
-                        sanitized = self.sanitize_output_item(item)
+                        sanitized = self.sanitize_output_item(
+                            item,
+                            replayable_reasoning=profile.supports_slots,
+                        )
                         if _is_assistant_message_item(sanitized):
                             pending_message_done = copy.deepcopy(event)
                             pending_message_done["item"] = sanitized
@@ -3253,19 +3262,33 @@ class RouterState:
             seq = self._response_id_seq
         return f"{kind}_{int(time.time() * 1000)}_{seq}"
 
-    def sanitize_output_item(self, item: dict[str, Any]) -> dict[str, Any]:
+    def sanitize_output_item(
+        self,
+        item: dict[str, Any],
+        *,
+        replayable_reasoning: bool = False,
+    ) -> dict[str, Any]:
         sanitized = copy.deepcopy(item)
         sanitized.pop("status", None)
         # Codex intentionally omits `reasoning_text` when serializing history
         # for a resumed request. Its equivalent `text` variant is persisted,
         # and llama.cpp accepts both as reasoning content. Normalize local
         # output here so a restored slot sees the same prompt after restart.
-        if sanitized.get("type") == "reasoning":
+        if replayable_reasoning and sanitized.get("type") == "reasoning":
             content = sanitized.get("content")
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "reasoning_text":
                         part["type"] = "text"
+                if any(
+                    isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)
+                    for part in content
+                ):
+                    sanitized["encrypted_content"] = (
+                        MARATHON_LOCAL_REASONING_MARKER
+                    )
         return sanitized
 
     def usage_payload(self, usage: Any) -> dict[str, Any]:
@@ -3644,7 +3667,12 @@ class RouterState:
             iter_items: list[dict[str, Any]] = []
             for item in response.get("output", []):
                 if isinstance(item, dict):
-                    iter_items.append(self.sanitize_output_item(item))
+                    iter_items.append(
+                        self.sanitize_output_item(
+                            item,
+                            replayable_reasoning=profile.supports_slots,
+                        )
+                    )
             pending_calls = collect_managed_calls(iter_items)
             _annotate_message_phases(iter_items, final_response=not pending_calls)
             iter_items = [
@@ -3753,7 +3781,12 @@ class RouterState:
                 final_items: list[dict[str, Any]] = []
                 for item in final.get("output", []):
                     if isinstance(item, dict):
-                        final_items.append(self.sanitize_output_item(item))
+                        final_items.append(
+                            self.sanitize_output_item(
+                                item,
+                                replayable_reasoning=profile.supports_slots,
+                            )
+                        )
                 _annotate_message_phases(final_items, final_response=True)
                 final_items = [
                     item for item in final_items if not _is_droppable_commentary_message(item)
@@ -4721,7 +4754,7 @@ async def on_cleanup(app: web.Application) -> None:
 
 
 def build_app(state: RouterState) -> web.Application:
-    app = web.Application()
+    app = web.Application(client_max_size=ROUTER_MAX_REQUEST_BYTES)
     app["state"] = state
     app.router.add_get("/health", handle_health)
     app.router.add_get("/v1/models", handle_models)

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -487,7 +488,10 @@ context = 32768
             "encrypted_content": "",
         }
 
-        persisted_item = state.sanitize_output_item(backend_item)
+        persisted_item = state.sanitize_output_item(
+            backend_item,
+            replayable_reasoning=True,
+        )
         resumed = router_module.normalize_responses_request(
             {
                 "input": [
@@ -504,8 +508,36 @@ context = 32768
         )
 
         self.assertEqual(persisted_item["content"][0]["type"], "text")
+        self.assertEqual(
+            persisted_item["encrypted_content"],
+            router_module.MARATHON_LOCAL_REASONING_MARKER,
+        )
         self.assertNotIn("status", persisted_item)
         self.assertEqual(resumed["input"][0], persisted_item)
+
+    def test_unmarked_plaintext_reasoning_is_not_replayed(self) -> None:
+        historical = {
+            "type": "reasoning",
+            "summary": [],
+            "content": [{"type": "text", "text": "historical reasoning"}],
+            "encrypted_content": "",
+        }
+
+        normalized = router_module.normalize_responses_request(
+            {
+                "input": [
+                    historical,
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "synthetic follow-up",
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(len(normalized["input"]), 1)
+        self.assertEqual(normalized["input"][0]["type"], "message")
 
     def test_opaque_reasoning_is_still_dropped_before_llama(self) -> None:
         opaque = {
@@ -1662,7 +1694,20 @@ context = 32768
             event for event in streamed if event["type"] == "response.output_item.done"
         )
         self.assertEqual(done["item"]["content"][0]["type"], "text")
+        self.assertEqual(
+            done["item"]["encrypted_content"],
+            router_module.MARATHON_LOCAL_REASONING_MARKER,
+        )
         self.assertEqual(response["output"][0]["content"][0]["type"], "text")
+
+    def test_http_fallback_accepts_context_sized_request_bodies(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            app = router_module.build_app(state)
+
+        self.assertEqual(app._client_max_size, router_module.ROUTER_MAX_REQUEST_BYTES)
+        self.assertGreater(app._client_max_size, 1_110_965)
 
     def test_output_budget_scales_and_is_profile_overrideable(self) -> None:
         self.assertEqual(router_module._max_output_tokens(fixture_profile(32_768)), 4_096)
