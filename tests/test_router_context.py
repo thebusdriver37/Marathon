@@ -1068,6 +1068,84 @@ context = 32768
         )
         self.assertEqual(result["usage"]["input_tokens_details"]["cached_tokens"], 10_000)
 
+    def test_cold_root_restores_rolling_checkpoint_before_starter_cache(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.lineage_lock = asyncio.Lock()
+        state.lineage = {}
+        state.last_response_by_model = {}
+        state.live_slot_by_model = {}
+        state.live_prompt_cache_key_by_model = {}
+        state.experimental_delta_only = False
+        state.slot_id = 0
+        state.backend_lock = asyncio.Lock()
+        state.prepare_conversation_checkpoint = mock.AsyncMock(
+            return_value={
+                "mode": "restore-conversation-checkpoint",
+                "status": "restored",
+                "restore_result": {"status": "restored"},
+            }
+        )
+        state.prepare_starter_cache = mock.AsyncMock()
+        state._run_responses_loop = mock.AsyncMock(
+            return_value=(
+                {
+                    "id": "resp_new",
+                    "usage": {
+                        "input_tokens": 100_100,
+                        "input_tokens_details": {"cached_tokens": 100_000},
+                        "output_tokens": 100,
+                        "total_tokens": 100_200,
+                    },
+                },
+                [],
+                0,
+            )
+        )
+        state.schedule_conversation_checkpoint = mock.Mock(
+            return_value={"status": "scheduled"}
+        )
+        state.telemetry = mock.Mock()
+        state.trace_request = mock.Mock()
+        state.lock = threading.Lock()
+        state._trace_seq = 0
+        state._response_id_seq = 0
+        state.debug = False
+
+        result = asyncio.run(
+            state.process_websocket_create(
+                {
+                    "model": profile.slug,
+                    "prompt_cache_key": "synthetic-session",
+                    "instructions": "synthetic system prompt",
+                    "tools": [],
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "synthetic input"}
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+        state.prepare_conversation_checkpoint.assert_awaited_once()
+        state.prepare_starter_cache.assert_not_awaited()
+        self.assertEqual(result["usage"]["input_tokens_details"]["cached_tokens"], 100_000)
+        completed = [
+            call.args[1]
+            for call in state.telemetry.emit.call_args_list
+            if call.args[0] == "router.response.completed"
+        ][0]
+        self.assertEqual(
+            completed["slot"]["prepare_mode"],
+            "restore-conversation-checkpoint",
+        )
+
     def test_starter_scaffold_matches_responses_tool_conversion(self) -> None:
         scaffold = router_module._starter_scaffold_chat_body(
             {
@@ -1203,6 +1281,147 @@ context = 32768
             )
             restarted._request_json.assert_not_awaited()
             restarted.erase_slot.assert_not_awaited()
+
+    def test_rolling_conversation_checkpoint_survives_router_restart(self) -> None:
+        profile = fixture_profile()
+        request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "prompt_cache_key": "synthetic-session",
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            slot_root = Path(temporary)
+
+            def make_state() -> router_module.RouterState:
+                state = object.__new__(router_module.RouterState)
+                state.available_profiles = {profile.slug: profile}
+                state.backend_cache_id = "backend-v1"
+                state.slot_save_root = slot_root
+                state.slot_snapshots_enabled = True
+                state.slot_snapshot_min_token_growth = 4_096
+                state.slot_checkpoint_store = router_module.RollingCheckpointStore(
+                    slot_root,
+                    slot_root,
+                    max_count=2,
+                    max_bytes=32 * 1024**3,
+                    ttl_seconds=172_800,
+                )
+                state.backend_lock = asyncio.Lock()
+                state.live_slot_by_model = {}
+                state.live_prompt_cache_key_by_model = {}
+                state.telemetry = mock.Mock()
+                state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})
+
+                async def save_slot(
+                    saved_profile: router_module.ModelProfile,
+                    filename: str,
+                ) -> dict[str, object]:
+                    directory = state._slot_save_dir(saved_profile)
+                    directory.mkdir(parents=True, exist_ok=True)
+                    (directory / filename).write_bytes(b"synthetic slot checkpoint")
+                    return {"status": "saved"}
+
+                state.save_slot = mock.AsyncMock(side_effect=save_slot)
+                return state
+
+            first = make_state()
+            candidate = router_module.ConversationCheckpointCandidate(
+                profile_slug=profile.slug,
+                profile_alias=profile.alias,
+                prompt_cache_key="synthetic-session",
+                response_id="response-one",
+                scaffold_fingerprint=first._conversation_scaffold_fingerprint(
+                    profile,
+                    request,
+                ),
+                context_tokens=100_000,
+            )
+            first.live_slot_by_model[profile.slug] = candidate.response_id
+            first.live_prompt_cache_key_by_model[profile.slug] = (
+                candidate.prompt_cache_key
+            )
+
+            saved = asyncio.run(
+                first._save_conversation_checkpoint(candidate, force=False)
+            )
+            self.assertEqual(saved["status"], "saved")
+
+            restarted = make_state()
+            restored = asyncio.run(
+                restarted.prepare_conversation_checkpoint(
+                    profile,
+                    request,
+                    "synthetic-session",
+                )
+            )
+
+            self.assertEqual(restored["mode"], "restore-conversation-checkpoint")
+            self.assertEqual(restored["context_tokens"], 100_000)
+            restarted.restore_slot.assert_awaited_once_with(
+                profile,
+                restored["snapshot_filename"],
+            )
+
+    def test_rolling_checkpoint_rejects_changed_scaffold(self) -> None:
+        profile = fixture_profile()
+        with tempfile.TemporaryDirectory() as temporary:
+            slot_root = Path(temporary)
+            state = object.__new__(router_module.RouterState)
+            state.available_profiles = {profile.slug: profile}
+            state.backend_cache_id = "backend-v1"
+            state.slot_save_root = slot_root
+            state.slot_snapshots_enabled = True
+            state.slot_snapshot_min_token_growth = 4_096
+            state.slot_checkpoint_store = router_module.RollingCheckpointStore(
+                slot_root,
+                slot_root,
+                max_count=2,
+                max_bytes=32 * 1024**3,
+                ttl_seconds=172_800,
+            )
+            state.backend_lock = asyncio.Lock()
+            state.live_slot_by_model = {profile.slug: "response-one"}
+            state.live_prompt_cache_key_by_model = {
+                profile.slug: "synthetic-session"
+            }
+            state.telemetry = mock.Mock()
+
+            async def save_slot(
+                saved_profile: router_module.ModelProfile,
+                filename: str,
+            ) -> dict[str, object]:
+                directory = state._slot_save_dir(saved_profile)
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / filename).write_bytes(b"synthetic slot checkpoint")
+                return {"status": "saved"}
+
+            state.save_slot = mock.AsyncMock(side_effect=save_slot)
+            state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})
+            original = {"instructions": "one", "tools": []}
+            candidate = router_module.ConversationCheckpointCandidate(
+                profile_slug=profile.slug,
+                profile_alias=profile.alias,
+                prompt_cache_key="synthetic-session",
+                response_id="response-one",
+                scaffold_fingerprint=state._conversation_scaffold_fingerprint(
+                    profile,
+                    original,
+                ),
+                context_tokens=100_000,
+            )
+            asyncio.run(state._save_conversation_checkpoint(candidate, force=False))
+
+            result = asyncio.run(
+                state.prepare_conversation_checkpoint(
+                    profile,
+                    {"instructions": "two", "tools": []},
+                    "synthetic-session",
+                )
+            )
+
+            self.assertEqual(result["mode"], "conversation-checkpoint-miss")
+            state.restore_slot.assert_not_awaited()
 
     def test_starter_cache_fingerprint_tracks_scaffold_and_backend(self) -> None:
         profile = fixture_profile()

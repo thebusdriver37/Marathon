@@ -93,6 +93,7 @@ When a repository includes a compatible vision projector, Marathon downloads it 
 Existing models get the same behavior when their matching `mmproj` or `vision-f16` GGUF is stored beside the main model.
 Marathon saves the token-exact system-and-tools prefix to disk after processing it once.
 Later cold starts restore unchanged system instructions, tools, and `AGENTS.md` content after the model loads, while prompt changes automatically build a new cache.
+Long conversations also receive a bounded rolling checkpoint after they become idle, so a compatible resumed session can restore model state instead of replaying its entire history.
 No manual cache management is required.
 
 ## Reasoning Control
@@ -223,7 +224,7 @@ Useful storage locations:
 | Personal catalog overrides | `~/.config/marathon/catalog.toml` |
 | Runtime traces | `~/.local/state/marathon/runs/` |
 | Runtime logs | `~/.local/state/marathon/logs/` |
-| Persistent prompt cache | `~/AI/cache/marathon/slots/` |
+| Persistent prompt and conversation cache | `~/AI/cache/marathon/slots/` |
 
 Named instance data is stored below `instances/NAME/` within the corresponding configuration, state, runtime, router, slot-cache, and Codex-home roots.
 
@@ -234,9 +235,12 @@ That file is merged over the repository's `config/runtime_catalog.toml`, so mach
 Optional OpenAI-compatible external models can also be declared there and will appear in Codex's `/model` menu without changing the repository.
 Set `MARATHON_USER_CATALOG` to point the override elsewhere.
 
-Full conversation slot snapshots are an optional acceleration for long resumed sessions.
-Enable them with `MARATHON_SLOT_SNAPSHOTS_ENABLED=1` or `slot_snapshots_enabled = true` in the personal catalog's `[settings]` table.
-Their default limits are 16 files and 32 GiB, and `marathon doctor` reports both the configuration and disk use.
+Rolling conversation checkpoints are enabled by default for llama.cpp backends that support slot save and restore.
+Each conversation reuses one file, and each Marathon instance retains at most its two most recently used conversations.
+Inactive checkpoints expire 48 hours after their last use.
+All default and named instances share a hard 32 GiB rolling-checkpoint ceiling.
+Checkpoint metadata contains only hashes, compatibility identifiers, token counts, sizes, and timestamps.
+Set `MARATHON_SLOT_SNAPSHOTS_ENABLED=0` to disable this acceleration without affecting saved Codex conversations.
 
 ## Runtime Safety
 

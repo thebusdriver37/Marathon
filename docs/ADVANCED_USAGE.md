@@ -73,10 +73,27 @@ The cache fingerprint includes the model, projector, backend binary and argument
 Marathon retains up to eight starter snapshots within a 16 GiB default limit.
 The optional `MARATHON_STARTER_CACHE_MAX_COUNT` and `MARATHON_STARTER_CACHE_MAX_BYTES` environment variables adjust those limits.
 
-Full conversation slot snapshots are separate from the starter cache and are disabled by default because a long-context snapshot can be very large.
-Enable exact resume and fork snapshots with `MARATHON_SLOT_SNAPSHOTS_ENABLED=1` or `slot_snapshots_enabled = true` under `[settings]` in `~/.config/marathon/catalog.toml`.
-The defaults retain up to 16 snapshots and 32 GiB total.
-Override those limits with `MARATHON_SLOT_SNAPSHOT_MAX_COUNT` and `MARATHON_SLOT_SNAPSHOT_MAX_BYTES` or their matching catalog settings.
+Rolling conversation checkpoints are separate from the starter cache and are enabled by default for llama.cpp backends with slot support.
+Marathon waits for 60 seconds of conversation inactivity before saving, which keeps the large disk write off the response path.
+The first checkpoint starts at 16,384 context tokens, and another save is needed only after at least 4,096 tokens of growth or a clean shutdown.
+Each conversation atomically replaces its previous checkpoint instead of accumulating one file per response.
+Each Marathon instance keeps at most two recent conversations, while all instances share a hard 32 GiB ceiling.
+An inactive checkpoint expires 48 hours after its last save or restore.
+Cleanup runs at startup, after saves, and periodically while Marathon remains open.
+Checkpoint metadata stores only hashed conversation and response identities, compatibility fingerprints, token counts, sizes, and timestamps.
+The binary checkpoint contains model KV state derived from the conversation and is created with owner-only permissions.
+Set `MARATHON_SLOT_SNAPSHOTS_ENABLED=0` or `slot_snapshots_enabled = false` to disable rolling checkpoints without deleting Codex session history.
+
+The following environment variables have matching keys in the personal catalog's `[settings]` table:
+
+- `MARATHON_SLOT_SNAPSHOT_MAX_COUNT` controls recent conversations per instance and defaults to `2`.
+- `MARATHON_SLOT_SNAPSHOT_MAX_BYTES` controls the shared byte budget, is hard-capped at 32 GiB, and defaults to that ceiling.
+- `MARATHON_SLOT_SNAPSHOT_TTL_SECONDS` controls inactivity expiry and defaults to `172800`.
+- `MARATHON_SLOT_SNAPSHOT_IDLE_SECONDS` controls the background-save delay and defaults to `60`.
+- `MARATHON_SLOT_SNAPSHOT_MIN_TOKENS` controls the first-save threshold and defaults to `16384`.
+- `MARATHON_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH` controls rolling-save frequency and defaults to `4096`.
+
+If a checkpoint is missing, expired, too large, corrupt, or incompatible, Marathon safely falls back to the starter cache and normal prompt replay.
 
 ## Model and Backend Paths
 

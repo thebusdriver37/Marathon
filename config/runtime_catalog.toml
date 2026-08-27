@@ -8,9 +8,13 @@ router_port = 18111
 health_timeout = 360
 stop_timeout = 20
 prompt_cache_ram_mib = 8192
-slot_snapshots_enabled = false
-slot_snapshot_max_count = 16
+slot_snapshots_enabled = true
+slot_snapshot_max_count = 2
 slot_snapshot_max_bytes = 34359738368
+slot_snapshot_ttl_seconds = 172800
+slot_snapshot_idle_seconds = 60
+slot_snapshot_min_tokens = 16384
+slot_snapshot_min_token_growth = 4096
 slot_snapshot_clean_startup = false
 
 [[backends]]

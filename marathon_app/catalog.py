@@ -61,6 +61,10 @@ class Settings:
     slot_snapshots_enabled: bool
     slot_snapshot_max_count: int
     slot_snapshot_max_bytes: int
+    slot_snapshot_ttl_seconds: int
+    slot_snapshot_idle_seconds: int
+    slot_snapshot_min_tokens: int
+    slot_snapshot_min_token_growth: int
     slot_snapshot_clean_startup: bool
 
 
@@ -415,23 +419,62 @@ def settings(catalog: dict[str, Any] | None = None) -> Settings:
         ),
         slot_snapshots_enabled=_setting_bool(
             "MARATHON_SLOT_SNAPSHOTS_ENABLED",
-            raw.get("slot_snapshots_enabled", False),
+            raw.get("slot_snapshots_enabled", True),
         ),
         slot_snapshot_max_count=max(
             0,
             int(
                 os.environ.get(
                     "MARATHON_SLOT_SNAPSHOT_MAX_COUNT",
-                    raw.get("slot_snapshot_max_count", 16),
+                    raw.get("slot_snapshot_max_count", 2),
                 )
             ),
         ),
         slot_snapshot_max_bytes=max(
+            1,
+            min(
+                32 * 1024**3,
+                int(
+                    os.environ.get(
+                        "MARATHON_SLOT_SNAPSHOT_MAX_BYTES",
+                        raw.get("slot_snapshot_max_bytes", 32 * 1024**3),
+                    )
+                ),
+            ),
+        ),
+        slot_snapshot_ttl_seconds=max(
+            1,
+            int(
+                os.environ.get(
+                    "MARATHON_SLOT_SNAPSHOT_TTL_SECONDS",
+                    raw.get("slot_snapshot_ttl_seconds", 2 * 24 * 60 * 60),
+                )
+            ),
+        ),
+        slot_snapshot_idle_seconds=max(
             0,
             int(
                 os.environ.get(
-                    "MARATHON_SLOT_SNAPSHOT_MAX_BYTES",
-                    raw.get("slot_snapshot_max_bytes", 32 * 1024**3),
+                    "MARATHON_SLOT_SNAPSHOT_IDLE_SECONDS",
+                    raw.get("slot_snapshot_idle_seconds", 60),
+                )
+            ),
+        ),
+        slot_snapshot_min_tokens=max(
+            0,
+            int(
+                os.environ.get(
+                    "MARATHON_SLOT_SNAPSHOT_MIN_TOKENS",
+                    raw.get("slot_snapshot_min_tokens", 16_384),
+                )
+            ),
+        ),
+        slot_snapshot_min_token_growth=max(
+            0,
+            int(
+                os.environ.get(
+                    "MARATHON_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH",
+                    raw.get("slot_snapshot_min_token_growth", 4_096),
                 )
             ),
         ),

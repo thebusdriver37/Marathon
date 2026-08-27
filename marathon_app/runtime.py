@@ -966,6 +966,7 @@ class Runtime:
                     self.model.family.default_reasoning_level or ""
                 ),
                 "MARATHON_SLOT_SAVE_ROOT": str(self.paths.slot_root),
+                "MARATHON_SLOT_CACHE_BUDGET_ROOT": str(SLOT_ROOT),
                 "MARATHON_SLOT_SNAPSHOTS_ENABLED": (
                     "1" if self.config.slot_snapshots_enabled else "0"
                 ),
@@ -974,6 +975,18 @@ class Runtime:
                 ),
                 "MARATHON_SLOT_SNAPSHOT_MAX_BYTES": str(
                     self.config.slot_snapshot_max_bytes
+                ),
+                "MARATHON_SLOT_SNAPSHOT_TTL_SECONDS": str(
+                    self.config.slot_snapshot_ttl_seconds
+                ),
+                "MARATHON_SLOT_SNAPSHOT_IDLE_SECONDS": str(
+                    self.config.slot_snapshot_idle_seconds
+                ),
+                "MARATHON_SLOT_SNAPSHOT_MIN_TOKENS": str(
+                    self.config.slot_snapshot_min_tokens
+                ),
+                "MARATHON_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH": str(
+                    self.config.slot_snapshot_min_token_growth
                 ),
                 "MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP": (
                     "1" if self.config.slot_snapshot_clean_startup else "0"

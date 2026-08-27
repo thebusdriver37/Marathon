@@ -447,6 +447,10 @@ class CatalogTests(unittest.TestCase):
                 "MARATHON_SLOT_SNAPSHOTS_ENABLED": "1",
                 "MARATHON_SLOT_SNAPSHOT_MAX_COUNT": "7",
                 "MARATHON_SLOT_SNAPSHOT_MAX_BYTES": "12345",
+                "MARATHON_SLOT_SNAPSHOT_TTL_SECONDS": "86400",
+                "MARATHON_SLOT_SNAPSHOT_IDLE_SECONDS": "12",
+                "MARATHON_SLOT_SNAPSHOT_MIN_TOKENS": "8192",
+                "MARATHON_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH": "2048",
                 "MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP": "true",
             },
             clear=False,
@@ -456,7 +460,21 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(configured.slot_snapshots_enabled)
         self.assertEqual(configured.slot_snapshot_max_count, 7)
         self.assertEqual(configured.slot_snapshot_max_bytes, 12_345)
+        self.assertEqual(configured.slot_snapshot_ttl_seconds, 86_400)
+        self.assertEqual(configured.slot_snapshot_idle_seconds, 12)
+        self.assertEqual(configured.slot_snapshot_min_tokens, 8_192)
+        self.assertEqual(configured.slot_snapshot_min_token_growth, 2_048)
         self.assertTrue(configured.slot_snapshot_clean_startup)
+
+    def test_slot_snapshot_disk_budget_is_hard_capped_at_32_gib(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"MARATHON_SLOT_SNAPSHOT_MAX_BYTES": str(64 * 1024**3)},
+            clear=False,
+        ):
+            configured = catalog.settings()
+
+        self.assertEqual(configured.slot_snapshot_max_bytes, 32 * 1024**3)
 
     def test_deepseek_profiles_keep_optimized_paths_separate(self) -> None:
         model = fixture_model("deepseek-v4-flash")

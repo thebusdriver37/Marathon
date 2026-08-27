@@ -38,6 +38,8 @@ from aiohttp import WSMsgType
 from aiohttp import web
 
 from marathon_app.catalog import external_models
+from marathon_app.checkpoints import RollingCheckpointStore
+from marathon_app.checkpoints import conversation_key_hash
 from marathon_app.telemetry import EventWriter
 
 from marathon_web_search import WebFetchExecutor
@@ -110,10 +112,14 @@ BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES = {
 
 WS_KEEPALIVE_INTERVAL_SECONDS = float(os.getenv("MARATHON_WS_KEEPALIVE_INTERVAL_SECONDS", "15"))
 WS_SEND_TIMEOUT_SECONDS = float(os.getenv("MARATHON_WS_SEND_TIMEOUT_SECONDS", "5"))
-DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 16
+DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 2
 DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
-DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = True
-DEFAULT_SLOT_SNAPSHOTS_ENABLED = False
+DEFAULT_SLOT_SNAPSHOT_TTL_SECONDS = 2 * 24 * 60 * 60
+DEFAULT_SLOT_SNAPSHOT_IDLE_SECONDS = 60
+DEFAULT_SLOT_SNAPSHOT_MIN_TOKENS = 16_384
+DEFAULT_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH = 4_096
+DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = False
+DEFAULT_SLOT_SNAPSHOTS_ENABLED = True
 DEFAULT_STARTER_CACHE_ENABLED = True
 DEFAULT_STARTER_CACHE_MAX_COUNT = 8
 DEFAULT_STARTER_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
@@ -274,6 +280,18 @@ class ResponseSnapshot:
     tools_hash: str
     prompt_cache_key: str
     created_at: float
+
+
+@dataclass(frozen=True)
+class ConversationCheckpointCandidate:
+    """Content-free description of the latest llama.cpp slot worth saving."""
+
+    profile_slug: str
+    profile_alias: str
+    prompt_cache_key: str
+    response_id: str
+    scaffold_fingerprint: str
+    context_tokens: int
 
 
 @dataclass
@@ -1672,8 +1690,36 @@ class RouterState:
             _env_int("MARATHON_SLOT_SNAPSHOT_MAX_COUNT", DEFAULT_SLOT_SNAPSHOT_MAX_COUNT),
         )
         self.slot_snapshot_max_bytes = max(
-            0,
+            1,
             _env_int("MARATHON_SLOT_SNAPSHOT_MAX_BYTES", DEFAULT_SLOT_SNAPSHOT_MAX_BYTES),
+        )
+        self.slot_snapshot_ttl_seconds = max(
+            1,
+            _env_int(
+                "MARATHON_SLOT_SNAPSHOT_TTL_SECONDS",
+                DEFAULT_SLOT_SNAPSHOT_TTL_SECONDS,
+            ),
+        )
+        self.slot_snapshot_idle_seconds = max(
+            0,
+            _env_int(
+                "MARATHON_SLOT_SNAPSHOT_IDLE_SECONDS",
+                DEFAULT_SLOT_SNAPSHOT_IDLE_SECONDS,
+            ),
+        )
+        self.slot_snapshot_min_tokens = max(
+            0,
+            _env_int(
+                "MARATHON_SLOT_SNAPSHOT_MIN_TOKENS",
+                DEFAULT_SLOT_SNAPSHOT_MIN_TOKENS,
+            ),
+        )
+        self.slot_snapshot_min_token_growth = max(
+            0,
+            _env_int(
+                "MARATHON_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH",
+                DEFAULT_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH,
+            ),
         )
         self.slot_snapshot_clean_startup = _env_bool(
             "MARATHON_SLOT_SNAPSHOT_CLEAN_STARTUP",
@@ -1702,6 +1748,23 @@ class RouterState:
             ),
         )
         self.backend_cache_id = os.getenv("MARATHON_BACKEND_CACHE_ID", "")
+        configured_budget_root = os.getenv("MARATHON_SLOT_CACHE_BUDGET_ROOT")
+        self.slot_checkpoint_store = RollingCheckpointStore(
+            self.slot_save_root,
+            (
+                Path(configured_budget_root).expanduser()
+                if configured_budget_root
+                else self.slot_save_root
+            ),
+            max_count=self.slot_snapshot_max_count,
+            max_bytes=self.slot_snapshot_max_bytes,
+            ttl_seconds=self.slot_snapshot_ttl_seconds,
+        )
+        self.slot_snapshot_max_bytes = self.slot_checkpoint_store.max_bytes
+        self.pending_checkpoints: dict[str, ConversationCheckpointCandidate] = {}
+        self.checkpoint_tasks: dict[str, asyncio.Task[Any]] = {}
+        self.checkpoint_maintenance_task: asyncio.Task[Any] | None = None
+        self._closing = False
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.trace_log_path = self.log_dir / "codex_local_router_trace.jsonl"
@@ -1826,8 +1889,19 @@ class RouterState:
         self.http_client = ClientSession(timeout=ClientTimeout(total=3600))
         self.web_search = WebSearchExecutor(self.web_search_settings)
         self.web_fetch = WebFetchExecutor(self.web_fetch_settings)
+        if self.slot_snapshots_enabled:
+            self.checkpoint_maintenance_task = asyncio.create_task(
+                self._checkpoint_maintenance_loop(),
+                name="marathon-checkpoint-maintenance",
+            )
 
     async def close(self) -> None:
+        self._closing = True
+        maintenance = self.checkpoint_maintenance_task
+        self.checkpoint_maintenance_task = None
+        if maintenance is not None and not maintenance.done():
+            maintenance.cancel()
+            await asyncio.gather(maintenance, return_exceptions=True)
         active_tasks = list(self.active_ws_tasks.values())
         self.active_ws_tasks.clear()
         for task in active_tasks:
@@ -1835,6 +1909,9 @@ class RouterState:
                 task.cancel()
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
+        checkpoint_results = await self.flush_conversation_checkpoints()
+        for result in checkpoint_results:
+            self.telemetry.emit("router.conversation_checkpoint.shutdown", result)
         if self.web_search is not None:
             await self.web_search.close()
             self.web_search = None
@@ -2647,6 +2724,334 @@ class RouterState:
                 "erase_result": erased,
             }
 
+    def _conversation_scaffold_fingerprint(
+        self,
+        profile: ModelProfile,
+        forward_request: dict[str, Any],
+    ) -> str:
+        return _starter_cache_fingerprint(
+            profile,
+            self.backend_cache_id,
+            _starter_scaffold_chat_body(forward_request),
+        )
+
+    async def prepare_conversation_checkpoint(
+        self,
+        profile: ModelProfile,
+        forward_request: dict[str, Any],
+        prompt_cache_key: str,
+    ) -> dict[str, Any]:
+        if not self.slot_snapshots_enabled or not profile.supports_slots:
+            return {"mode": "conversation-checkpoint-disabled", "status": "skipped"}
+        if not prompt_cache_key:
+            return {
+                "mode": "conversation-checkpoint-unavailable",
+                "status": "skipped",
+                "reason": "request has no prompt cache key",
+            }
+
+        scaffold_fingerprint = self._conversation_scaffold_fingerprint(
+            profile,
+            forward_request,
+        )
+        record = await asyncio.to_thread(
+            self.slot_checkpoint_store.find,
+            profile_slug=profile.slug,
+            profile_alias=profile.alias,
+            prompt_cache_key=prompt_cache_key,
+            backend_cache_id=self.backend_cache_id,
+            scaffold_fingerprint=scaffold_fingerprint,
+        )
+        if record is None:
+            return {
+                "mode": "conversation-checkpoint-miss",
+                "status": "skipped",
+            }
+
+        await asyncio.to_thread(self.slot_checkpoint_store.mark_used, record)
+        try:
+            restored = await self.restore_slot(profile, record.snapshot_path.name)
+        except Exception as exc:
+            await asyncio.to_thread(self.slot_checkpoint_store.discard, record)
+            return {
+                "mode": "conversation-checkpoint-restore-error",
+                "status": "error",
+                "error": str(exc),
+            }
+
+        return {
+            "mode": "restore-conversation-checkpoint",
+            "status": "restored",
+            "snapshot_filename": record.snapshot_path.name,
+            "size_bytes": record.size_bytes,
+            "context_tokens": (
+                record.metadata.context_tokens if record.metadata is not None else 0
+            ),
+            "restore_result": restored,
+        }
+
+    @staticmethod
+    def _response_context_tokens(backend_response: dict[str, Any]) -> int:
+        usage = backend_response.get("usage")
+        if not isinstance(usage, dict):
+            return 0
+        total = usage.get("total_tokens")
+        if isinstance(total, int) and not isinstance(total, bool):
+            return max(0, total)
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        return max(
+            0,
+            (input_tokens if isinstance(input_tokens, int) else 0)
+            + (output_tokens if isinstance(output_tokens, int) else 0),
+        )
+
+    def schedule_conversation_checkpoint(
+        self,
+        profile: ModelProfile,
+        forward_request: dict[str, Any],
+        response_id: str,
+        backend_response: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self.slot_snapshots_enabled or not profile.supports_slots:
+            return {
+                "status": "skipped",
+                "reason": (
+                    "rolling checkpoints disabled"
+                    if profile.supports_slots
+                    else "backend has no llama.cpp slot API"
+                ),
+            }
+        if getattr(self, "_closing", False):
+            return {"status": "skipped", "reason": "router is shutting down"}
+        prompt_cache_key = str(forward_request.get("prompt_cache_key") or "")
+        if not prompt_cache_key:
+            return {"status": "skipped", "reason": "request has no prompt cache key"}
+        context_tokens = self._response_context_tokens(backend_response)
+        if context_tokens < self.slot_snapshot_min_tokens:
+            return {
+                "status": "skipped",
+                "reason": "conversation is below the checkpoint token threshold",
+                "context_tokens": context_tokens,
+                "min_tokens": self.slot_snapshot_min_tokens,
+            }
+
+        candidate = ConversationCheckpointCandidate(
+            profile_slug=profile.slug,
+            profile_alias=profile.alias,
+            prompt_cache_key=prompt_cache_key,
+            response_id=response_id,
+            scaffold_fingerprint=self._conversation_scaffold_fingerprint(
+                profile,
+                forward_request,
+            ),
+            context_tokens=context_tokens,
+        )
+        self.pending_checkpoints[profile.slug] = candidate
+        previous = self.checkpoint_tasks.get(profile.slug)
+        if previous is not None and not previous.done():
+            previous.cancel()
+        task = asyncio.create_task(
+            self._save_checkpoint_after_idle(profile.slug),
+            name=f"marathon-checkpoint-{profile.slug}",
+        )
+        self.checkpoint_tasks[profile.slug] = task
+        return {
+            "status": "scheduled",
+            "idle_seconds": self.slot_snapshot_idle_seconds,
+            "context_tokens": context_tokens,
+        }
+
+    async def _save_checkpoint_after_idle(self, profile_slug: str) -> None:
+        current_task = asyncio.current_task()
+        try:
+            if self.slot_snapshot_idle_seconds > 0:
+                await asyncio.sleep(self.slot_snapshot_idle_seconds)
+            candidate = self.pending_checkpoints.get(profile_slug)
+            if candidate is None:
+                return
+            result = await self._save_conversation_checkpoint(candidate, force=False)
+            self.telemetry.emit(
+                "router.conversation_checkpoint.completed",
+                {
+                    "profile_slug": profile_slug,
+                    "status": result.get("status"),
+                    "reason": result.get("reason"),
+                    "size_bytes": result.get("size_bytes"),
+                    "context_tokens": result.get("context_tokens"),
+                },
+            )
+            if (
+                result.get("status") != "error"
+                and self.pending_checkpoints.get(profile_slug) == candidate
+            ):
+                self.pending_checkpoints.pop(profile_slug, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.telemetry.emit(
+                "router.conversation_checkpoint.failed",
+                {"profile_slug": profile_slug, "error": str(exc)},
+                level="warning",
+            )
+        finally:
+            if self.checkpoint_tasks.get(profile_slug) is current_task:
+                self.checkpoint_tasks.pop(profile_slug, None)
+
+    async def _save_conversation_checkpoint(
+        self,
+        candidate: ConversationCheckpointCandidate,
+        *,
+        force: bool,
+    ) -> dict[str, Any]:
+        profile = self.available_profiles.get(candidate.profile_slug)
+        if profile is None or not profile.supports_slots:
+            return {"status": "skipped", "reason": "model no longer supports slots"}
+
+        async with self.backend_lock:
+            if (
+                self.live_slot_by_model.get(profile.slug) != candidate.response_id
+                or self.live_prompt_cache_key_by_model.get(profile.slug)
+                != candidate.prompt_cache_key
+            ):
+                return {
+                    "status": "skipped",
+                    "reason": "llama.cpp slot has advanced beyond this checkpoint",
+                }
+
+            existing = await asyncio.to_thread(
+                self.slot_checkpoint_store.find_any,
+                profile_alias=profile.alias,
+                prompt_cache_key=candidate.prompt_cache_key,
+            )
+            if existing is not None and existing.metadata is not None:
+                metadata = existing.metadata
+                if (
+                    metadata.response_id_hash
+                    == self.slot_checkpoint_store.response_id_hash(candidate.response_id)
+                ):
+                    await asyncio.to_thread(
+                        self.slot_checkpoint_store.mark_used,
+                        existing,
+                    )
+                    return {
+                        "status": "skipped",
+                        "reason": "latest response is already checkpointed",
+                        "context_tokens": candidate.context_tokens,
+                    }
+                compatible = (
+                    metadata.profile_slug == candidate.profile_slug
+                    and metadata.backend_cache_id == self.backend_cache_id
+                    and metadata.scaffold_fingerprint
+                    == candidate.scaffold_fingerprint
+                )
+                growth = candidate.context_tokens - metadata.context_tokens
+                if (
+                    not force
+                    and compatible
+                    and 0 <= growth < self.slot_snapshot_min_token_growth
+                ):
+                    await asyncio.to_thread(
+                        self.slot_checkpoint_store.mark_used,
+                        existing,
+                    )
+                    return {
+                        "status": "skipped",
+                        "reason": "conversation has not grown enough since the last checkpoint",
+                        "context_tokens": candidate.context_tokens,
+                        "token_growth": growth,
+                    }
+
+            prompt_key_hash = conversation_key_hash(candidate.prompt_cache_key)
+            pending_filename = self.slot_checkpoint_store.pending_filename(
+                prompt_key_hash,
+                candidate.response_id,
+            )
+            checkpoint_dir = self.slot_checkpoint_store.profile_dir(profile.alias)
+            try:
+                checkpoint_dir.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                    mode=0o700,
+                )
+                os.chmod(checkpoint_dir, 0o700)
+                await asyncio.to_thread(
+                    self.slot_checkpoint_store.discard_pending,
+                    profile.alias,
+                    pending_filename,
+                )
+                await self.save_slot(profile, pending_filename)
+                result = await asyncio.to_thread(
+                    self.slot_checkpoint_store.commit,
+                    profile_slug=profile.slug,
+                    profile_alias=profile.alias,
+                    prompt_cache_key=candidate.prompt_cache_key,
+                    backend_cache_id=self.backend_cache_id,
+                    scaffold_fingerprint=candidate.scaffold_fingerprint,
+                    response_id=candidate.response_id,
+                    context_tokens=candidate.context_tokens,
+                    pending_filename=pending_filename,
+                )
+            except BaseException:
+                await asyncio.to_thread(
+                    self.slot_checkpoint_store.discard_pending,
+                    profile.alias,
+                    pending_filename,
+                )
+                raise
+            return dict(result)
+
+    async def flush_conversation_checkpoints(self) -> list[dict[str, Any]]:
+        tasks = list(self.checkpoint_tasks.values())
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        results: list[dict[str, Any]] = []
+        for profile_slug, candidate in list(self.pending_checkpoints.items()):
+            try:
+                result = await self._save_conversation_checkpoint(candidate, force=True)
+            except Exception as exc:
+                result = {"status": "error", "reason": str(exc)}
+            results.append({"profile_slug": profile_slug, **result})
+            if self.pending_checkpoints.get(profile_slug) == candidate:
+                self.pending_checkpoints.pop(profile_slug, None)
+        return results
+
+    async def prune_conversation_checkpoints(self) -> dict[str, Any]:
+        return dict(await asyncio.to_thread(self.slot_checkpoint_store.prune))
+
+    async def _checkpoint_maintenance_loop(self) -> None:
+        interval = min(60 * 60, max(60, self.slot_snapshot_ttl_seconds // 4))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                result = await self.prune_conversation_checkpoints()
+            except Exception as exc:
+                self.telemetry.emit(
+                    "router.conversation_checkpoint.prune_failed",
+                    {"error": str(exc)},
+                    level="warning",
+                )
+                continue
+            if result.get("deleted_count"):
+                self.telemetry.emit(
+                    "router.conversation_checkpoint.pruned",
+                    result,
+                )
+
+    async def startup_checkpoint_cleanup(self) -> list[dict[str, Any]]:
+        results = await self.clean_startup_slot_snapshots()
+        if self.slot_snapshot_clean_startup:
+            deleted = await asyncio.to_thread(self.slot_checkpoint_store.delete_local)
+            results.append({"kind": "rolling", **deleted})
+        else:
+            pruned = await self.prune_conversation_checkpoints()
+            results.append({"kind": "rolling", **pruned})
+        return results
+
     def _delete_slot_snapshots_sync(self, profile: ModelProfile) -> dict[str, Any]:
         slot_dir = self._slot_save_dir(profile)
         deleted: list[str] = []
@@ -2681,8 +3086,8 @@ class RouterState:
         }
 
     async def clean_startup_slot_snapshots(self) -> list[dict[str, Any]]:
-        if not self.slot_snapshot_clean_startup:
-            return []
+        """Remove obsolete per-response snapshots from pre-rolling releases."""
+
         results: list[dict[str, Any]] = []
         for profile in self.available_profiles.values():
             if not profile.supports_slots:
@@ -3620,6 +4025,7 @@ class RouterState:
             erase_result: dict[str, Any] | None = None
             restore_error: str | None = None
             starter_cache_result: dict[str, Any] | None = None
+            conversation_checkpoint_result: dict[str, Any] | None = None
             slot_prepare_mode = "erase-root"
             slot_prepare_start = time.perf_counter()
             live_parent = (
@@ -3671,17 +4077,37 @@ class RouterState:
                         ),
                     }
                 else:
-                    starter_cache_result = await self.prepare_starter_cache(
-                        profile,
-                        forward_request,
+                    conversation_checkpoint_result = (
+                        await self.prepare_conversation_checkpoint(
+                            profile,
+                            forward_request,
+                            prompt_cache_key,
+                        )
                     )
-                    slot_prepare_mode = str(starter_cache_result["mode"])
-                    action_result = starter_cache_result.get("restore_result")
-                    restore_result = (
-                        action_result
-                        if isinstance(action_result, dict)
-                        else starter_cache_result
-                    )
+                    if conversation_checkpoint_result.get("status") == "restored":
+                        slot_prepare_mode = str(
+                            conversation_checkpoint_result["mode"]
+                        )
+                        action_result = conversation_checkpoint_result.get(
+                            "restore_result"
+                        )
+                        restore_result = (
+                            action_result
+                            if isinstance(action_result, dict)
+                            else conversation_checkpoint_result
+                        )
+                    else:
+                        starter_cache_result = await self.prepare_starter_cache(
+                            profile,
+                            forward_request,
+                        )
+                        slot_prepare_mode = str(starter_cache_result["mode"])
+                        action_result = starter_cache_result.get("restore_result")
+                        restore_result = (
+                            action_result
+                            if isinstance(action_result, dict)
+                            else starter_cache_result
+                        )
             elif not scaffold_matches:
                 slot_prepare_mode = "erase-scaffold-mismatch"
                 erase_result = await self.erase_slot(profile)
@@ -3720,44 +4146,6 @@ class RouterState:
             response_id = preset_response_id or str(
                 backend_response.get("id") or self.mint_response_id("resp")
             )
-            snapshot_filename = ""
-            snapshot_path: Path | None = None
-            pre_prune_result: dict[str, Any] | None = None
-            save_result: dict[str, Any] | None = None
-            save_error: str | None = None
-            snapshot_saved = False
-            save_start = time.perf_counter()
-            if self.slot_snapshots_enabled and profile.supports_slots:
-                snapshot_filename = f"{profile.slug}__{response_id}.bin"
-                snapshot_path = self._slot_save_dir(profile) / snapshot_filename
-                pre_prune_result = await self.prune_slot_snapshots(profile)
-                try:
-                    save_result = await self.save_slot(profile, snapshot_filename)
-                except Exception as exc:
-                    save_error = str(exc)
-                if save_error is None:
-                    try:
-                        snapshot_saved = (
-                            snapshot_path.is_file() and snapshot_path.stat().st_size > 0
-                        )
-                    except OSError:
-                        snapshot_saved = False
-                    if not snapshot_saved:
-                        save_error = "slot save produced an empty or missing snapshot"
-            else:
-                reason = (
-                    "snapshots disabled"
-                    if profile.supports_slots
-                    else "backend has no llama.cpp slot API"
-                )
-                save_result = {"status": "skipped", "reason": reason}
-            slot_save_ms = (time.perf_counter() - save_start) * 1000.0
-            post_prune_result: dict[str, Any] | None = None
-            if self.slot_snapshots_enabled and profile.supports_slots:
-                post_prune_result = await self.prune_slot_snapshots(
-                    profile,
-                    protected_filename=snapshot_filename if snapshot_saved else None,
-                )
             if profile.supports_slots:
                 self.live_slot_by_model[profile.slug] = response_id
             if profile.supports_slots and prompt_cache_key:
@@ -3787,7 +4175,7 @@ class RouterState:
                     )
                     + len(delta_input)
                     + len(lineage_output_items),
-                    snapshot_filename=snapshot_filename if snapshot_saved else "",
+                    snapshot_filename="",
                     instructions_text=instructions_text,
                     base_instructions_hash=base_instructions_hash,
                     instructions_hash=instructions_hash,
@@ -3797,6 +4185,15 @@ class RouterState:
                 )
             )
             self.last_response_by_model[profile.slug] = response_id
+
+        save_start = time.perf_counter()
+        save_result = self.schedule_conversation_checkpoint(
+            profile,
+            forward_request,
+            response_id,
+            backend_response,
+        )
+        slot_save_ms = (time.perf_counter() - save_start) * 1000.0
 
         with self.lock:
             self._trace_seq += 1
@@ -3826,16 +4223,17 @@ class RouterState:
                     "prepare_mode": slot_prepare_mode,
                     "prepare_ms": slot_prepare_ms,
                     "starter_cache": starter_cache_result,
+                    "conversation_checkpoint": conversation_checkpoint_result,
                     "save_ms": slot_save_ms,
                     "erase_result": erase_result,
                     "restore_result": restore_result,
                     "restore_error": restore_error,
                     "save_result": save_result,
-                    "save_error": save_error,
-                    "pre_prune_result": pre_prune_result,
-                    "post_prune_result": post_prune_result,
-                    "snapshot_filename": snapshot_filename,
-                    "snapshot_saved": snapshot_saved,
+                    "save_error": None,
+                    "pre_prune_result": None,
+                    "post_prune_result": None,
+                    "snapshot_filename": "",
+                    "snapshot_saved": False,
                 },
                 "backend": {
                     "usage": usage_payload,
@@ -3911,8 +4309,13 @@ async def handle_health(request: web.Request) -> web.Response:
             "available_models": list(state.available_profiles),
             "slot_id": state.slot_id,
             "slot_snapshot_retention": {
+                "enabled": state.slot_snapshots_enabled,
                 "max_count": state.slot_snapshot_max_count,
                 "max_bytes": state.slot_snapshot_max_bytes,
+                "ttl_seconds": state.slot_snapshot_ttl_seconds,
+                "idle_seconds": state.slot_snapshot_idle_seconds,
+                "min_tokens": state.slot_snapshot_min_tokens,
+                "min_token_growth": state.slot_snapshot_min_token_growth,
                 "clean_startup": state.slot_snapshot_clean_startup,
             },
             "starter_cache": {
@@ -4278,7 +4681,7 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
 async def on_startup(app: web.Application) -> None:
     state: RouterState = app["state"]
     await state.open()
-    state._log_slot_cleanup(await state.clean_startup_slot_snapshots())
+    state._log_slot_cleanup(await state.startup_checkpoint_cleanup())
     threading.Thread(target=state.ensure_model, args=(state.default_model,), daemon=True).start()
 
 
