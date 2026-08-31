@@ -1430,6 +1430,118 @@ context = 32768
         self.assertEqual(body["messages"][4]["content"][0]["text"], "finished")
         self.assertTrue(body["tools"][0]["function"]["strict"])
 
+    def test_compaction_response_defers_obsolete_checkpoint(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.slot_snapshots_enabled = True
+        state._closing = False
+        state.slot_snapshot_min_tokens = 16_384
+        state.slot_snapshot_idle_seconds = 60
+        state.backend_cache_id = "backend-v1"
+        state.pending_checkpoints = {}
+        state.checkpoint_tasks = {}
+        state.awaiting_post_compaction_checkpoints = set()
+        state.telemetry = mock.Mock()
+        state.slot_checkpoint_store = mock.Mock()
+        stale_checkpoint = SimpleNamespace(size_bytes=550_000_000)
+        state.slot_checkpoint_store.find_any.return_value = stale_checkpoint
+        request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "prompt_cache_key": "synthetic-session",
+            "client_metadata": {
+                "x-codex-turn-metadata": json.dumps(
+                    {
+                        "request_kind": "compaction",
+                        "window_id": "synthetic-window",
+                    }
+                )
+            },
+        }
+
+        async def scenario() -> dict[str, object]:
+            result = state.schedule_conversation_checkpoint(
+                profile,
+                request,
+                "compaction-response",
+                {"usage": {"total_tokens": 200_000}},
+                [],
+            )
+            tasks = list(state.checkpoint_tasks.values())
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            return result
+
+        result = asyncio.run(scenario())
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "compaction state is not canonical")
+        self.assertEqual(state.pending_checkpoints, {})
+        self.assertEqual(state.checkpoint_tasks, {})
+        self.assertIn(
+            (profile.slug, "synthetic-session"),
+            state.awaiting_post_compaction_checkpoints,
+        )
+        state.slot_checkpoint_store.discard.assert_called_once_with(stale_checkpoint)
+
+    def test_first_turn_after_compaction_gets_priority_checkpoint(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.slot_snapshots_enabled = True
+        state._closing = False
+        state.slot_snapshot_min_tokens = 16_384
+        state.slot_snapshot_idle_seconds = 0
+        state.backend_cache_id = "backend-v1"
+        state.pending_checkpoints = {}
+        state.checkpoint_tasks = {}
+        state.awaiting_post_compaction_checkpoints = {
+            (profile.slug, "synthetic-session")
+        }
+        state.telemetry = mock.Mock()
+        state._save_conversation_checkpoint = mock.AsyncMock(
+            return_value={"status": "saved", "context_tokens": 8_000}
+        )
+        request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "prompt_cache_key": "synthetic-session",
+            "client_metadata": {
+                "x-codex-turn-metadata": json.dumps(
+                    {
+                        "request_kind": "turn",
+                        "window_id": "synthetic-window:1",
+                    }
+                )
+            },
+        }
+
+        async def scenario() -> dict[str, object]:
+            result = state.schedule_conversation_checkpoint(
+                profile,
+                request,
+                "post-compaction-response",
+                {"usage": {"total_tokens": 8_000}},
+                [],
+            )
+            task = state.checkpoint_tasks[profile.slug]
+            await task
+            return result
+
+        result = asyncio.run(scenario())
+
+        self.assertEqual(result["status"], "scheduled")
+        self.assertEqual(result["idle_seconds"], 0)
+        self.assertEqual(result["priority"], "post-compaction")
+        candidate = state._save_conversation_checkpoint.await_args.args[0]
+        self.assertTrue(candidate.post_compaction)
+        self.assertTrue(
+            state._save_conversation_checkpoint.await_args.kwargs["force"]
+        )
+        self.assertEqual(state.pending_checkpoints, {})
+        self.assertEqual(state.awaiting_post_compaction_checkpoints, set())
+
     def test_rolling_conversation_checkpoint_survives_router_restart(self) -> None:
         profile = fixture_profile()
         request = {
@@ -1873,6 +1985,51 @@ context = 32768
 
         self.assertEqual(app._client_max_size, router_module.ROUTER_MAX_REQUEST_BYTES)
         self.assertGreater(app._client_max_size, 1_110_965)
+
+    def test_http_fallback_recognizes_compaction_metadata(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.debug = False
+        state.telemetry = mock.Mock()
+        state.trace_request = mock.Mock()
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.defer_compaction_checkpoint = mock.Mock(
+            return_value={"status": "skipped"}
+        )
+        state.http_client = None
+
+        class Request:
+            app = {"state": state}
+            path = "/v1/responses"
+            method = "POST"
+            headers = {
+                "x-codex-turn-metadata": json.dumps(
+                    {
+                        "request_kind": "compaction",
+                        "window_id": "synthetic-window",
+                    }
+                )
+            }
+
+            async def read(self) -> bytes:
+                return json.dumps(
+                    {
+                        "model": profile.slug,
+                        "prompt_cache_key": "synthetic-session",
+                        "input": [],
+                        "tools": [],
+                    }
+                ).encode()
+
+        response = asyncio.run(router_module.handle_http_proxy(Request()))
+
+        self.assertEqual(response.status, 500)
+        state.defer_compaction_checkpoint.assert_called_once_with(
+            profile,
+            "synthetic-session",
+            context_tokens=0,
+            transport="http",
+        )
 
     def test_output_budget_scales_and_is_profile_overrideable(self) -> None:
         self.assertEqual(router_module._max_output_tokens(fixture_profile(32_768)), 4_096)

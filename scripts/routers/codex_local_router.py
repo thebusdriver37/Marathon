@@ -295,6 +295,7 @@ class ConversationCheckpointCandidate:
     response_id: str
     scaffold_fingerprint: str
     context_tokens: int
+    post_compaction: bool = False
     # Kept only in router memory until the idle save runs. Excluding this from
     # repr prevents prompt content from leaking into diagnostics or telemetry.
     checkpoint_request: dict[str, Any] | None = field(
@@ -371,6 +372,32 @@ def _is_warmup_root(snapshot: ResponseSnapshot | None) -> bool:
         and snapshot.response_id.startswith("warm_")
         and snapshot.conversation_item_count == 0
         and not snapshot.snapshot_filename
+    )
+
+
+def _codex_request_kind_from_json(encoded: Any) -> str | None:
+    if not isinstance(encoded, str):
+        return None
+    try:
+        metadata = json.loads(encoded)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    request_kind = metadata.get("request_kind")
+    if not isinstance(request_kind, str):
+        return None
+    return request_kind.strip().lower() or None
+
+
+def _codex_request_kind(request: dict[str, Any]) -> str | None:
+    """Read only the request kind from Codex's canonical client metadata."""
+
+    client_metadata = request.get("client_metadata")
+    if not isinstance(client_metadata, dict):
+        return None
+    return _codex_request_kind_from_json(
+        client_metadata.get("x-codex-turn-metadata")
     )
 
 
@@ -1999,6 +2026,7 @@ class RouterState:
         self.slot_snapshot_max_bytes = self.slot_checkpoint_store.max_bytes
         self.pending_checkpoints: dict[str, ConversationCheckpointCandidate] = {}
         self.checkpoint_tasks: dict[str, asyncio.Task[Any]] = {}
+        self.awaiting_post_compaction_checkpoints: set[tuple[str, str]] = set()
         self.checkpoint_maintenance_task: asyncio.Task[Any] | None = None
         self._closing = False
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -2991,6 +3019,12 @@ class RouterState:
                 "status": "skipped",
                 "reason": "request has no prompt cache key",
             }
+        if (profile.slug, prompt_cache_key) in self._post_compaction_checkpoint_keys():
+            return {
+                "mode": "conversation-checkpoint-miss",
+                "status": "skipped",
+                "reason": "awaiting canonical post-compaction checkpoint",
+            }
 
         scaffold_fingerprint = self._conversation_scaffold_fingerprint(
             profile,
@@ -3048,6 +3082,69 @@ class RouterState:
             + (output_tokens if isinstance(output_tokens, int) else 0),
         )
 
+    def _post_compaction_checkpoint_keys(self) -> set[tuple[str, str]]:
+        keys = getattr(self, "awaiting_post_compaction_checkpoints", None)
+        if keys is None:
+            keys = set()
+            self.awaiting_post_compaction_checkpoints = keys
+        return keys
+
+    def defer_compaction_checkpoint(
+        self,
+        profile: ModelProfile,
+        prompt_cache_key: str,
+        *,
+        context_tokens: int,
+        transport: str,
+    ) -> dict[str, Any]:
+        if not self.slot_snapshots_enabled or not profile.supports_slots:
+            return {"status": "skipped", "reason": "rolling checkpoints disabled"}
+        if not prompt_cache_key:
+            return {"status": "skipped", "reason": "request has no prompt cache key"}
+
+        previous = self.checkpoint_tasks.pop(profile.slug, None)
+        if previous is not None and not previous.done():
+            previous.cancel()
+        cancelled_pending = self.pending_checkpoints.pop(profile.slug, None)
+        self._post_compaction_checkpoint_keys().add(
+            (profile.slug, prompt_cache_key)
+        )
+        stale_checkpoint_bytes = 0
+        try:
+            stale = self.slot_checkpoint_store.find_any(
+                profile_alias=profile.alias,
+                prompt_cache_key=prompt_cache_key,
+            )
+            if stale is not None:
+                stale_checkpoint_bytes = stale.size_bytes
+                self.slot_checkpoint_store.discard(stale)
+        except OSError as exc:
+            self.telemetry.emit(
+                "router.conversation_checkpoint.compaction_invalidation_failed",
+                {
+                    "profile_slug": profile.slug,
+                    "error": str(exc),
+                    "transport": transport,
+                },
+                level="warning",
+            )
+        self.telemetry.emit(
+            "router.conversation_checkpoint.compaction_deferred",
+            {
+                "profile_slug": profile.slug,
+                "context_tokens": context_tokens,
+                "cancelled_pending": cancelled_pending is not None,
+                "stale_checkpoint_bytes": stale_checkpoint_bytes,
+                "transport": transport,
+            },
+        )
+        return {
+            "status": "skipped",
+            "reason": "compaction state is not canonical",
+            "context_tokens": context_tokens,
+            "next_checkpoint": "first post-compaction turn",
+        }
+
     def schedule_conversation_checkpoint(
         self,
         profile: ModelProfile,
@@ -3071,7 +3168,21 @@ class RouterState:
         if not prompt_cache_key:
             return {"status": "skipped", "reason": "request has no prompt cache key"}
         context_tokens = self._response_context_tokens(backend_response)
-        if context_tokens < self.slot_snapshot_min_tokens:
+        checkpoint_key = (profile.slug, prompt_cache_key)
+        request_kind = _codex_request_kind(forward_request)
+        if request_kind == "compaction":
+            return self.defer_compaction_checkpoint(
+                profile,
+                prompt_cache_key,
+                context_tokens=context_tokens,
+                transport="websocket",
+            )
+
+        post_compaction = (
+            request_kind in {None, "turn"}
+            and checkpoint_key in self._post_compaction_checkpoint_keys()
+        )
+        if context_tokens < self.slot_snapshot_min_tokens and not post_compaction:
             return {
                 "status": "skipped",
                 "reason": "conversation is below the checkpoint token threshold",
@@ -3091,6 +3202,7 @@ class RouterState:
                 forward_request,
             ),
             context_tokens=context_tokens,
+            post_compaction=post_compaction,
             checkpoint_request=checkpoint_request,
         )
         self.pending_checkpoints[profile.slug] = candidate
@@ -3106,6 +3218,7 @@ class RouterState:
             "status": "scheduled",
             "idle_seconds": self.slot_snapshot_idle_seconds,
             "context_tokens": context_tokens,
+            "priority": "post-compaction" if post_compaction else "normal",
         }
 
     async def _save_checkpoint_after_idle(self, profile_slug: str) -> None:
@@ -3116,7 +3229,10 @@ class RouterState:
             candidate = self.pending_checkpoints.get(profile_slug)
             if candidate is None:
                 return
-            result = await self._save_conversation_checkpoint(candidate, force=False)
+            result = await self._save_conversation_checkpoint(
+                candidate,
+                force=candidate.post_compaction,
+            )
             self.telemetry.emit(
                 "router.conversation_checkpoint.completed",
                 {
@@ -3125,6 +3241,9 @@ class RouterState:
                     "reason": result.get("reason"),
                     "size_bytes": result.get("size_bytes"),
                     "context_tokens": result.get("context_tokens"),
+                    "priority": (
+                        "post-compaction" if candidate.post_compaction else "normal"
+                    ),
                 },
             )
             if (
@@ -3132,6 +3251,10 @@ class RouterState:
                 and self.pending_checkpoints.get(profile_slug) == candidate
             ):
                 self.pending_checkpoints.pop(profile_slug, None)
+                if candidate.post_compaction:
+                    self._post_compaction_checkpoint_keys().discard(
+                        (candidate.profile_slug, candidate.prompt_cache_key)
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -3343,6 +3466,10 @@ class RouterState:
             results.append({"profile_slug": profile_slug, **result})
             if self.pending_checkpoints.get(profile_slug) == candidate:
                 self.pending_checkpoints.pop(profile_slug, None)
+                if candidate.post_compaction and result.get("status") != "error":
+                    self._post_compaction_checkpoint_keys().discard(
+                        (candidate.profile_slug, candidate.prompt_cache_key)
+                    )
         return results
 
     async def prune_conversation_checkpoints(self) -> dict[str, Any]:
@@ -4708,8 +4835,13 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
             data = None
 
     requested_model = None
+    request_kind = _codex_request_kind_from_json(
+        request.headers.get("x-codex-turn-metadata")
+    )
     if isinstance(data, dict):
         requested_model = str(data.get("model") or "").strip() or None
+        if request_kind is None:
+            request_kind = _codex_request_kind(data)
         if state.debug and path == "/v1/responses":
             try:
                 state.request_log_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -4802,6 +4934,13 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
                         "transport": "http",
                     },
                     level="warning",
+                )
+            if request_kind == "compaction":
+                state.defer_compaction_checkpoint(
+                    profile,
+                    str(data.get("prompt_cache_key") or ""),
+                    context_tokens=0,
+                    transport="http",
                 )
         body = json.dumps(data, separators=(",", ":")).encode()
         if path == "/v1/responses":
