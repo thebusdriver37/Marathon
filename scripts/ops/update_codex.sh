@@ -91,8 +91,8 @@ if (( ${#patches[@]} > 0 )); then
 fi
 
 if [[ "$LOCAL_SHA" != "$UPSTREAM_SHA" ]]; then
-  echo "-> Fast-forwarding Codex submodule to ${UPSTREAM_SHA:0:8}..."
-  git -C "$CODEX_DIR" merge --ff-only "$UPSTREAM_SHA"
+  echo "-> Updating Codex submodule to ${UPSTREAM_SHA:0:8}..."
+  git -C "$CODEX_DIR" switch --detach "$UPSTREAM_SHA"
 fi
 
 echo "-> Building patched Codex..."
