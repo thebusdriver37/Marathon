@@ -207,6 +207,27 @@ confidence = "recommended"
 frontends = ["codex", "direct"]
 
 [[families.profiles]]
+id = "dflash-256k"
+display_name = "DFlash2 256K"
+description = "Q4_K_M target with the DFlash2 block drafter for lossless speculative decoding on GPUs 2 and 3. Uses the pinned dFlash2 backend because the current upstream build predates the merged drafter tensor layout."
+backend = "dflash2-pr27342"
+context = 262144
+batch = 2048
+ubatch = 512
+parallel = 1
+gpu_layers = "999"
+split_mode = "layer"
+tensor_split = "1,1"
+gpus = [2, 3]
+cache_k = "q8_0"
+cache_v = "q8_0"
+flash_attention = "on"
+extra_args = ["--fit", "off", "--spec-type", "draft-dflash", "--spec-draft-model", "/home/deforest/AI/models/gguf/qwen3.8-27b-dflash2/Qwen3.8-27B-DFlash2-Q4_K_M.gguf", "--spec-draft-ngl", "all", "--spec-draft-n-max", "4", "--spec-draft-n-min", "0"]
+tool_thinking_budget = 2048
+confidence = "verified"
+frontends = ["codex", "hermes", "direct"]
+
+[[families.profiles]]
 id = "native-256k"
 display_name = "Native 256K"
 description = "Full native context on four GPUs with exact-fit enforcement."
