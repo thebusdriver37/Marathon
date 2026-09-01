@@ -1,0 +1,59 @@
+diff --git a/codex-rs/state/src/log_db.rs b/codex-rs/state/src/log_db.rs
+index 06387efc4c..bce149ac09 100644
+--- a/codex-rs/state/src/log_db.rs
++++ b/codex-rs/state/src/log_db.rs
+@@ -79,6 +79,10 @@ pub fn default_filter() -> Targets {
+         // Per-chunk streaming traces otherwise flood the bounded SQLite log queue.
+         .with_target("codex_tui::streaming::controller", LevelFilter::DEBUG)
+         .with_target("codex_tui::streaming::table_holdback", LevelFilter::DEBUG)
++        // Per-message app-server and Markdown traces dominate retained rows in long TUI sessions.
++        // Keep their DEBUG diagnostics while excluding high-frequency TRACE bookkeeping.
++        .with_target("codex_app_server::outgoing_message", LevelFilter::DEBUG)
++        .with_target("codex_tui::markdown_stream", LevelFilter::DEBUG)
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+diff --git a/codex-rs/state/src/log_db_filter_tests.rs b/codex-rs/state/src/log_db_filter_tests.rs
+index 28a36c706f..434326d486 100644
+--- a/codex-rs/state/src/log_db_filter_tests.rs
++++ b/codex-rs/state/src/log_db_filter_tests.rs
+@@ -76,6 +76,22 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
+         target: "codex_tui::streaming::table_holdback",
+         "retained-table-holdback-debug"
+     );
++    tracing::trace!(
++        target: "codex_app_server::outgoing_message",
++        "dropped-app-server-message-trace"
++    );
++    tracing::debug!(
++        target: "codex_app_server::outgoing_message",
++        "retained-app-server-message-debug"
++    );
++    tracing::trace!(
++        target: "codex_tui::markdown_stream",
++        "dropped-markdown-stream-trace"
++    );
++    tracing::debug!(
++        target: "codex_tui::markdown_stream",
++        "retained-markdown-stream-debug"
++    );
+     tracing::trace!(
+         target: "codex_tui::streaming::commit_tick",
+         "retained-commit-tick-trace"
+@@ -141,6 +157,16 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
+                 "codex_tui::streaming::table_holdback",
+                 Some("retained-table-holdback-debug"),
+             ),
++            (
++                "DEBUG",
++                "codex_app_server::outgoing_message",
++                Some("retained-app-server-message-debug"),
++            ),
++            (
++                "DEBUG",
++                "codex_tui::markdown_stream",
++                Some("retained-markdown-stream-debug"),
++            ),
+             (
+                 "TRACE",
+                 "codex_tui::streaming::commit_tick",

@@ -1542,6 +1542,105 @@ context = 32768
         self.assertEqual(state.pending_checkpoints, {})
         self.assertEqual(state.awaiting_post_compaction_checkpoints, set())
 
+    def test_rolling_checkpoint_skips_small_growth_at_large_context(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.available_profiles = {profile.slug: profile}
+        state.backend_cache_id = "backend-v1"
+        state.slot_snapshot_min_token_growth = (
+            router_module.DEFAULT_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH
+        )
+        state.backend_lock = asyncio.Lock()
+        state.live_slot_by_model = {profile.slug: "response-two"}
+        state.live_prompt_cache_key_by_model = {
+            profile.slug: "synthetic-session"
+        }
+        metadata = SimpleNamespace(
+            response_id_hash="different-response",
+            profile_slug=profile.slug,
+            backend_cache_id="backend-v1",
+            scaffold_fingerprint="synthetic-scaffold",
+            context_tokens=200_000,
+        )
+        state.slot_checkpoint_store = mock.Mock()
+        state.slot_checkpoint_store.find_any.return_value = SimpleNamespace(
+            metadata=metadata
+        )
+        state.slot_checkpoint_store.response_id_hash.return_value = (
+            "new-response"
+        )
+        state.slot_checkpoint_store.pending_filename.return_value = (
+            "pending-checkpoint.bin"
+        )
+        state.slot_checkpoint_store.profile_dir.return_value = Path(
+            self.enterContext(tempfile.TemporaryDirectory())
+        )
+        state.slot_checkpoint_store.commit.return_value = {"status": "saved"}
+        state.save_slot = mock.AsyncMock(return_value={"status": "saved"})
+        candidate = router_module.ConversationCheckpointCandidate(
+            profile_slug=profile.slug,
+            profile_alias=profile.alias,
+            prompt_cache_key="synthetic-session",
+            response_id="response-two",
+            scaffold_fingerprint="synthetic-scaffold",
+            context_tokens=216_000,
+        )
+
+        result = asyncio.run(
+            state._save_conversation_checkpoint(candidate, force=False)
+        )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(
+            result["reason"],
+            "conversation has not grown enough since the last checkpoint",
+        )
+        self.assertEqual(result["required_token_growth"], 20_000)
+        state.save_slot.assert_not_awaited()
+
+    def test_checkpoint_schedule_reuses_completed_conversation_input(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.slot_snapshots_enabled = True
+        state._closing = False
+        state.slot_snapshot_min_tokens = 16_384
+        state.slot_snapshot_idle_seconds = 60
+        state.backend_cache_id = "backend-v1"
+        state.pending_checkpoints = {}
+        state.checkpoint_tasks = {}
+        state.awaiting_post_compaction_checkpoints = set()
+        conversation_input = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "synthetic"}],
+            }
+        ]
+        request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "prompt_cache_key": "synthetic-session",
+        }
+
+        async def scenario() -> router_module.ConversationCheckpointCandidate:
+            state.schedule_conversation_checkpoint(
+                profile,
+                request,
+                "response-one",
+                {"usage": {"total_tokens": 20_000}},
+                conversation_input,
+            )
+            candidate = state.pending_checkpoints[profile.slug]
+            task = state.checkpoint_tasks[profile.slug]
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return candidate
+
+        candidate = asyncio.run(scenario())
+
+        self.assertIsNotNone(candidate.checkpoint_request)
+        self.assertIs(candidate.checkpoint_request["input"], conversation_input)
+
     def test_rolling_conversation_checkpoint_survives_router_restart(self) -> None:
         profile = fixture_profile()
         request = {

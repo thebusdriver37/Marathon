@@ -77,7 +77,8 @@ Rolling conversation checkpoints are separate from the starter cache and are ena
 Marathon waits for 60 seconds of conversation inactivity before saving, which keeps the large disk write off the response path.
 Before writing the checkpoint, Marathon moves the live slot to a token boundary that any next user turn can extend.
 This preserves disk-cache reuse for recurrent and hybrid models whose generated tail cannot be rolled backward after a restore.
-The first checkpoint starts at 16,384 context tokens, and another save is needed only after at least 4,096 tokens of growth or a clean shutdown.
+The first checkpoint starts at 16,384 context tokens.
+Another save is needed only after growth of at least 16,384 tokens or 10 percent of the saved context, whichever is larger, unless Marathon is shutting down or saving the first clean post-compaction state.
 Each conversation atomically replaces its previous checkpoint instead of accumulating one file per response.
 Each Marathon instance keeps at most two recent conversations, while all instances share a hard 32 GiB ceiling.
 An inactive checkpoint expires 48 hours after its last save or restore.
@@ -93,7 +94,8 @@ The following environment variables have matching keys in the personal catalog's
 - `MARATHON_SLOT_SNAPSHOT_TTL_SECONDS` controls inactivity expiry and defaults to `172800`.
 - `MARATHON_SLOT_SNAPSHOT_IDLE_SECONDS` controls the background-save delay and defaults to `60`.
 - `MARATHON_SLOT_SNAPSHOT_MIN_TOKENS` controls the first-save threshold and defaults to `16384`.
-- `MARATHON_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH` controls rolling-save frequency and defaults to `4096`.
+- `MARATHON_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH` controls the minimum rolling-save spacing and defaults to `16384`.
+  Marathon also requires growth of at least 10 percent of the saved context when that is larger.
 
 If a checkpoint is missing, expired, too large, corrupt, or incompatible, Marathon safely falls back to the starter cache and normal prompt replay.
 

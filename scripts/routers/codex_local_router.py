@@ -119,7 +119,8 @@ DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_TTL_SECONDS = 2 * 24 * 60 * 60
 DEFAULT_SLOT_SNAPSHOT_IDLE_SECONDS = 60
 DEFAULT_SLOT_SNAPSHOT_MIN_TOKENS = 16_384
-DEFAULT_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH = 4_096
+DEFAULT_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH = 16_384
+SLOT_SNAPSHOT_MIN_GROWTH_PERCENT = 10
 DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = False
 DEFAULT_SLOT_SNAPSHOTS_ENABLED = True
 DEFAULT_STARTER_CACHE_ENABLED = True
@@ -3190,8 +3191,11 @@ class RouterState:
                 "min_tokens": self.slot_snapshot_min_tokens,
             }
 
-        checkpoint_request = copy.deepcopy(forward_request)
-        checkpoint_request["input"] = copy.deepcopy(conversation_input)
+        # The completed request and lineage items are no longer mutated after this
+        # point. Keep one shared view until the idle save instead of duplicating a
+        # potentially very large conversation twice in router memory.
+        checkpoint_request = dict(forward_request)
+        checkpoint_request["input"] = conversation_input
         candidate = ConversationCheckpointCandidate(
             profile_slug=profile.slug,
             profile_alias=profile.alias,
@@ -3274,15 +3278,14 @@ class RouterState:
     ) -> dict[str, Any]:
         """Move the live slot to a prefix that the next turn can extend."""
 
-        bodies = (
-            _conversation_checkpoint_chat_body(request),
-            _conversation_checkpoint_chat_body(
-                request,
-                STARTER_CACHE_ALTERNATE_SENTINEL,
-            ),
-        )
-        rendered_prompts: list[str] = []
-        for body in bodies:
+        tokenized_prompts: list[list[int]] = []
+        for user_content in (
+            STARTER_CACHE_SENTINEL,
+            STARTER_CACHE_ALTERNATE_SENTINEL,
+        ):
+            # Render and tokenize one variant at a time. Holding both converted
+            # conversations and both rendered prompts at once doubles peak memory.
+            body = _conversation_checkpoint_chat_body(request, user_content)
             rendered = await self._request_json(
                 profile,
                 "POST",
@@ -3295,10 +3298,6 @@ class RouterState:
                 raise RuntimeError(
                     "llama.cpp returned an empty conversation checkpoint prompt"
                 )
-            rendered_prompts.append(prompt)
-
-        tokenized_prompts: list[list[int]] = []
-        for prompt in rendered_prompts:
             tokenized = await self._request_json(
                 profile,
                 "POST",
@@ -3378,10 +3377,19 @@ class RouterState:
                     == candidate.scaffold_fingerprint
                 )
                 growth = candidate.context_tokens - metadata.context_tokens
+                adaptive_growth = (
+                    max(0, metadata.context_tokens)
+                    * SLOT_SNAPSHOT_MIN_GROWTH_PERCENT
+                    + 99
+                ) // 100
+                required_growth = max(
+                    self.slot_snapshot_min_token_growth,
+                    adaptive_growth,
+                )
                 if (
                     not force
                     and compatible
-                    and 0 <= growth < self.slot_snapshot_min_token_growth
+                    and 0 <= growth < required_growth
                 ):
                     await asyncio.to_thread(
                         self.slot_checkpoint_store.mark_used,
@@ -3392,6 +3400,7 @@ class RouterState:
                         "reason": "conversation has not grown enough since the last checkpoint",
                         "context_tokens": candidate.context_tokens,
                         "token_growth": growth,
+                        "required_token_growth": required_growth,
                     }
 
             prompt_key_hash = conversation_key_hash(candidate.prompt_cache_key)
@@ -4678,7 +4687,7 @@ class RouterState:
             forward_request,
             response_id,
             backend_response,
-            list(full_input) + copy.deepcopy(lineage_output_items),
+            list(full_input) + lineage_output_items,
         )
         slot_save_ms = (time.perf_counter() - save_start) * 1000.0
 
