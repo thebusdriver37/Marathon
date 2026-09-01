@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Iterator
 
 
-# Schema 2 checkpoints are canonical next-turn prefixes. Schema 1 snapshots
-# captured the generated tail and cannot be reused by recurrent models.
-CHECKPOINT_SCHEMA = 2
+# Schema 3 checkpoints include a content-free fingerprint of the exact
+# model-visible conversation prefix. Schema 2 cannot distinguish a normal
+# continuation from a resumed rollback or rewritten history.
+CHECKPOINT_SCHEMA = 3
 CHECKPOINT_PREFIX = "conversation__"
 MAX_CHECKPOINT_CACHE_BYTES = 32 * 1024**3
 PENDING_MAX_AGE_SECONDS = 60 * 60
@@ -39,6 +40,8 @@ class CheckpointMetadata:
     scaffold_fingerprint: str
     response_id_hash: str
     context_tokens: int
+    conversation_item_count: int
+    conversation_prefix_hash: str
     created_at: float
     updated_at: float
 
@@ -51,6 +54,20 @@ class CheckpointMetadata:
         if not isinstance(payload, dict) or payload.get("schema") != CHECKPOINT_SCHEMA:
             return None
         try:
+            conversation_item_count = max(
+                0,
+                int(payload["conversation_item_count"]),
+            )
+            conversation_prefix_hash = str(payload["conversation_prefix_hash"])
+            if (
+                conversation_item_count <= 0
+                or len(conversation_prefix_hash) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in conversation_prefix_hash
+                )
+            ):
+                return None
             return cls(
                 schema=CHECKPOINT_SCHEMA,
                 key_hash=str(payload["key_hash"]),
@@ -60,6 +77,8 @@ class CheckpointMetadata:
                 scaffold_fingerprint=str(payload["scaffold_fingerprint"]),
                 response_id_hash=str(payload["response_id_hash"]),
                 context_tokens=max(0, int(payload["context_tokens"])),
+                conversation_item_count=conversation_item_count,
+                conversation_prefix_hash=conversation_prefix_hash,
                 created_at=float(payload["created_at"]),
                 updated_at=float(payload["updated_at"]),
             )
@@ -363,6 +382,8 @@ class RollingCheckpointStore:
         scaffold_fingerprint: str,
         response_id: str,
         context_tokens: int,
+        conversation_item_count: int,
+        conversation_prefix_hash: str,
         pending_filename: str,
     ) -> dict[str, object]:
         key_hash = conversation_key_hash(prompt_cache_key)
@@ -402,6 +423,8 @@ class RollingCheckpointStore:
             scaffold_fingerprint=scaffold_fingerprint,
             response_id_hash=self.response_id_hash(response_id),
             context_tokens=max(0, context_tokens),
+            conversation_item_count=max(0, conversation_item_count),
+            conversation_prefix_hash=conversation_prefix_hash,
             created_at=created_at,
             updated_at=now,
         )

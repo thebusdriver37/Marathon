@@ -80,6 +80,7 @@ This preserves disk-cache reuse for recurrent and hybrid models whose generated 
 The first checkpoint starts at 16,384 context tokens.
 Another save is needed only after growth of at least 16,384 tokens or 10 percent of the saved context, whichever is larger, unless Marathon is shutting down or saving the first clean post-compaction state.
 Each conversation atomically replaces its previous checkpoint instead of accumulating one file per response.
+Before restoring, Marathon verifies with content-free hashes that the resumed conversation still extends the exact saved history prefix, so cancellation rollbacks, forks, and rewritten histories cannot load stale KV state.
 Each Marathon instance keeps at most two recent conversations, while all instances share a hard 32 GiB ceiling.
 An inactive checkpoint expires 48 hours after its last save or restore.
 Cleanup runs at startup, after saves, and periodically while Marathon remains open.

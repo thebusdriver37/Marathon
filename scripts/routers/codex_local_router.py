@@ -657,6 +657,27 @@ def _conversation_checkpoint_chat_body(
     return body
 
 
+def _conversation_checkpoint_prefix_hash(
+    request: dict[str, Any],
+    conversation_item_count: int,
+) -> str | None:
+    """Fingerprint one model-visible history prefix without retaining its content."""
+
+    input_items = request.get("input")
+    if (
+        not isinstance(input_items, list)
+        or conversation_item_count <= 0
+        or len(input_items) < conversation_item_count
+    ):
+        return None
+    return str(
+        _input_fingerprint_summary(
+            input_items[:conversation_item_count],
+            0,
+        )["hash"]
+    )
+
+
 def _starter_common_token_prefix(
     first_tokens: list[int],
     second_tokens: list[int],
@@ -3045,6 +3066,32 @@ class RouterState:
                 "status": "skipped",
             }
 
+        metadata = record.metadata
+        if metadata is None:
+            await asyncio.to_thread(self.slot_checkpoint_store.discard, record)
+            return {
+                "mode": "conversation-checkpoint-miss",
+                "status": "skipped",
+                "reason": "checkpoint has no verifiable conversation prefix",
+            }
+        resumed_prefix_hash = _conversation_checkpoint_prefix_hash(
+            forward_request,
+            metadata.conversation_item_count,
+        )
+        if resumed_prefix_hash != metadata.conversation_prefix_hash:
+            current_input = forward_request.get("input")
+            current_item_count = (
+                len(current_input) if isinstance(current_input, list) else 0
+            )
+            await asyncio.to_thread(self.slot_checkpoint_store.discard, record)
+            return {
+                "mode": "conversation-checkpoint-miss",
+                "status": "skipped",
+                "reason": "checkpoint is not a prefix of the resumed conversation",
+                "checkpoint_items": metadata.conversation_item_count,
+                "current_items": current_item_count,
+            }
+
         await asyncio.to_thread(self.slot_checkpoint_store.mark_used, record)
         try:
             restored = await self.restore_slot(profile, record.snapshot_path.name)
@@ -3278,7 +3325,16 @@ class RouterState:
     ) -> dict[str, Any]:
         """Move the live slot to a prefix that the next turn can extend."""
 
+        conversation_input = request.get("input")
+        if not isinstance(conversation_input, list) or not conversation_input:
+            raise RuntimeError("conversation checkpoint requires non-empty list input")
         tokenized_prompts: list[list[int]] = []
+        conversation_prefix_hash = _conversation_checkpoint_prefix_hash(
+            request,
+            len(conversation_input),
+        )
+        if conversation_prefix_hash is None:
+            raise RuntimeError("conversation checkpoint has no verifiable input prefix")
         for user_content in (
             STARTER_CACHE_SENTINEL,
             STARTER_CACHE_ALTERNATE_SENTINEL,
@@ -3326,6 +3382,8 @@ class RouterState:
         )
         return {
             "context_tokens": len(prompt_tokens),
+            "conversation_item_count": len(conversation_input),
+            "conversation_prefix_hash": conversation_prefix_hash,
             "timings": prefilled.get("timings"),
         }
 
@@ -3408,6 +3466,11 @@ class RouterState:
                 prompt_key_hash,
                 candidate.response_id,
             )
+            if candidate.checkpoint_request is None:
+                return {
+                    "status": "skipped",
+                    "reason": "checkpoint has no verifiable conversation prefix",
+                }
             checkpoint_dir = self.slot_checkpoint_store.profile_dir(profile.alias)
             try:
                 checkpoint_dir.mkdir(
@@ -3421,20 +3484,14 @@ class RouterState:
                     profile.alias,
                     pending_filename,
                 )
-                boundary_result: dict[str, Any] | None = None
-                if candidate.checkpoint_request is not None:
-                    boundary_result = (
-                        await self._prefill_conversation_checkpoint_boundary(
-                            profile,
-                            candidate.checkpoint_request,
-                        )
+                boundary_result = (
+                    await self._prefill_conversation_checkpoint_boundary(
+                        profile,
+                        candidate.checkpoint_request,
                     )
-                await self.save_slot(profile, pending_filename)
-                saved_context_tokens = (
-                    int(boundary_result["context_tokens"])
-                    if boundary_result is not None
-                    else candidate.context_tokens
                 )
+                await self.save_slot(profile, pending_filename)
+                saved_context_tokens = int(boundary_result["context_tokens"])
                 result = await asyncio.to_thread(
                     self.slot_checkpoint_store.commit,
                     profile_slug=profile.slug,
@@ -3444,6 +3501,12 @@ class RouterState:
                     scaffold_fingerprint=candidate.scaffold_fingerprint,
                     response_id=candidate.response_id,
                     context_tokens=saved_context_tokens,
+                    conversation_item_count=int(
+                        boundary_result["conversation_item_count"]
+                    ),
+                    conversation_prefix_hash=str(
+                        boundary_result["conversation_prefix_hash"]
+                    ),
                     pending_filename=pending_filename,
                 )
             except BaseException:

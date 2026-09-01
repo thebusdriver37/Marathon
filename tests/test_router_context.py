@@ -1572,9 +1572,9 @@ context = 32768
         state.slot_checkpoint_store.pending_filename.return_value = (
             "pending-checkpoint.bin"
         )
-        state.slot_checkpoint_store.profile_dir.return_value = Path(
-            self.enterContext(tempfile.TemporaryDirectory())
-        )
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        state.slot_checkpoint_store.profile_dir.return_value = Path(temporary.name)
         state.slot_checkpoint_store.commit.return_value = {"status": "saved"}
         state.save_slot = mock.AsyncMock(return_value={"status": "saved"})
         candidate = router_module.ConversationCheckpointCandidate(
@@ -1647,6 +1647,18 @@ context = 32768
             "instructions": "synthetic system prompt",
             "tools": [],
             "prompt_cache_key": "synthetic-session",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "question"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "answer"}],
+                },
+            ],
         }
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1671,6 +1683,18 @@ context = 32768
                 state.live_prompt_cache_key_by_model = {}
                 state.telemetry = mock.Mock()
                 state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})
+                state._prefill_conversation_checkpoint_boundary = mock.AsyncMock(
+                    side_effect=lambda _profile, checkpoint_request: {
+                        "context_tokens": 100_000,
+                        "conversation_item_count": len(checkpoint_request["input"]),
+                        "conversation_prefix_hash": (
+                            router_module._conversation_checkpoint_prefix_hash(
+                                checkpoint_request,
+                                len(checkpoint_request["input"]),
+                            )
+                        ),
+                    }
+                )
 
                 async def save_slot(
                     saved_profile: router_module.ModelProfile,
@@ -1695,6 +1719,7 @@ context = 32768
                     request,
                 ),
                 context_tokens=100_000,
+                checkpoint_request=request,
             )
             first.live_slot_by_model[profile.slug] = candidate.response_id
             first.live_prompt_cache_key_by_model[profile.slug] = (
@@ -1707,10 +1732,18 @@ context = 32768
             self.assertEqual(saved["status"], "saved")
 
             restarted = make_state()
+            resumed_request = dict(request)
+            resumed_request["input"] = list(request["input"]) + [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "follow up"}],
+                }
+            ]
             restored = asyncio.run(
                 restarted.prepare_conversation_checkpoint(
                     profile,
-                    request,
+                    resumed_request,
                     "synthetic-session",
                 )
             )
@@ -1721,6 +1754,73 @@ context = 32768
                 profile,
                 restored["snapshot_filename"],
             )
+
+    def test_rolling_checkpoint_rejects_resumed_rollback_before_restore(self) -> None:
+        profile = fixture_profile()
+        saved_input = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "question"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "answer"}],
+            },
+            {
+                "type": "function_call",
+                "name": "synthetic_tool",
+                "call_id": "call-one",
+                "arguments": "{}",
+            },
+        ]
+        saved_request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "input": saved_input,
+        }
+        metadata = SimpleNamespace(
+            conversation_item_count=len(saved_input),
+            conversation_prefix_hash=(
+                router_module._conversation_checkpoint_prefix_hash(
+                    saved_request,
+                    len(saved_input),
+                )
+            ),
+            context_tokens=100_000,
+        )
+        record = SimpleNamespace(metadata=metadata)
+        state = object.__new__(router_module.RouterState)
+        state.slot_snapshots_enabled = True
+        state.backend_cache_id = "backend-v1"
+        state.awaiting_post_compaction_checkpoints = set()
+        state.slot_checkpoint_store = mock.Mock()
+        state.slot_checkpoint_store.find.return_value = record
+        state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})
+        resumed_request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "input": saved_input[:2],
+        }
+
+        result = asyncio.run(
+            state.prepare_conversation_checkpoint(
+                profile,
+                resumed_request,
+                "synthetic-session",
+            )
+        )
+
+        self.assertEqual(result["mode"], "conversation-checkpoint-miss")
+        self.assertEqual(
+            result["reason"],
+            "checkpoint is not a prefix of the resumed conversation",
+        )
+        self.assertEqual(result["checkpoint_items"], 3)
+        self.assertEqual(result["current_items"], 2)
+        state.slot_checkpoint_store.discard.assert_called_once_with(record)
+        state.restore_slot.assert_not_awaited()
 
     def test_rolling_checkpoint_saves_a_stable_prefilled_boundary(self) -> None:
         profile = fixture_profile()
@@ -1850,6 +1950,18 @@ context = 32768
                 profile.slug: "synthetic-session"
             }
             state.telemetry = mock.Mock()
+            state._prefill_conversation_checkpoint_boundary = mock.AsyncMock(
+                side_effect=lambda _profile, checkpoint_request: {
+                    "context_tokens": 100_000,
+                    "conversation_item_count": len(checkpoint_request["input"]),
+                    "conversation_prefix_hash": (
+                        router_module._conversation_checkpoint_prefix_hash(
+                            checkpoint_request,
+                            len(checkpoint_request["input"]),
+                        )
+                    ),
+                }
+            )
 
             async def save_slot(
                 saved_profile: router_module.ModelProfile,
@@ -1862,7 +1974,23 @@ context = 32768
 
             state.save_slot = mock.AsyncMock(side_effect=save_slot)
             state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})
-            original = {"instructions": "one", "tools": []}
+            conversation_input = [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "question"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "answer"}],
+                },
+            ]
+            original = {
+                "instructions": "one",
+                "tools": [],
+                "input": conversation_input,
+            }
             candidate = router_module.ConversationCheckpointCandidate(
                 profile_slug=profile.slug,
                 profile_alias=profile.alias,
@@ -1873,13 +2001,18 @@ context = 32768
                     original,
                 ),
                 context_tokens=100_000,
+                checkpoint_request=original,
             )
             asyncio.run(state._save_conversation_checkpoint(candidate, force=False))
 
             result = asyncio.run(
                 state.prepare_conversation_checkpoint(
                     profile,
-                    {"instructions": "two", "tools": []},
+                    {
+                        "instructions": "two",
+                        "tools": [],
+                        "input": conversation_input,
+                    },
                     "synthetic-session",
                 )
             )
