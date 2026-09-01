@@ -289,6 +289,26 @@ context = 32768
         self.assertFalse(profile.supports_slots)
         self.assertEqual(profile.temperature, 0.0)
 
+    def test_custom_backend_can_use_authenticated_external_slot_api(self) -> None:
+        environment = {
+            "MARATHON_MODEL_PATH": "/tmp/model.gguf",
+            "MARATHON_MODEL_SLUG": "pooled-model",
+            "MARATHON_BACKEND_MODEL_ID": "upstream-model",
+            "MARATHON_BACKEND_SLOT_API": "1",
+            "MARATHON_MODEL_EXTERNAL": "1",
+            "MARATHON_MODEL_API_KEY_ENV": "POOL_API_KEY",
+            "MARATHON_MODEL_API_KEY_FILE": "/tmp/pool.env",
+        }
+        with mock.patch.dict(router_module.os.environ, environment, clear=True):
+            profile = router_module._custom_model_profile(ROOT_DIR)
+
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertTrue(profile.external)
+        self.assertTrue(profile.supports_slots)
+        self.assertEqual(profile.api_key_env, "POOL_API_KEY")
+        self.assertEqual(profile.api_key_file, "/tmp/pool.env")
+
     def test_custom_profile_loads_reasoning_capabilities(self) -> None:
         environment = {
             "MARATHON_MODEL_PATH": "/tmp/model.gguf",

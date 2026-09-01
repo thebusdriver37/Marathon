@@ -1144,6 +1144,9 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
     default_reasoning_level, supported_reasoning_levels = (
         _reasoning_config_from_env()
     )
+    external = _env_bool("MARATHON_MODEL_EXTERNAL", False)
+    api_key_env = os.getenv("MARATHON_MODEL_API_KEY_ENV")
+    api_key_file = os.getenv("MARATHON_MODEL_API_KEY_FILE")
 
     return ModelProfile(
         slug=slug,
@@ -1163,6 +1166,9 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         default_reasoning_level=default_reasoning_level,
         supported_reasoning_levels=supported_reasoning_levels,
         input_modalities=_input_modalities_from_env(),
+        external=external,
+        api_key_env=api_key_env.strip() if api_key_env else None,
+        api_key_file=api_key_file.strip() if api_key_file else None,
     )
 
 

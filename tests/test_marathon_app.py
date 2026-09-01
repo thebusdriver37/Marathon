@@ -752,6 +752,48 @@ class InstanceTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_pool_backend_leases_different_workers_without_gpu_pinning(self) -> None:
+        model = fixture_model("qwen3.8-27b")
+        profile = catalog.find_profile(model, "auto", "codex")
+        backend = catalog.Backend(
+            "pool",
+            "Pool",
+            None,
+            kind="llama_swap_pool",
+            model_alias="upstream-model",
+            proxy="http://127.0.0.1:9292",
+            pool_models=("worker-a", "worker-b"),
+            slot_save_root=Path("/tmp/slots"),
+            cache_id="test-pool-v1",
+        )
+        first = Runtime(model, profile, "first")
+        second = Runtime(model, profile, "second")
+        third = Runtime(model, profile, "third")
+        for runtime in (first, second, third):
+            runtime._backend = backend
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            runtime_module,
+            "RUNTIME_DIR",
+            Path(directory),
+        ):
+            first._acquire_pool_model(backend)
+            second._acquire_pool_model(backend)
+            self.assertEqual(first._pool_model, "worker-a")
+            self.assertEqual(second._pool_model, "worker-b")
+            self.assertEqual(first._backend_specs(backend, Path(directory)), [])
+            self.assertEqual(
+                first.llama_url,
+                "http://127.0.0.1:9292/upstream/worker-a",
+            )
+            with self.assertRaisesRegex(RuntimeError, "already assigned"):
+                third._acquire_pool_model(backend)
+            first.cleanup()
+            third._acquire_pool_model(backend)
+            self.assertEqual(third._pool_model, "worker-a")
+            second.cleanup()
+            third.cleanup()
+
     def test_stop_ownership_matches_exact_instance_argument(self) -> None:
         arguments = (
             "/usr/bin/python3",

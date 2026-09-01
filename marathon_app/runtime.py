@@ -21,6 +21,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, TextIO
+from urllib.parse import quote
 
 from .catalog import (
     Backend,
@@ -142,6 +143,7 @@ def _cache_file_identity(path: Path | None) -> dict[str, object] | None:
 
 def _backend_cache_id(
     model: Model,
+    backend: Backend,
     specs: list[BackendProcessSpec],
 ) -> str:
     """Fingerprint everything that can make a llama.cpp slot incompatible."""
@@ -150,6 +152,12 @@ def _backend_cache_id(
         "schema": 1,
         "model": _cache_file_identity(model.path),
         "projector": _cache_file_identity(model.multimodal_projector),
+        "backend": {
+            "kind": backend.kind,
+            "model_alias": backend.model_alias,
+            "supports_slots": backend.supports_slots,
+            "cache_id": backend.cache_id,
+        },
         "processes": [
             {
                 "command": list(spec.command),
@@ -204,8 +212,13 @@ def save_selection(
     temporary.replace(selection_file)
 
 
-def _http_json(url: str, timeout: float = 3) -> dict[str, object]:
-    with urllib.request.urlopen(url, timeout=timeout) as response:
+def _http_json(
+    url: str,
+    timeout: float = 3,
+    headers: dict[str, str] | None = None,
+) -> dict[str, object]:
+    request = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -454,6 +467,8 @@ class Runtime:
         self._run_started_mono: float | None = None
         self._lock: TextIO | None = None
         self._owns_lock = False
+        self._pool_lock: TextIO | None = None
+        self._pool_model: str | None = None
         self._cleaned = False
         self._backend_watch_enabled = False
         self._backend_failure_reported = False
@@ -461,6 +476,15 @@ class Runtime:
 
     @property
     def llama_url(self) -> str:
+        if (
+            self._backend is not None
+            and self._backend.kind == "llama_swap_pool"
+            and self._pool_model is not None
+        ):
+            return (
+                f"{self._backend.proxy}/upstream/"
+                f"{quote(self._pool_model, safe='')}"
+            )
         return f"http://{self.config.llama_host}:{self.config.llama_port}"
 
     @property
@@ -572,6 +596,66 @@ class Runtime:
         )
         self._lock.flush()
 
+    def _acquire_pool_model(self, backend: Backend) -> None:
+        """Lease one interchangeable broker worker for this Marathon process."""
+
+        pool_dir = RUNTIME_DIR / "backend-pools" / backend.id
+        pool_dir.mkdir(parents=True, exist_ok=True)
+        for model_id in backend.pool_models:
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", model_id).strip("-")
+            suffix = hashlib.sha256(model_id.encode("utf-8")).hexdigest()[:12]
+            path = pool_dir / f"{safe_name or 'worker'}-{suffix}.lock"
+            handle = path.open("a+", encoding="utf-8")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.close()
+                continue
+            handle.seek(0)
+            handle.truncate()
+            handle.write(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "instance": self.instance.name,
+                        "model": model_id,
+                        "started_at": int(time.time()),
+                    }
+                )
+            )
+            handle.flush()
+            self._pool_lock = handle
+            self._pool_model = model_id
+            return
+        raise RuntimeError(
+            f"All {len(backend.pool_models)} workers in backend pool "
+            f"'{backend.id}' are already assigned to running Marathon instances"
+        )
+
+    def _backend_api_key(self) -> str | None:
+        backend = self._backend
+        if backend is None or not backend.api_key_env:
+            return None
+        value = os.environ.get(backend.api_key_env)
+        if value:
+            return value.strip()
+        if not backend.api_key_file:
+            return None
+        try:
+            lines = Path(backend.api_key_file).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        prefix = f"{backend.api_key_env}="
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(prefix):
+                return stripped[len(prefix) :].strip().strip("\"'") or None
+        return None
+
+    def _backend_headers(self) -> dict[str, str]:
+        key = self._backend_api_key()
+        return {"Authorization": f"Bearer {key}"} if key else {}
+
     def _install_handlers(self) -> None:
         for signum in (signal.SIGTERM, signal.SIGHUP):
             self._old_handlers[signum] = signal.getsignal(signum)
@@ -585,7 +669,10 @@ class Runtime:
         self,
         specs: list[BackendProcessSpec] | None = None,
     ) -> None:
-        ports = {self.config.llama_port, self.config.router_port}
+        pooled = self._backend is not None and self._backend.kind == "llama_swap_pool"
+        ports = {self.config.router_port}
+        if not pooled:
+            ports.add(self.config.llama_port)
         for spec in specs or ():
             command = spec.command
             for index, argument in enumerate(command):
@@ -603,6 +690,8 @@ class Runtime:
                     f"Marathon instance '{self.instance.label}' cannot use port {port}; "
                     f"PID {pid} is listening: {_cmdline(pid) or '(command unavailable)'}"
                 )
+        if pooled:
+            return
         processes = _gpu_processes()
         if self.profile.gpus:
             selected_gpus = {str(gpu) for gpu in self.profile.gpus}
@@ -640,6 +729,9 @@ class Runtime:
 
     def _backend_specs(self, backend: Backend, slot_path: Path) -> list[BackendProcessSpec]:
         """Build the complete foreground process set for the selected backend."""
+
+        if backend.kind == "llama_swap_pool":
+            return []
 
         if backend.kind == "llama_cpp":
             command = server_command(
@@ -811,12 +903,23 @@ class Runtime:
         self.telemetry = create_run_writer(self.model.id, self.instance.name)
         self._run_started_mono = time.monotonic()
         self._backend = backend_for(self.model, self.profile)
+        if self._backend.kind == "llama_swap_pool":
+            self._acquire_pool_model(self._backend)
         slot_api_enabled = _slot_api_enabled(self.model, self._backend)
-        slot_path = self.paths.slot_root / self.model.alias
+        router_slot_root = self._backend.slot_save_root or self.paths.slot_root
+        slot_path = router_slot_root / self.model.alias
         backend_specs = self._backend_specs(self._backend, slot_path)
-        backend_cache_id = _backend_cache_id(self.model, backend_specs)
+        backend_cache_id = _backend_cache_id(
+            self.model,
+            self._backend,
+            backend_specs,
+        )
         backend_commands = [list(spec.command) for spec in backend_specs]
-        primary_command = backend_commands[-1]
+        primary_command = (
+            backend_commands[-1]
+            if backend_commands
+            else [self._backend.kind, self.llama_url]
+        )
         self.record(
             "run.started",
             {
@@ -858,6 +961,7 @@ class Runtime:
                     "environment_keys": sorted(
                         key for key, _value in self._backend.environment
                     ),
+                    "pool_model": self._pool_model,
                 },
                 "backend_commands": backend_commands,
                 # Kept for compatibility with existing run-log readers.
@@ -901,8 +1005,9 @@ class Runtime:
         if slot_api_enabled:
             slot_path.mkdir(parents=True, exist_ok=True)
         load_started = time.monotonic()
-        model_log = self._open_log(self.model_log)
+        model_log = self._open_log(self.model_log) if backend_specs else None
         for spec in backend_specs:
+            assert model_log is not None
             process_environment = environment.copy()
             process_environment.update(dict(spec.environment))
             process = self._spawn(
@@ -965,7 +1070,7 @@ class Runtime:
                 "MARATHON_MODEL_DEFAULT_REASONING_LEVEL": (
                     self.model.family.default_reasoning_level or ""
                 ),
-                "MARATHON_SLOT_SAVE_ROOT": str(self.paths.slot_root),
+                "MARATHON_SLOT_SAVE_ROOT": str(router_slot_root),
                 "MARATHON_SLOT_CACHE_BUDGET_ROOT": str(SLOT_ROOT),
                 "MARATHON_SLOT_SNAPSHOTS_ENABLED": (
                     "1" if self.config.slot_snapshots_enabled else "0"
@@ -995,6 +1100,12 @@ class Runtime:
                 "MARATHON_RUN_LOG": str(self.run_log or ""),
             }
         )
+        if self._backend.kind == "llama_swap_pool":
+            router_env["MARATHON_MODEL_EXTERNAL"] = "1"
+            if self._backend.api_key_env:
+                router_env["MARATHON_MODEL_API_KEY_ENV"] = self._backend.api_key_env
+            if self._backend.api_key_file:
+                router_env["MARATHON_MODEL_API_KEY_FILE"] = self._backend.api_key_file
         if self.profile.tool_thinking_budget is not None:
             router_env["MARATHON_MODEL_TOOL_THINKING_BUDGET_TOKENS"] = str(
                 self.profile.tool_thinking_budget
@@ -1184,7 +1295,11 @@ class Runtime:
 
     def _sample_backend_metrics(self) -> None:
         try:
-            with urllib.request.urlopen(f"{self.llama_url}/metrics", timeout=2) as response:
+            request = urllib.request.Request(
+                f"{self.llama_url}/metrics",
+                headers=self._backend_headers(),
+            )
+            with urllib.request.urlopen(request, timeout=2) as response:
                 body = response.read().decode("utf-8", errors="replace")
         except (OSError, urllib.error.URLError):
             return
@@ -1272,13 +1387,19 @@ class Runtime:
             if not self._backend_processes and self.llama and self.llama.poll() is not None:
                 raise RuntimeError(f"backend exited while loading; see {self.model_log}")
             try:
-                payload = _http_json(f"{self.llama_url}/v1/models")
+                payload = _http_json(
+                    f"{self.llama_url}/v1/models",
+                    headers=self._backend_headers(),
+                )
                 loaded_context = _loaded_model_context(payload, expected_alias)
                 if _model_is_loaded(payload, expected_alias):
                     if loaded_context is None:
                         try:
                             loaded_context = _props_context_window(
-                                _http_json(f"{self.llama_url}/props")
+                                _http_json(
+                                    f"{self.llama_url}/props",
+                                    headers=self._backend_headers(),
+                                )
                             )
                         except (
                             OSError,
@@ -1432,6 +1553,14 @@ class Runtime:
                 self._lock.close()
             self._lock = None
             self._owns_lock = False
+        if self._pool_lock is not None:
+            with contextlib.suppress(OSError):
+                self._pool_lock.seek(0)
+                self._pool_lock.truncate()
+                fcntl.flock(self._pool_lock.fileno(), fcntl.LOCK_UN)
+                self._pool_lock.close()
+            self._pool_lock = None
+            self._pool_model = None
 
     def _terminate(self, process: subprocess.Popen[str] | None, name: str) -> None:
         if process is None or process.poll() is not None:

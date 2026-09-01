@@ -72,7 +72,7 @@ class Settings:
 class Backend:
     id: str
     display_name: str
-    server: Path
+    server: Path | None
     kind: str = "llama_cpp"
     worker: Path | None = None
     model_alias: str = ""
@@ -80,6 +80,12 @@ class Backend:
     gpu_ids: tuple[int, ...] = ()
     environment: tuple[tuple[str, str], ...] = ()
     supports_slots: bool = True
+    proxy: str = ""
+    pool_models: tuple[str, ...] = ()
+    api_key_env: str | None = None
+    api_key_file: str | None = None
+    slot_save_root: Path | None = None
+    cache_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -490,11 +496,17 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
     ai_root = settings(loaded).ai_root
     result: dict[str, Backend] = {}
     for raw in loaded.get("backends", []):
+        kind = str(raw.get("kind", "llama_cpp"))
         env_name = f"MARATHON_BACKEND_{raw['id'].upper().replace('-', '_')}"
         configured = os.environ.get(env_name)
         if raw["id"] == "upstream":
             configured = os.environ.get("LLAMACPP_BIN", configured)
-        server = _resolve_ai_path(configured or raw["server"], ai_root)
+        server_value = configured or raw.get("server")
+        server = (
+            _resolve_ai_path(server_value, ai_root)
+            if server_value
+            else None
+        )
         worker_value = raw.get("worker")
         worker_env = os.environ.get(f"{env_name}_WORKER")
         worker = (
@@ -506,7 +518,7 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
             id=raw["id"],
             display_name=raw["display_name"],
             server=server,
-            kind=str(raw.get("kind", "llama_cpp")),
+            kind=kind,
             worker=worker,
             model_alias=str(raw.get("model_alias", "")),
             layer_slices=tuple(str(value) for value in raw.get("layer_slices", [])),
@@ -516,6 +528,28 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
                 for key, value in raw.get("environment", {}).items()
             ),
             supports_slots=bool(raw.get("supports_slots", True)),
+            proxy=str(raw.get("proxy", "")).strip().rstrip("/"),
+            pool_models=tuple(
+                str(value).strip()
+                for value in raw.get("pool_models", [])
+                if str(value).strip()
+            ),
+            api_key_env=(
+                str(raw["api_key_env"]).strip()
+                if raw.get("api_key_env")
+                else None
+            ),
+            api_key_file=(
+                str(Path(str(raw["api_key_file"])).expanduser())
+                if raw.get("api_key_file")
+                else None
+            ),
+            slot_save_root=(
+                Path(str(raw["slot_save_root"])).expanduser()
+                if raw.get("slot_save_root")
+                else None
+            ),
+            cache_id=str(raw.get("cache_id", "")).strip(),
         )
     return result
 
@@ -779,7 +813,32 @@ def backend_for(model: Model, profile: Profile | None = None) -> Backend:
     backend = backends().get(backend_id)
     if backend is None:
         raise ValueError(f"backend '{backend_id}' is not configured")
-    if not backend.server.is_file() or not os.access(backend.server, os.X_OK):
+    if backend.kind == "llama_swap_pool":
+        parsed_proxy = urlparse(backend.proxy)
+        if (
+            parsed_proxy.scheme not in {"http", "https"}
+            or not parsed_proxy.netloc
+            or parsed_proxy.username is not None
+            or parsed_proxy.password is not None
+        ):
+            raise ValueError(
+                f"backend '{backend.id}' requires an http(s) proxy without credentials"
+            )
+        if not backend.pool_models:
+            raise ValueError(
+                f"backend '{backend.id}' requires at least one pool model"
+            )
+        if not backend.model_alias:
+            raise ValueError(f"backend '{backend.id}' requires model_alias")
+        if backend.supports_slots and (
+            backend.slot_save_root is None or not backend.cache_id
+        ):
+            raise ValueError(
+                f"backend '{backend.id}' requires slot_save_root and cache_id "
+                "when slot snapshots are enabled"
+            )
+        return backend
+    if backend.server is None or not backend.server.is_file() or not os.access(backend.server, os.X_OK):
         raise ValueError(f"backend server is missing or not executable: {backend.server}")
     if backend.kind == "ds4_distributed" and (
         backend.worker is None
