@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import sys
 import tempfile
@@ -1821,6 +1822,63 @@ context = 32768
         self.assertEqual(result["current_items"], 2)
         state.slot_checkpoint_store.discard.assert_called_once_with(record)
         state.restore_slot.assert_not_awaited()
+
+    def test_rolling_checkpoint_ignores_non_prompt_item_metadata(self) -> None:
+        saved_request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "input": [
+                {
+                    "type": "message",
+                    "id": "backend-message-id",
+                    "role": "assistant",
+                    "status": "completed",
+                    "phase": "final_answer",
+                    "internal_chat_message_metadata_passthrough": {"opaque": True},
+                    "content": [{"type": "output_text", "text": "answer"}],
+                }
+            ],
+        }
+        resumed_request = copy.deepcopy(saved_request)
+        resumed_request["input"][0].pop("status")
+        resumed_request["input"][0]["id"] = "reserialized-message-id"
+        resumed_request["input"][0]["phase"] = "commentary"
+        resumed_request["input"][0][
+            "internal_chat_message_metadata_passthrough"
+        ] = {"opaque": False}
+
+        self.assertNotEqual(
+            router_module._input_fingerprint_summary(saved_request["input"], 0)[
+                "hash"
+            ],
+            router_module._input_fingerprint_summary(resumed_request["input"], 0)[
+                "hash"
+            ],
+        )
+        self.assertEqual(
+            router_module._conversation_checkpoint_prefix_hash(saved_request, 1),
+            router_module._conversation_checkpoint_prefix_hash(resumed_request, 1),
+        )
+
+    def test_rolling_checkpoint_detects_model_visible_history_change(self) -> None:
+        saved_request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "answer"}],
+                }
+            ],
+        }
+        changed_request = copy.deepcopy(saved_request)
+        changed_request["input"][0]["content"][0]["text"] = "different answer"
+
+        self.assertNotEqual(
+            router_module._conversation_checkpoint_prefix_hash(saved_request, 1),
+            router_module._conversation_checkpoint_prefix_hash(changed_request, 1),
+        )
 
     def test_rolling_checkpoint_saves_a_stable_prefilled_boundary(self) -> None:
         profile = fixture_profile()

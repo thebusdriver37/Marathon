@@ -93,13 +93,13 @@ class RollingCheckpointStoreTests(unittest.TestCase):
             self.assertEqual(metadata["conversation_item_count"], 2)
             self.assertEqual(metadata["conversation_prefix_hash"], "a" * 64)
 
-    def test_schema_two_checkpoint_is_rejected_without_prefix_identity(self) -> None:
+    def test_older_checkpoint_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             metadata_path = Path(directory) / "conversation.json"
             metadata_path.write_text(
                 json.dumps(
                     {
-                        "schema": 2,
+                        "schema": 3,
                         "key_hash": "a" * 64,
                         "profile_slug": "model",
                         "profile_alias": "model",

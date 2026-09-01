@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Iterator
 
 
-# Schema 3 checkpoints include a content-free fingerprint of the exact
-# model-visible conversation prefix. Schema 2 cannot distinguish a normal
-# continuation from a resumed rollback or rewritten history.
-CHECKPOINT_SCHEMA = 3
+# Schema 4 fingerprints only the model-visible conversation prefix.
+# Schema 3 included Codex bookkeeping fields that can change across a resume.
+# Older schemas cannot safely validate the reusable prompt prefix.
+CHECKPOINT_SCHEMA = 4
 CHECKPOINT_PREFIX = "conversation__"
 MAX_CHECKPOINT_CACHE_BYTES = 32 * 1024**3
 PENDING_MAX_AGE_SECONDS = 60 * 60

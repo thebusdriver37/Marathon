@@ -500,10 +500,7 @@ def _conversation_checkpoint_chat_body(
                 raise RuntimeError(
                     "conversation checkpoint received unsupported message content"
                 )
-            item.pop("type", None)
-            item.pop("status", None)
-            item["content"] = chat_content
-            messages.append(item)
+            messages.append({"role": role, "content": chat_content})
             continue
 
         if role == "assistant" and item.get("type") == "message":
@@ -537,10 +534,7 @@ def _conversation_checkpoint_chat_body(
                     messages[-1]["content"] = previous_content
                 previous_content.extend(chat_content)
             else:
-                item.pop("status", None)
-                item.pop("type", None)
-                item["content"] = chat_content
-                messages.append(item)
+                messages.append({"role": "assistant", "content": chat_content})
             continue
 
         if (
@@ -661,7 +655,12 @@ def _conversation_checkpoint_prefix_hash(
     request: dict[str, Any],
     conversation_item_count: int,
 ) -> str | None:
-    """Fingerprint one model-visible history prefix without retaining its content."""
+    """Fingerprint one model-visible history prefix without retaining its content.
+
+    Codex may rewrite response item IDs, status, phase, and other bookkeeping
+    when it serializes a resumed conversation. Those fields do not reach the
+    chat template and must not invalidate an otherwise reusable KV checkpoint.
+    """
 
     input_items = request.get("input")
     if (
@@ -670,12 +669,19 @@ def _conversation_checkpoint_prefix_hash(
         or len(input_items) < conversation_item_count
     ):
         return None
-    return str(
-        _input_fingerprint_summary(
-            input_items[:conversation_item_count],
-            0,
-        )["hash"]
-    )
+    prefix_request = dict(request)
+    prefix_request["input"] = input_items[:conversation_item_count]
+    try:
+        body = _conversation_checkpoint_chat_body(
+            prefix_request,
+            STARTER_CACHE_SENTINEL,
+        )
+    except RuntimeError:
+        return None
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    return hashlib.sha256(_stable_json(messages[:-1]).encode("utf-8")).hexdigest()
 
 
 def _starter_common_token_prefix(
