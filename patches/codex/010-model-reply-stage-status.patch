@@ -1,0 +1,341 @@
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 7b424a3592..0d0a16ad82 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -440,6 +440,7 @@ mod turn_lifecycle;
+ mod turn_runtime;
+ use self::turn_lifecycle::TurnLifecycleState;
+ mod turn_throughput;
++use self::turn_throughput::GenerationStage;
+ use self::turn_throughput::TurnThroughput;
+ mod usage;
+ mod user_messages;
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index a4c3f699c8..42c7c1407d 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -73,6 +73,21 @@ impl ChatWidget {
+                 self.handle_turn_completed_notification(notification, replay_kind);
+             }
+             ServerNotification::ItemStarted(notification) => {
++                if !from_replay {
++                    match &notification.item {
++                        ThreadItem::Reasoning { .. } => {
++                            self.turn_throughput
++                                .set_generation_stage(GenerationStage::Thinking);
++                            self.refresh_status_line();
++                        }
++                        ThreadItem::AgentMessage { .. } | ThreadItem::Plan { .. } => {
++                            self.turn_throughput
++                                .set_generation_stage(GenerationStage::Answering);
++                            self.refresh_status_line();
++                        }
++                        _ => {}
++                    }
++                }
+                 self.handle_item_started_notification(notification, replay_kind.is_some());
+             }
+             ServerNotification::ItemCompleted(notification) => {
+@@ -80,25 +95,25 @@ impl ChatWidget {
+             }
+             ServerNotification::AgentMessageDelta(notification) => {
+                 if !from_replay {
+-                    self.record_turn_output_delta(&notification.delta);
++                    self.record_turn_output_delta(&notification.delta, GenerationStage::Answering);
+                 }
+                 self.on_agent_message_delta(notification.delta);
+             }
+             ServerNotification::PlanDelta(notification) => {
+                 if !from_replay {
+-                    self.record_turn_output_delta(&notification.delta);
++                    self.record_turn_output_delta(&notification.delta, GenerationStage::Answering);
+                 }
+                 self.on_plan_delta(notification.delta);
+             }
+             ServerNotification::ReasoningSummaryTextDelta(notification) => {
+                 if !from_replay {
+-                    self.record_turn_output_delta(&notification.delta);
++                    self.record_turn_output_delta(&notification.delta, GenerationStage::Thinking);
+                 }
+                 self.on_agent_reasoning_delta(notification.delta);
+             }
+             ServerNotification::ReasoningTextDelta(notification) => {
+                 if !from_replay {
+-                    self.record_turn_output_delta(&notification.delta);
++                    self.record_turn_output_delta(&notification.delta, GenerationStage::Thinking);
+                 }
+                 if self.config.show_raw_agent_reasoning {
+                     self.on_agent_reasoning_delta(notification.delta);
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index 5821a5a68b..f348d6a431 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -412,10 +412,15 @@ impl ChatWidget {
+     }
+ 
+     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
+-        self.turn_throughput.sample(Instant::now()).map(|sample| {
++        let sample = self.turn_throughput.sample(Instant::now()).map(|sample| {
+             let prefix = if sample.estimated { "~" } else { "" };
+             format!("{prefix}{:.1} tok/s", sample.tokens_per_second)
+-        })
++        });
++        match (self.turn_throughput.generation_stage(), sample) {
++            (Some(stage), Some(sample)) => Some(format!("{} · {sample}", stage.label())),
++            (Some(stage), None) => Some(stage.label().to_string()),
++            (None, sample) => sample,
++        }
+     }
+ 
+     pub(super) fn status_line_limit_display(
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 3e58c85c3c..7ef3481161 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -2900,8 +2900,11 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+     chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
+     let started_at = Instant::now() - Duration::from_secs(200);
+     chat.turn_throughput.start_turn();
+-    chat.turn_throughput
+-        .record_output_delta("streamed response", started_at);
++    chat.turn_throughput.record_output_delta(
++        "streamed response",
++        GenerationStage::Answering,
++        started_at,
++    );
+     let response_usage = TokenUsage {
+         total_tokens: 4_200,
+         output_tokens: 4_200,
+@@ -2931,6 +2934,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+     );
+ }
+ 
++#[tokio::test]
++async fn status_line_tokens_per_second_tracks_generation_stage() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
++
++    handle_turn_started(&mut chat, "turn-stage");
++    chat.refresh_status_line();
++    assert_eq!(status_line_text(&chat), Some("Prefill".to_string()));
++
++    handle_agent_reasoning_delta(&mut chat, "thinking");
++    assert!(
++        status_line_text(&chat).is_some_and(|status| status.starts_with("Thinking")),
++        "reasoning delta should identify thinking"
++    );
++
++    handle_agent_message_delta(&mut chat, "answering");
++    assert!(
++        status_line_text(&chat).is_some_and(|status| status.starts_with("Answering")),
++        "answer delta should identify answering"
++    );
++}
++
+ #[tokio::test]
+ async fn status_line_legacy_context_usage_renders_context_used_percent() {
+     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+index d7e4851483..e1976c9766 100644
+--- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
++++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+@@ -102,9 +102,13 @@ impl ChatWidget {
+         self.request_redraw();
+     }
+ 
+-    pub(super) fn record_turn_output_delta(&mut self, delta: &str) {
++    pub(super) fn record_turn_output_delta(
++        &mut self,
++        delta: &str,
++        generation_stage: GenerationStage,
++    ) {
+         self.turn_throughput
+-            .record_output_delta(delta, Instant::now());
++            .record_output_delta(delta, generation_stage, Instant::now());
+         self.refresh_status_line();
+     }
+ 
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+index 5eefec028e..4ed00f7b17 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+@@ -7,6 +7,23 @@ use codex_utils_string::approx_tokens_from_byte_count;
+ 
+ const MIN_SAMPLE_DURATION: Duration = Duration::from_millis(1);
+ 
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(super) enum GenerationStage {
++    Prefill,
++    Thinking,
++    Answering,
++}
++
++impl GenerationStage {
++    pub(super) fn label(self) -> &'static str {
++        match self {
++            Self::Prefill => "Prefill",
++            Self::Thinking => "Thinking",
++            Self::Answering => "Answering",
++        }
++    }
++}
++
+ #[derive(Clone, Copy, Debug, PartialEq)]
+ pub(super) struct ThroughputSample {
+     pub(super) tokens_per_second: f64,
+@@ -25,14 +42,22 @@ pub(super) struct TurnThroughput {
+     completed_output_tokens: u64,
+     completed_generation_duration: Duration,
+     last_sample: Option<ThroughputSample>,
++    generation_stage: Option<GenerationStage>,
+ }
+ 
+ impl TurnThroughput {
+     pub(super) fn start_turn(&mut self) {
+         *self = Self::default();
++        self.generation_stage = Some(GenerationStage::Prefill);
+     }
+ 
+-    pub(super) fn record_output_delta(&mut self, delta: &str, now: Instant) {
++    pub(super) fn record_output_delta(
++        &mut self,
++        delta: &str,
++        generation_stage: GenerationStage,
++        now: Instant,
++    ) {
++        self.generation_stage = Some(generation_stage);
+         let response = self.active_response.get_or_insert(ActiveResponse {
+             started_at: now,
+             output_bytes: 0,
+@@ -41,6 +66,7 @@ impl TurnThroughput {
+     }
+ 
+     pub(super) fn complete_response(&mut self, output_tokens: Option<i64>, now: Instant) {
++        self.generation_stage = None;
+         let live_sample = self.sample(now);
+         let Some(response) = self.active_response.take() else {
+             return;
+@@ -67,12 +93,21 @@ impl TurnThroughput {
+     }
+ 
+     pub(super) fn finish_turn(&mut self, now: Instant) {
++        self.generation_stage = None;
+         if self.active_response.is_some() {
+             self.last_sample = self.sample(now);
+             self.active_response = None;
+         }
+     }
+ 
++    pub(super) fn generation_stage(&self) -> Option<GenerationStage> {
++        self.generation_stage
++    }
++
++    pub(super) fn set_generation_stage(&mut self, generation_stage: GenerationStage) {
++        self.generation_stage = Some(generation_stage);
++    }
++
+     pub(super) fn sample(&self, now: Instant) -> Option<ThroughputSample> {
+         let Some(response) = self.active_response.as_ref() else {
+             return self.last_sample;
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+index 4f575e3590..de0a1a3a97 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+@@ -3,6 +3,7 @@ use std::time::Instant;
+ 
+ use pretty_assertions::assert_eq;
+ 
++use super::GenerationStage;
+ use super::ThroughputSample;
+ use super::TurnThroughput;
+ 
+@@ -12,7 +13,11 @@ fn live_sample_is_estimated_from_streamed_bytes() {
+     let mut throughput = TurnThroughput::default();
+ 
+     throughput.start_turn();
+-    throughput.record_output_delta("1234567890123456789012345678901234567890", started_at);
++    throughput.record_output_delta(
++        "1234567890123456789012345678901234567890",
++        GenerationStage::Thinking,
++        started_at,
++    );
+ 
+     assert_eq!(
+         throughput.sample(started_at + Duration::from_secs(2)),
+@@ -30,7 +35,7 @@ fn completed_response_replaces_estimate_with_exact_usage() {
+     let mut throughput = TurnThroughput::default();
+ 
+     throughput.start_turn();
+-    throughput.record_output_delta("streamed text", started_at);
++    throughput.record_output_delta("streamed text", GenerationStage::Answering, started_at);
+     throughput.complete_response(Some(30), completed_at);
+ 
+     assert_eq!(
+@@ -49,7 +54,7 @@ fn fast_completed_response_still_reports_throughput() {
+     let mut throughput = TurnThroughput::default();
+ 
+     throughput.start_turn();
+-    throughput.record_output_delta("READY", started_at);
++    throughput.record_output_delta("READY", GenerationStage::Answering, started_at);
+     throughput.complete_response(Some(4), completed_at);
+ 
+     assert_eq!(
+@@ -67,9 +72,13 @@ fn completed_responses_form_a_generation_time_weighted_turn_average() {
+     let mut throughput = TurnThroughput::default();
+ 
+     throughput.start_turn();
+-    throughput.record_output_delta("first", started_at);
++    throughput.record_output_delta("first", GenerationStage::Thinking, started_at);
+     throughput.complete_response(Some(20), started_at + Duration::from_secs(2));
+-    throughput.record_output_delta("second", started_at + Duration::from_secs(10));
++    throughput.record_output_delta(
++        "second",
++        GenerationStage::Answering,
++        started_at + Duration::from_secs(10),
++    );
+     throughput.complete_response(Some(40), started_at + Duration::from_secs(14));
+ 
+     assert_eq!(
+@@ -85,10 +94,41 @@ fn completed_responses_form_a_generation_time_weighted_turn_average() {
+ fn starting_a_turn_clears_the_previous_sample() {
+     let started_at = Instant::now();
+     let mut throughput = TurnThroughput::default();
+-    throughput.record_output_delta("streamed text", started_at);
++    throughput.record_output_delta("streamed text", GenerationStage::Answering, started_at);
+     throughput.complete_response(Some(30), started_at + Duration::from_secs(2));
+ 
+     throughput.start_turn();
+ 
+     assert_eq!(throughput.sample(started_at + Duration::from_secs(3)), None);
++    assert_eq!(
++        throughput.generation_stage(),
++        Some(GenerationStage::Prefill)
++    );
++}
++
++#[test]
++fn generation_stage_tracks_prefill_thinking_and_answering() {
++    let started_at = Instant::now();
++    let mut throughput = TurnThroughput::default();
++
++    throughput.start_turn();
++    assert_eq!(
++        throughput.generation_stage(),
++        Some(GenerationStage::Prefill)
++    );
++
++    throughput.record_output_delta("thought", GenerationStage::Thinking, started_at);
++    assert_eq!(
++        throughput.generation_stage(),
++        Some(GenerationStage::Thinking)
++    );
++
++    throughput.record_output_delta("answer", GenerationStage::Answering, started_at);
++    assert_eq!(
++        throughput.generation_stage(),
++        Some(GenerationStage::Answering)
++    );
++
++    throughput.finish_turn(started_at + Duration::from_secs(1));
++    assert_eq!(throughput.generation_stage(), None);
+ }

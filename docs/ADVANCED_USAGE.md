@@ -214,6 +214,7 @@ This keeps context limits correct when `/model` switches between deployments wit
 
 The patched status line includes:
 
+- Live `Prefill`, `Thinking`, and `Answering` stages in the throughput position.
 - Live estimated generation throughput with a `~` prefix.
 - Exact completed-turn output tokens divided by active generation time.
 - The active reasoning effort.
