@@ -99,7 +99,7 @@ class RollingCheckpointStoreTests(unittest.TestCase):
             metadata_path.write_text(
                 json.dumps(
                     {
-                        "schema": 3,
+                        "schema": 4,
                         "key_hash": "a" * 64,
                         "profile_slug": "model",
                         "profile_alias": "model",

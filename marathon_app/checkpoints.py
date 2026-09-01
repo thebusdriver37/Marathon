@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Iterator
 
 
-# Schema 4 fingerprints only the model-visible conversation prefix.
-# Schema 3 included Codex bookkeeping fields that can change across a resume.
+# Schema 5 checkpoints include replayable local reasoning capsules.
+# Schema 4 could fingerprint reasoning that Codex omitted during persistence.
 # Older schemas cannot safely validate the reusable prompt prefix.
-CHECKPOINT_SCHEMA = 4
+CHECKPOINT_SCHEMA = 5
 CHECKPOINT_PREFIX = "conversation__"
 MAX_CHECKPOINT_CACHE_BYTES = 32 * 1024**3
 PENDING_MAX_AGE_SECONDS = 60 * 60

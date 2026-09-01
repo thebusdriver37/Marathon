@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import copy
 import hashlib
 import json
@@ -23,6 +24,7 @@ import re
 import threading
 import time
 import urllib.request
+import zlib
 from collections import Counter
 from collections import OrderedDict
 from collections.abc import Awaitable
@@ -146,6 +148,8 @@ MARATHON_RUNTIME_INSTRUCTIONS = (
     "even with a verified PID; ask the user to exit and use its instance-aware launcher."
 )
 MARATHON_LOCAL_REASONING_MARKER = "marathon-local-reasoning-v1"
+MARATHON_LOCAL_REASONING_CAPSULE_PREFIX = "marathon-local-reasoning-v2:"
+MAX_LOCAL_REASONING_CAPSULE_BYTES = 8 * 1024 * 1024
 _BACKEND_ARGUMENTS_KEY = "_marathon_backend_arguments"
 _WEB_REPLAYED_COMPLETION_KEY = "_marathon_web_replayed_completion"
 
@@ -1738,9 +1742,14 @@ def _backend_lineage_item(item: dict[str, Any]) -> dict[str, Any]:
 def _is_replayable_reasoning_item(item: dict[str, Any]) -> bool:
     """Return whether llama.cpp can reconstruct this saved reasoning item."""
 
+    encrypted_content = item.get("encrypted_content")
     if (
         item.get("type") != "reasoning"
-        or item.get("encrypted_content") != MARATHON_LOCAL_REASONING_MARKER
+        or not isinstance(encrypted_content, str)
+        or not (
+            encrypted_content == MARATHON_LOCAL_REASONING_MARKER
+            or encrypted_content.startswith(MARATHON_LOCAL_REASONING_CAPSULE_PREFIX)
+        )
         or not isinstance(item.get("summary"), list)
     ):
         return False
@@ -1751,6 +1760,79 @@ def _is_replayable_reasoning_item(item: dict[str, Any]) -> bool:
         and isinstance(content[0], dict)
         and isinstance(content[0].get("text"), str)
     )
+
+
+def _encode_local_reasoning_content(content: list[Any]) -> str | None:
+    normalized: list[dict[str, str]] = []
+    for part in content:
+        if (
+            not isinstance(part, dict)
+            or part.get("type") != "text"
+            or not isinstance(part.get("text"), str)
+        ):
+            return None
+        normalized.append({"type": "text", "text": part["text"]})
+    if not normalized:
+        return None
+    encoded = _stable_json(normalized).encode("utf-8")
+    if len(encoded) > MAX_LOCAL_REASONING_CAPSULE_BYTES:
+        return None
+    compressed = zlib.compress(encoded)
+    capsule = base64.urlsafe_b64encode(compressed).decode("ascii")
+    return f"{MARATHON_LOCAL_REASONING_CAPSULE_PREFIX}{capsule}"
+
+
+def _decode_local_reasoning_content(
+    encrypted_content: Any,
+) -> list[dict[str, str]] | None:
+    if (
+        not isinstance(encrypted_content, str)
+        or not encrypted_content.startswith(MARATHON_LOCAL_REASONING_CAPSULE_PREFIX)
+    ):
+        return None
+    capsule = encrypted_content.removeprefix(
+        MARATHON_LOCAL_REASONING_CAPSULE_PREFIX
+    )
+    try:
+        compressed = base64.b64decode(capsule, altchars=b"-_", validate=True)
+        decompressor = zlib.decompressobj()
+        decoded = decompressor.decompress(
+            compressed,
+            MAX_LOCAL_REASONING_CAPSULE_BYTES + 1,
+        )
+        if (
+            len(decoded) > MAX_LOCAL_REASONING_CAPSULE_BYTES
+            or decompressor.unconsumed_tail
+            or decompressor.unused_data
+            or not decompressor.eof
+        ):
+            return None
+        payload = json.loads(decoded)
+    except (ValueError, TypeError, zlib.error, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+    content: list[dict[str, str]] = []
+    for part in payload:
+        if (
+            not isinstance(part, dict)
+            or part.get("type") != "text"
+            or not isinstance(part.get("text"), str)
+        ):
+            return None
+        content.append({"type": "text", "text": part["text"]})
+    return content
+
+
+def _restore_local_reasoning_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    if _is_replayable_reasoning_item(item):
+        return item
+    content = _decode_local_reasoning_content(item.get("encrypted_content"))
+    if content is None or not isinstance(item.get("summary"), list):
+        return None
+    restored = copy.deepcopy(item)
+    restored["content"] = content
+    return restored
 
 
 def _apply_reasoning_effort(
@@ -1876,9 +1958,12 @@ def normalize_responses_request(
             input_changed = True
             continue
 
-        if item.get("type") == "reasoning" and _is_replayable_reasoning_item(item):
-            normalized_input.append(item)
-            continue
+        if item.get("type") == "reasoning":
+            restored_reasoning = _restore_local_reasoning_item(item)
+            if restored_reasoning is not None:
+                normalized_input.append(restored_reasoning)
+                input_changed = input_changed or restored_reasoning is not item
+                continue
 
         if item.get("type") in BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES:
             input_changed = True
@@ -3770,25 +3855,18 @@ class RouterState:
     ) -> dict[str, Any]:
         sanitized = copy.deepcopy(item)
         sanitized.pop("status", None)
-        # Codex intentionally omits `reasoning_text` when serializing history
-        # for a resumed request. Its equivalent `text` variant is persisted,
-        # and llama.cpp accepts both as reasoning content. Normalize local
-        # output here so a restored slot sees the same prompt after restart.
+        # Codex deliberately omits plaintext reasoning content when serializing
+        # history. Carry a compressed local capsule in its preserved opaque
+        # field so a resumed request can reconstruct the token-exact prompt.
         if replayable_reasoning and sanitized.get("type") == "reasoning":
             content = sanitized.get("content")
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "reasoning_text":
                         part["type"] = "text"
-                if any(
-                    isinstance(part, dict)
-                    and part.get("type") == "text"
-                    and isinstance(part.get("text"), str)
-                    for part in content
-                ):
-                    sanitized["encrypted_content"] = (
-                        MARATHON_LOCAL_REASONING_MARKER
-                    )
+                capsule = _encode_local_reasoning_content(content)
+                if capsule is not None:
+                    sanitized["encrypted_content"] = capsule
         return sanitized
 
     def usage_payload(self, usage: Any) -> dict[str, Any]:

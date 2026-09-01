@@ -493,10 +493,12 @@ context = 32768
             backend_item,
             replayable_reasoning=True,
         )
+        serialized_item = copy.deepcopy(persisted_item)
+        serialized_item.pop("content")
         resumed = router_module.normalize_responses_request(
             {
                 "input": [
-                    persisted_item,
+                    serialized_item,
                     {
                         "type": "message",
                         "role": "user",
@@ -509,12 +511,93 @@ context = 32768
         )
 
         self.assertEqual(persisted_item["content"][0]["type"], "text")
-        self.assertEqual(
-            persisted_item["encrypted_content"],
-            router_module.MARATHON_LOCAL_REASONING_MARKER,
+        self.assertTrue(
+            persisted_item["encrypted_content"].startswith(
+                router_module.MARATHON_LOCAL_REASONING_CAPSULE_PREFIX
+            )
         )
+        self.assertNotIn("synthetic reasoning", persisted_item["encrypted_content"])
         self.assertNotIn("status", persisted_item)
         self.assertEqual(resumed["input"][0], persisted_item)
+
+    def test_local_reasoning_capsule_preserves_checkpoint_prefix(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        persisted_reasoning = state.sanitize_output_item(
+            {
+                "type": "reasoning",
+                "summary": [],
+                "content": [
+                    {"type": "reasoning_text", "text": "synthetic reasoning"}
+                ],
+            },
+            replayable_reasoning=True,
+        )
+        saved_request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "question"}],
+                },
+                persisted_reasoning,
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "answer"}],
+                },
+            ],
+        }
+        serialized_reasoning = copy.deepcopy(persisted_reasoning)
+        serialized_reasoning.pop("content")
+        resumed_request = router_module.normalize_responses_request(
+            {
+                "instructions": "synthetic system prompt",
+                "tools": [],
+                "input": [
+                    saved_request["input"][0],
+                    serialized_reasoning,
+                    saved_request["input"][2],
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "follow up"}
+                        ],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(
+            router_module._conversation_checkpoint_prefix_hash(saved_request, 3),
+            router_module._conversation_checkpoint_prefix_hash(resumed_request, 3),
+        )
+
+    def test_invalid_local_reasoning_capsule_is_not_replayed(self) -> None:
+        normalized = router_module.normalize_responses_request(
+            {
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "summary": [],
+                        "encrypted_content": (
+                            router_module.MARATHON_LOCAL_REASONING_CAPSULE_PREFIX
+                            + "not-valid-base64"
+                        ),
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "synthetic follow-up",
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(len(normalized["input"]), 1)
+        self.assertEqual(normalized["input"][0]["role"], "user")
 
     def test_unmarked_plaintext_reasoning_is_not_replayed(self) -> None:
         historical = {
@@ -2261,9 +2344,10 @@ context = 32768
             event for event in streamed if event["type"] == "response.output_item.done"
         )
         self.assertEqual(done["item"]["content"][0]["type"], "text")
-        self.assertEqual(
-            done["item"]["encrypted_content"],
-            router_module.MARATHON_LOCAL_REASONING_MARKER,
+        self.assertTrue(
+            done["item"]["encrypted_content"].startswith(
+                router_module.MARATHON_LOCAL_REASONING_CAPSULE_PREFIX
+            )
         )
         self.assertEqual(response["output"][0]["content"][0]["type"], "text")
 
