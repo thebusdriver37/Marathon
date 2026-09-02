@@ -2904,7 +2904,10 @@ class RouterState:
                 if event_type in CODEX_STREAM_EVENT_TYPES:
                     await send_event(event)
 
-        backend_response = completed_response or {}
+        if completed_response is None:
+            raise RuntimeError("backend stream ended before response.completed")
+
+        backend_response = completed_response
         if output_items:
             backend_response["output"] = list(output_items)
         elif not isinstance(backend_response.get("output"), list):
@@ -3238,30 +3241,25 @@ class RouterState:
             forward_request,
             metadata.conversation_item_count,
         )
-        if resumed_prefix_hash != metadata.conversation_prefix_hash:
-            current_input = forward_request.get("input")
-            current_item_count = (
-                len(current_input) if isinstance(current_input, list) else 0
-            )
-            await asyncio.to_thread(self.slot_checkpoint_store.discard, record)
-            return {
-                "mode": "conversation-checkpoint-miss",
-                "status": "skipped",
-                "reason": "checkpoint is not a prefix of the resumed conversation",
-                "checkpoint_items": metadata.conversation_item_count,
-                "current_items": current_item_count,
-            }
-
-        await asyncio.to_thread(self.slot_checkpoint_store.mark_used, record)
+        prefix_matches = resumed_prefix_hash == metadata.conversation_prefix_hash
+        current_input = forward_request.get("input")
+        current_item_count = (
+            len(current_input) if isinstance(current_input, list) else 0
+        )
+        # Codex can serialize the same persisted history differently after a
+        # resume. The checkpoint key, backend, model, and stable scaffold were
+        # already verified above. Let llama.cpp's cache_prompt token comparison
+        # keep the exact common prefix and discard any divergent suffix.
         try:
             restored = await self.restore_slot(profile, record.snapshot_path.name)
         except Exception as exc:
-            await asyncio.to_thread(self.slot_checkpoint_store.discard, record)
             return {
                 "mode": "conversation-checkpoint-restore-error",
                 "status": "error",
                 "error": str(exc),
+                "checkpoint_preserved": True,
             }
+        await asyncio.to_thread(self.slot_checkpoint_store.mark_used, record)
 
         return {
             "mode": "restore-conversation-checkpoint",
@@ -3271,6 +3269,11 @@ class RouterState:
             "context_tokens": (
                 record.metadata.context_tokens if record.metadata is not None else 0
             ),
+            "prefix_validation": (
+                "matched" if prefix_matches else "delegated-to-backend-token-match"
+            ),
+            "checkpoint_items": metadata.conversation_item_count,
+            "current_items": current_item_count,
             "restore_result": restored,
         }
 

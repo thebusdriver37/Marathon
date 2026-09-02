@@ -2154,7 +2154,7 @@ context = 32768
                 restored["snapshot_filename"],
             )
 
-    def test_rolling_checkpoint_rejects_resumed_rollback_before_restore(self) -> None:
+    def test_rolling_checkpoint_restores_rollback_for_backend_token_match(self) -> None:
         profile = fixture_profile()
         saved_input = [
             {
@@ -2189,7 +2189,11 @@ context = 32768
             ),
             context_tokens=100_000,
         )
-        record = SimpleNamespace(metadata=metadata)
+        record = SimpleNamespace(
+            metadata=metadata,
+            snapshot_path=Path("conversation__synthetic.bin"),
+            size_bytes=1_000_000,
+        )
         state = object.__new__(router_module.RouterState)
         state.slot_snapshots_enabled = True
         state.backend_cache_id = "backend-v1"
@@ -2211,15 +2215,64 @@ context = 32768
             )
         )
 
-        self.assertEqual(result["mode"], "conversation-checkpoint-miss")
+        self.assertEqual(result["mode"], "restore-conversation-checkpoint")
+        self.assertEqual(result["status"], "restored")
         self.assertEqual(
-            result["reason"],
-            "checkpoint is not a prefix of the resumed conversation",
+            result["prefix_validation"],
+            "delegated-to-backend-token-match",
         )
         self.assertEqual(result["checkpoint_items"], 3)
         self.assertEqual(result["current_items"], 2)
-        state.slot_checkpoint_store.discard.assert_called_once_with(record)
-        state.restore_slot.assert_not_awaited()
+        state.slot_checkpoint_store.discard.assert_not_called()
+        state.slot_checkpoint_store.mark_used.assert_called_once_with(record)
+        state.restore_slot.assert_awaited_once_with(profile, record.snapshot_path.name)
+
+    def test_rolling_checkpoint_restore_error_preserves_recovery_copy(self) -> None:
+        profile = fixture_profile()
+        request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "question"}],
+                }
+            ],
+        }
+        metadata = SimpleNamespace(
+            conversation_item_count=1,
+            conversation_prefix_hash=router_module._conversation_checkpoint_prefix_hash(
+                request,
+                1,
+            ),
+            context_tokens=100_000,
+        )
+        record = SimpleNamespace(
+            metadata=metadata,
+            snapshot_path=Path("conversation__synthetic.bin"),
+            size_bytes=1_000_000,
+        )
+        state = object.__new__(router_module.RouterState)
+        state.slot_snapshots_enabled = True
+        state.backend_cache_id = "backend-v1"
+        state.awaiting_post_compaction_checkpoints = set()
+        state.slot_checkpoint_store = mock.Mock()
+        state.slot_checkpoint_store.find.return_value = record
+        state.restore_slot = mock.AsyncMock(side_effect=RuntimeError("worker reloading"))
+
+        result = asyncio.run(
+            state.prepare_conversation_checkpoint(
+                profile,
+                request,
+                "synthetic-session",
+            )
+        )
+
+        self.assertEqual(result["mode"], "conversation-checkpoint-restore-error")
+        self.assertTrue(result["checkpoint_preserved"])
+        state.slot_checkpoint_store.discard.assert_not_called()
+        state.slot_checkpoint_store.mark_used.assert_not_called()
 
     def test_rolling_checkpoint_ignores_non_prompt_item_metadata(self) -> None:
         saved_request = {
@@ -2599,6 +2652,41 @@ context = 32768
         self.assertEqual(response["id"], "resp_slow")
         self.assertEqual(response["usage"]["output_tokens"], 1)
         self.assertEqual(state.http_client.headers, {})
+
+    def test_truncated_backend_stream_is_not_accepted_as_empty_completion(self) -> None:
+        profile = fixture_profile(65_536)
+
+        class Content:
+            async def iter_chunked(self, _size: int):
+                yield b'data: {"type":"response.created"}\n\n'
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Client:
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+        state = object.__new__(router_module.RouterState)
+        state.http_client = Client()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "backend stream ended before response.completed",
+        ):
+            asyncio.run(
+                state._request_responses_stream(
+                    profile,
+                    {"input": [], "tools": []},
+                )
+            )
 
     def test_streamed_reasoning_uses_resume_safe_content_type(self) -> None:
         profile = fixture_profile(65_536)
