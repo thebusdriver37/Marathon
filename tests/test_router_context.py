@@ -1939,14 +1939,12 @@ context = 32768
         self.assertEqual(state.pending_checkpoints, {})
         self.assertEqual(state.awaiting_post_compaction_checkpoints, set())
 
-    def test_rolling_checkpoint_skips_small_growth_at_large_context(self) -> None:
+    def test_rolling_checkpoint_saves_after_configured_growth(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)
         state.available_profiles = {profile.slug: profile}
         state.backend_cache_id = "backend-v1"
-        state.slot_snapshot_min_token_growth = (
-            router_module.DEFAULT_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH
-        )
+        state.slot_snapshot_min_token_growth = 4_096
         state.backend_lock = asyncio.Lock()
         state.live_slot_by_model = {profile.slug: "response-two"}
         state.live_prompt_cache_key_by_model = {
@@ -1957,7 +1955,7 @@ context = 32768
             profile_slug=profile.slug,
             backend_cache_id="backend-v1",
             scaffold_fingerprint="synthetic-scaffold",
-            context_tokens=200_000,
+            context_tokens=62_127,
         )
         state.slot_checkpoint_store = mock.Mock()
         state.slot_checkpoint_store.find_any.return_value = SimpleNamespace(
@@ -1974,26 +1972,30 @@ context = 32768
         state.slot_checkpoint_store.profile_dir.return_value = Path(temporary.name)
         state.slot_checkpoint_store.commit.return_value = {"status": "saved"}
         state.save_slot = mock.AsyncMock(return_value={"status": "saved"})
+        state._prefill_conversation_checkpoint_boundary = mock.AsyncMock(
+            return_value={
+                "context_tokens": 66_561,
+                "conversation_item_count": 172,
+                "conversation_prefix_hash": "a" * 64,
+            }
+        )
         candidate = router_module.ConversationCheckpointCandidate(
             profile_slug=profile.slug,
             profile_alias=profile.alias,
             prompt_cache_key="synthetic-session",
             response_id="response-two",
             scaffold_fingerprint="synthetic-scaffold",
-            context_tokens=216_000,
+            context_tokens=66_561,
+            checkpoint_request={"input": []},
         )
 
         result = asyncio.run(
             state._save_conversation_checkpoint(candidate, force=False)
         )
 
-        self.assertEqual(result["status"], "skipped")
-        self.assertEqual(
-            result["reason"],
-            "conversation has not grown enough since the last checkpoint",
-        )
-        self.assertEqual(result["required_token_growth"], 20_000)
-        state.save_slot.assert_not_awaited()
+        self.assertEqual(result["status"], "saved")
+        state.save_slot.assert_awaited_once_with(profile, "pending-checkpoint.bin")
+        state.slot_checkpoint_store.commit.assert_called_once()
 
     def test_checkpoint_schedule_reuses_completed_conversation_input(self) -> None:
         profile = fixture_profile()

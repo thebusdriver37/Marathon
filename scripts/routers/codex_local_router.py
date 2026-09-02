@@ -122,7 +122,6 @@ DEFAULT_SLOT_SNAPSHOT_TTL_SECONDS = 2 * 24 * 60 * 60
 DEFAULT_SLOT_SNAPSHOT_IDLE_SECONDS = 60
 DEFAULT_SLOT_SNAPSHOT_MIN_TOKENS = 16_384
 DEFAULT_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH = 16_384
-SLOT_SNAPSHOT_MIN_GROWTH_PERCENT = 10
 DEFAULT_SLOT_SNAPSHOT_CLEAN_STARTUP = False
 DEFAULT_SLOT_SNAPSHOTS_ENABLED = True
 DEFAULT_STARTER_CACHE_ENABLED = True
@@ -3596,15 +3595,7 @@ class RouterState:
                     == candidate.scaffold_fingerprint
                 )
                 growth = candidate.context_tokens - metadata.context_tokens
-                adaptive_growth = (
-                    max(0, metadata.context_tokens)
-                    * SLOT_SNAPSHOT_MIN_GROWTH_PERCENT
-                    + 99
-                ) // 100
-                required_growth = max(
-                    self.slot_snapshot_min_token_growth,
-                    adaptive_growth,
-                )
+                required_growth = self.slot_snapshot_min_token_growth
                 if (
                     not force
                     and compatible
