@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import NoReturn
 
 from rich.console import Console
 from rich.table import Table
@@ -16,7 +18,7 @@ from . import __version__
 from .catalog import discover_models, format_size
 from .instance import normalize_instance_name, resolve_instance
 from .model_library import register_model_root
-from .runtime import request_stop, runtime_paths
+from .runtime import automatic_launch_instance, request_stop, runtime_paths
 from .telemetry import resolve_run, summarize_run
 from .remote import run_remote_host_command
 from .ui import (
@@ -305,6 +307,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _relaunch_as_instance(name: str, argv: list[str] | None) -> NoReturn:
+    """Replace this process with an explicitly identified named instance."""
+
+    original_arguments = list(sys.argv[1:] if argv is None else argv)
+    executable = sys.executable
+    os.execv(
+        executable,
+        [
+            executable,
+            "-m",
+            "marathon_app",
+            "--instance",
+            name,
+            *original_arguments,
+        ],
+    )
+    raise RuntimeError("failed to relaunch Marathon")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -312,6 +333,17 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         Console().print(f"[bold red]Invalid instance configuration:[/bold red] {error}")
         return 2
+    if args.instance is None and args.command == "codex":
+        try:
+            automatic = automatic_launch_instance()
+        except RuntimeError as error:
+            Console().print(f"[bold red]Marathon could not start:[/bold red] {error}")
+            return 2
+        if automatic is not None:
+            Console().print(
+                f"[dim]Default Marathon is active. Starting instance '{automatic}'.[/dim]"
+            )
+            return _relaunch_as_instance(automatic, argv)
     if args.command == "models":
         return _models(args.targets)
     if args.command == "status":

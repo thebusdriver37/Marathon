@@ -55,6 +55,7 @@ SLOT_ROOT = Path(
 SELECTION_FILE = CONFIG_DIR / "selection.json"
 SESSION_FILE = RUNTIME_DIR / "session.json"
 LOCK_FILE = RUNTIME_DIR / "runtime.lock"
+AUTOMATIC_INSTANCE_NAMES = ("second", "third")
 
 
 @dataclass(frozen=True)
@@ -433,6 +434,38 @@ def request_stop(instance: str | None = None) -> bool:
     return stopped
 
 
+def _runtime_lock_held(instance: str | None = None) -> bool:
+    """Return whether an instance lock is currently owned by another process."""
+
+    lock_file = runtime_paths(normalize_instance_name(instance)).lock_file
+    try:
+        handle = lock_file.open("r", encoding="utf-8")
+    except OSError:
+        return False
+    with handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return False
+
+
+def automatic_launch_instance() -> str | None:
+    """Choose a free secondary identity for a plain interactive launch."""
+
+    if not sys.stdin.isatty() or not _runtime_lock_held():
+        return None
+    for name in AUTOMATIC_INSTANCE_NAMES:
+        if not _runtime_lock_held(name):
+            return name
+    raise RuntimeError(
+        "Marathon's default, second, and third instances are already open"
+    )
+
+
 def _set_parent_death_signal() -> None:
     if sys.platform.startswith("linux"):
         libc = ctypes.CDLL(None)
@@ -570,7 +603,8 @@ class Runtime:
             if self.instance.name is None:
                 message = (
                     f"Marathon is already open{detail}. Return to that terminal, "
-                    "or run 'marathon stop' if you want to close it."
+                    "run 'marathon --instance second' to open another independent "
+                    "runtime, or run 'marathon stop' if you want to close it."
                 )
             else:
                 stop_command = " ".join(

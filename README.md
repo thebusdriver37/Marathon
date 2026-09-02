@@ -41,7 +41,8 @@ Its writable Codex configuration and sessions stay separate from stock Codex whi
 
 ## Multiple Instances
 
-Use a name to run another independent Marathon runtime on the same machine:
+When the default instance is already running, another plain interactive `marathon` launch automatically uses `second`, then `third`.
+Use a name when you want a stable custom identity:
 
 ```bash
 marathon --instance gpu23
@@ -135,7 +136,7 @@ MARATHON_MODEL_DIRS=/mnt/models:/data/gguf marathon
 
 | Command | Purpose |
 |---|---|
-| `marathon` | Load the remembered model and open Codex |
+| `marathon` | Open Codex, automatically using a free local instance |
 | `marathon --instance NAME` | Start an independent named instance |
 | `marathon setup` | Find, add, or download a model |
 | `marathon dashboard` | Open advanced model, profile, frontend, and tuning controls |

@@ -752,6 +752,38 @@ class InstanceTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_automatic_launch_uses_first_free_secondary_instance(self) -> None:
+        held = {None, "second"}
+        with (
+            mock.patch.object(
+                runtime_module.sys,
+                "stdin",
+                mock.Mock(isatty=mock.Mock(return_value=True)),
+            ),
+            mock.patch.object(
+                runtime_module,
+                "_runtime_lock_held",
+                side_effect=lambda instance=None: instance in held,
+            ),
+        ):
+            selected = runtime_module.automatic_launch_instance()
+
+        self.assertEqual(selected, "third")
+
+    def test_noninteractive_launch_preserves_default_instance(self) -> None:
+        with (
+            mock.patch.object(
+                runtime_module.sys,
+                "stdin",
+                mock.Mock(isatty=mock.Mock(return_value=False)),
+            ),
+            mock.patch.object(runtime_module, "_runtime_lock_held") as held,
+        ):
+            selected = runtime_module.automatic_launch_instance()
+
+        self.assertIsNone(selected)
+        held.assert_not_called()
+
     def test_pool_backend_leases_different_workers_without_gpu_pinning(self) -> None:
         model = fixture_model("qwen3.8-27b")
         profile = catalog.find_profile(model, "auto", "codex")
@@ -1214,8 +1246,12 @@ class RuntimeTests(unittest.TestCase):
                 contender = Runtime(model, profile)
                 owner.acquire()
                 session_file.write_text('{"supervisor_pid": 1}\n', encoding="utf-8")
-                with self.assertRaisesRegex(RuntimeError, "already open"):
+                with self.assertRaisesRegex(RuntimeError, "already open") as raised:
                     contender.acquire()
+                self.assertIn(
+                    "marathon --instance second",
+                    str(raised.exception),
+                )
                 contender.cleanup()
                 self.assertTrue(session_file.exists())
                 owner.cleanup()
@@ -1493,6 +1529,24 @@ class FrontendTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         run.assert_called_once_with([], "gpu23")
+
+    def test_plain_interactive_launch_automatically_uses_a_free_instance(self) -> None:
+        with (
+            mock.patch.object(
+                main_module,
+                "automatic_launch_instance",
+                return_value="second",
+            ),
+            mock.patch.object(
+                main_module, "_relaunch_as_instance", return_value=0
+            ) as relaunch,
+            mock.patch.object(main_module, "run_codex_default") as run,
+        ):
+            result = main_module.main([])
+
+        self.assertEqual(result, 0)
+        relaunch.assert_called_once_with("second", [])
+        run.assert_not_called()
 
     def test_codex_child_uses_marathon_resume_command(self) -> None:
         model = fixture_model()

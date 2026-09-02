@@ -17,6 +17,8 @@ The `marathon dashboard` command exposes model profiles, alternate frontends, wa
 
 The default instance preserves Marathon's original paths and configured ports.
 A named instance uses the same model catalog and runtime profiles but owns independent mutable state.
+When the default instance is active, another plain interactive `marathon` launch automatically selects `second`, then `third`.
+Pass `--instance NAME` when you want a stable custom identity.
 
 Configure local GPU policy in `~/.config/marathon/catalog.toml`:
 
