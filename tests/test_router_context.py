@@ -2976,6 +2976,117 @@ context = 32768
             level="warning",
         )
 
+    def test_stalled_compaction_recovers_with_final_message(self) -> None:
+        profile = fixture_profile(65_536)
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        stalled = {
+            "output": [{"type": "reasoning"}],
+            "usage": {"input_tokens": 10_000, "output_tokens": 8_192},
+        }
+        recovered = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "Fresh compact summary"}
+                    ],
+                }
+            ],
+            "usage": {"input_tokens": 10_500, "output_tokens": 80},
+        }
+        state._request_json = mock.AsyncMock(side_effect=[stalled, recovered])
+
+        response, items, _iterations = asyncio.run(
+            state._run_responses_loop(
+                profile=profile,
+                forward_request={
+                    "input": [],
+                    "tools": [],
+                    "max_output_tokens": 8_192,
+                    "chat_template_kwargs": {
+                        "enable_thinking": True,
+                        "reasoning_effort": "high",
+                    },
+                    "client_metadata": {
+                        "x-codex-turn-metadata": json.dumps(
+                            {"request_kind": "compaction"}
+                        )
+                    },
+                },
+                web_search_enabled=False,
+            )
+        )
+
+        self.assertEqual(response["output"], recovered["output"])
+        self.assertEqual(items[-1]["phase"], "final_answer")
+        second_request = state._request_json.await_args_list[1].args[3]
+        self.assertNotIn("tool_choice", second_request)
+        self.assertEqual(
+            second_request["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
+        self.assertIn(
+            "context summary",
+            second_request["input"][-1]["content"][0]["text"],
+        )
+        state.telemetry.emit.assert_called_once_with(
+            "router.response.stalled_recovery",
+            {
+                "attempt": 1,
+                "reason": "output_limit",
+                "output_tokens": 8_192,
+                "available_tools": 0,
+            },
+            level="warning",
+        )
+
+    def test_empty_response_retries_then_fails_instead_of_completing(self) -> None:
+        profile = fixture_profile(65_536)
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        empty = {
+            "output": [],
+            "usage": {"input_tokens": 10_000, "output_tokens": 0},
+        }
+        state._request_json = mock.AsyncMock(side_effect=[empty, empty])
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "backend response completed without an assistant message or tool call",
+        ):
+            asyncio.run(
+                state._run_responses_loop(
+                    profile=profile,
+                    forward_request={
+                        "input": [],
+                        "tools": [],
+                        "max_output_tokens": 8_192,
+                    },
+                    web_search_enabled=False,
+                )
+            )
+
+        self.assertEqual(state._request_json.await_count, 2)
+        retry = state._request_json.await_args_list[1].args[3]
+        self.assertEqual(
+            retry["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
+        state.telemetry.emit.assert_called_once_with(
+            "router.response.stalled_recovery",
+            {
+                "attempt": 1,
+                "reason": "missing_actionable_output",
+                "output_tokens": 0,
+                "available_tools": 0,
+            },
+            level="warning",
+        )
+
     def test_tool_protocol_failure_retries_once_with_smaller_budget(self) -> None:
         profile = fixture_profile(65_536)
         state = object.__new__(router_module.RouterState)

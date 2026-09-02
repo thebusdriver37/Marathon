@@ -1010,15 +1010,19 @@ def _response_stalled_at_output_limit(
     output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
     if not isinstance(output_tokens, int) or output_tokens < output_limit:
         return False
+    return not _response_has_actionable_output(items)
+
+
+def _response_has_actionable_output(items: list[dict[str, Any]]) -> bool:
     actionable_types = {"function_call", "custom_tool_call", "local_shell_call"}
     for item in items:
         if item.get("type") in actionable_types:
-            return False
+            return True
         if _is_assistant_message_item(item) and not _is_ellipsis_filler_text(
             _assistant_message_text(item)
         ):
-            return False
-    return True
+            return True
+    return False
 
 
 def _stalled_recovery_message() -> dict[str, Any]:
@@ -1033,6 +1037,30 @@ def _stalled_recovery_message() -> dict[str, Any]:
                     "producing a message or tool call. Do not continue internal "
                     "analysis. Use one available tool now to make concrete progress; "
                     "split large edits into smaller tool calls."
+                ),
+            }
+        ],
+    }
+
+
+def _stalled_final_response_recovery_message(
+    request_kind: str | None,
+) -> dict[str, Any]:
+    requested_output = (
+        "the requested context summary"
+        if request_kind == "compaction"
+        else "the requested final response"
+    )
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "Your previous response ended without producing an assistant "
+                    f"message. Do not continue internal analysis. Return {requested_output} "
+                    "now, concisely enough to finish within the generation budget."
                 ),
             }
         ],
@@ -4330,32 +4358,69 @@ class RouterState:
 
             cumulative_items.extend(iter_items)
 
-            if (
-                _response_stalled_at_output_limit(
-                    response,
-                    iter_items,
-                    attempt_output_limit,
-                )
-                and stalled_recoveries < max_stalled_recoveries
-                and bool(request.get("tools"))
-            ):
+            has_actionable_output = _response_has_actionable_output(iter_items)
+            stalled_at_output_limit = _response_stalled_at_output_limit(
+                response,
+                iter_items,
+                attempt_output_limit,
+            )
+            if not has_actionable_output and stalled_recoveries < max_stalled_recoveries:
                 stalled_recoveries += 1
+                tools_available = bool(request.get("tools"))
+                usage = response.get("usage")
+                output_tokens = (
+                    usage.get("output_tokens") if isinstance(usage, dict) else None
+                )
                 self.telemetry.emit(
                     "router.response.stalled_recovery",
                     {
                         "attempt": stalled_recoveries,
-                        "output_tokens": attempt_output_limit,
+                        "reason": (
+                            "output_limit"
+                            if stalled_at_output_limit
+                            else "missing_actionable_output"
+                        ),
+                        "output_tokens": output_tokens,
                         "available_tools": len(request.get("tools") or []),
                     },
                     level="warning",
                 )
                 request = copy.deepcopy(request)
-                recovery_items = [_stalled_recovery_message()]
+                recovery_items = [
+                    _stalled_recovery_message()
+                    if tools_available
+                    else _stalled_final_response_recovery_message(
+                        _codex_request_kind(request)
+                    )
+                ]
                 request["input"] = list(request.get("input") or []) + recovery_items
                 request_suffix.extend(copy.deepcopy(recovery_items))
-                request["tool_choice"] = "required"
+                if tools_available:
+                    request["tool_choice"] = "required"
+                else:
+                    request.pop("tool_choice", None)
+                    template_kwargs = request.get("chat_template_kwargs")
+                    template_kwargs = (
+                        copy.deepcopy(template_kwargs)
+                        if isinstance(template_kwargs, dict)
+                        else {}
+                    )
+                    template_kwargs.pop("reasoning_effort", None)
+                    template_kwargs["enable_thinking"] = False
+                    request["chat_template_kwargs"] = template_kwargs
                 persist_progress()
                 continue
+
+            if not has_actionable_output:
+                reason = (
+                    "after reaching the output-token limit"
+                    if stalled_at_output_limit
+                    else "with no usable output"
+                )
+                raise RuntimeError(
+                    "backend response completed without an assistant message or tool call "
+                    f"{reason}"
+                )
 
             if not web_search_enabled:
                 break
