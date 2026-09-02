@@ -342,6 +342,31 @@ class RollingCheckpointStore:
             return None
         return record
 
+    def find_compatible(
+        self,
+        *,
+        profile_slug: str,
+        profile_alias: str,
+        prompt_cache_key: str,
+        backend_cache_id: str,
+    ) -> CheckpointRecord | None:
+        """Find a snapshot that this backend can safely token-match."""
+
+        key_hash = conversation_key_hash(prompt_cache_key)
+        snapshot_path = self.profile_dir(profile_slug) / self.snapshot_filename(key_hash)
+        record = self._record(snapshot_path)
+        if record is None or record.metadata is None:
+            return None
+        metadata = record.metadata
+        if (
+            metadata.key_hash != key_hash
+            or metadata.profile_slug != profile_slug
+            or metadata.profile_alias != profile_alias
+            or metadata.backend_cache_id != backend_cache_id
+        ):
+            return None
+        return record
+
     def find_any(
         self,
         *,

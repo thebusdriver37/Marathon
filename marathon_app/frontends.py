@@ -88,7 +88,8 @@ def codex_command(
     provider = (
         'model_providers.marathon-local={ name = "Marathon Local", '
         f'base_url = "{runtime.router_url}/v1", wire_api = "responses", '
-        "requires_openai_auth = false, supports_websockets = true }"
+        "requires_openai_auth = false, supports_websockets = true, "
+        "stream_idle_timeout_ms = 900000 }"
     )
     command = [
         binary,

@@ -2187,6 +2187,7 @@ context = 32768
                     len(saved_input),
                 )
             ),
+            scaffold_fingerprint="synthetic-scaffold",
             context_tokens=100_000,
         )
         record = SimpleNamespace(
@@ -2199,7 +2200,7 @@ context = 32768
         state.backend_cache_id = "backend-v1"
         state.awaiting_post_compaction_checkpoints = set()
         state.slot_checkpoint_store = mock.Mock()
-        state.slot_checkpoint_store.find.return_value = record
+        state.slot_checkpoint_store.find_compatible.return_value = record
         state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})
         resumed_request = {
             "instructions": "synthetic system prompt",
@@ -2246,6 +2247,7 @@ context = 32768
                 request,
                 1,
             ),
+            scaffold_fingerprint="synthetic-scaffold",
             context_tokens=100_000,
         )
         record = SimpleNamespace(
@@ -2258,7 +2260,7 @@ context = 32768
         state.backend_cache_id = "backend-v1"
         state.awaiting_post_compaction_checkpoints = set()
         state.slot_checkpoint_store = mock.Mock()
-        state.slot_checkpoint_store.find.return_value = record
+        state.slot_checkpoint_store.find_compatible.return_value = record
         state.restore_slot = mock.AsyncMock(side_effect=RuntimeError("worker reloading"))
 
         result = asyncio.run(
@@ -2436,7 +2438,7 @@ context = 32768
             self.assertEqual(state._request_json.await_count, 5)
             state.save_slot.assert_awaited_once()
 
-    def test_rolling_checkpoint_rejects_changed_scaffold(self) -> None:
+    def test_rolling_checkpoint_delegates_changed_scaffold_to_backend(self) -> None:
         profile = fixture_profile()
         with tempfile.TemporaryDirectory() as temporary:
             slot_root = Path(temporary)
@@ -2526,8 +2528,16 @@ context = 32768
                 )
             )
 
-            self.assertEqual(result["mode"], "conversation-checkpoint-miss")
-            state.restore_slot.assert_not_awaited()
+            self.assertEqual(result["mode"], "restore-conversation-checkpoint")
+            self.assertEqual(result["status"], "restored")
+            self.assertEqual(
+                result["scaffold_validation"],
+                "delegated-to-backend-token-match",
+            )
+            state.restore_slot.assert_awaited_once_with(
+                profile,
+                mock.ANY,
+            )
 
     def test_starter_cache_fingerprint_tracks_scaffold_and_backend(self) -> None:
         profile = fixture_profile()

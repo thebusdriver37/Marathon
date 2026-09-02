@@ -3216,12 +3216,11 @@ class RouterState:
             forward_request,
         )
         record = await asyncio.to_thread(
-            self.slot_checkpoint_store.find,
+            self.slot_checkpoint_store.find_compatible,
             profile_slug=profile.slug,
             profile_alias=profile.alias,
             prompt_cache_key=prompt_cache_key,
             backend_cache_id=self.backend_cache_id,
-            scaffold_fingerprint=scaffold_fingerprint,
         )
         if record is None:
             return {
@@ -3237,6 +3236,7 @@ class RouterState:
                 "status": "skipped",
                 "reason": "checkpoint has no verifiable conversation prefix",
             }
+        scaffold_matches = metadata.scaffold_fingerprint == scaffold_fingerprint
         resumed_prefix_hash = _conversation_checkpoint_prefix_hash(
             forward_request,
             metadata.conversation_item_count,
@@ -3246,10 +3246,11 @@ class RouterState:
         current_item_count = (
             len(current_input) if isinstance(current_input, list) else 0
         )
-        # Codex can serialize the same persisted history differently after a
-        # resume. The checkpoint key, backend, model, and stable scaffold were
-        # already verified above. Let llama.cpp's cache_prompt token comparison
-        # keep the exact common prefix and discard any divergent suffix.
+        # Codex can serialize the same persisted history or request options
+        # differently after a resume. The checkpoint key, backend, and model
+        # were already verified above. Let llama.cpp's cache_prompt token
+        # comparison keep the exact common prefix and discard any divergent
+        # suffix.
         try:
             restored = await self.restore_slot(profile, record.snapshot_path.name)
         except Exception as exc:
@@ -3271,6 +3272,11 @@ class RouterState:
             ),
             "prefix_validation": (
                 "matched" if prefix_matches else "delegated-to-backend-token-match"
+            ),
+            "scaffold_validation": (
+                "matched"
+                if scaffold_matches
+                else "delegated-to-backend-token-match"
             ),
             "checkpoint_items": metadata.conversation_item_count,
             "current_items": current_item_count,

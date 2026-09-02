@@ -1457,6 +1457,7 @@ class FrontendTests(unittest.TestCase):
         joined = " ".join(command)
         self.assertIn("marathon-local", joined)
         self.assertIn("model_catalog_json", joined)
+        self.assertIn("stream_idle_timeout_ms = 900000", joined)
         self.assertNotIn("model_context_window=262144", command)
         self.assertNotIn("model_auto_compact_token_limit=229376", command)
         self.assertNotIn("--ignore-user-config", command)
