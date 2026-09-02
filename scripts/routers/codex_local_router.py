@@ -1197,6 +1197,11 @@ def _external_model_profiles() -> dict[str, ModelProfile]:
             ),
             supports_slots=False,
             temperature=configured.temperature,
+            default_reasoning_level=configured.default_reasoning_level,
+            supported_reasoning_levels=tuple(
+                (level.effort, level.description)
+                for level in configured.reasoning_levels
+            ),
             input_modalities=configured.input_modalities,
             external=True,
             api_key_env=configured.api_key_env,

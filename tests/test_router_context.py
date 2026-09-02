@@ -139,6 +139,12 @@ context = 262144
 auto_compact_token_limit = 229376
 truncation_limit = 221184
 temperature = 0.0
+default_reasoning_level = "xhigh"
+reasoning_levels = [
+  { effort = "none", description = "Off" },
+  { effort = "medium", description = "Balanced" },
+  { effort = "xhigh", description = "Deep" },
+]
 """.strip()
                 + "\n",
                 encoding="utf-8",
@@ -162,6 +168,11 @@ temperature = 0.0
         self.assertEqual(profile.auto_compact_token_limit, 229_376)
         self.assertEqual(profile.truncation_limit, 221_184)
         self.assertEqual(profile.temperature, 0.0)
+        self.assertEqual(profile.default_reasoning_level, "xhigh")
+        self.assertEqual(
+            profile.supported_reasoning_levels,
+            (("none", "Off"), ("medium", "Balanced"), ("xhigh", "Deep")),
+        )
         self.assertTrue(profile.external)
         self.assertFalse(profile.supports_slots)
         self.assertIn("deepseek-spark", available)

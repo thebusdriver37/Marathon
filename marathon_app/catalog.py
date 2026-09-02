@@ -169,6 +169,42 @@ class ExternalModel:
     supports_parallel_tool_calls: bool = False
     temperature: float | None = None
     input_modalities: tuple[str, ...] = ("text",)
+    reasoning_levels: tuple[ReasoningLevel, ...] = ()
+    default_reasoning_level: str | None = None
+
+
+def _reasoning_configuration(
+    raw: dict[str, Any],
+    owner: str,
+) -> tuple[tuple[ReasoningLevel, ...], str | None]:
+    raw_levels = raw.get("reasoning_levels", [])
+    if not isinstance(raw_levels, list) or any(
+        not isinstance(item, dict) for item in raw_levels
+    ):
+        raise ValueError(f"{owner} reasoning_levels must be a list of tables")
+    levels = tuple(
+        ReasoningLevel(
+            effort=str(item.get("effort", "")).strip(),
+            description=str(item.get("description", "")).strip(),
+        )
+        for item in raw_levels
+    )
+    efforts = [level.effort for level in levels]
+    if any(not effort for effort in efforts):
+        raise ValueError(f"{owner} has an empty reasoning effort")
+    if len(efforts) != len(set(efforts)):
+        raise ValueError(f"{owner} has duplicate reasoning efforts")
+
+    default = raw.get("default_reasoning_level")
+    if default is not None:
+        default = str(default).strip()
+        if default not in efforts:
+            raise ValueError(
+                f"{owner} default reasoning effort {default!r} is not supported"
+            )
+    elif levels:
+        raise ValueError(f"{owner} has reasoning levels without a default")
+    return levels, default
 
 
 def _merge_catalog(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -349,6 +385,10 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
                 f"external model {model_id} input_modalities may contain only text and image"
             )
 
+        reasoning_levels, default_reasoning_level = _reasoning_configuration(
+            raw,
+            f"external model {model_id}",
+        )
         temperature_raw = raw.get("temperature")
         result.append(
             ExternalModel(
@@ -374,6 +414,8 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
                     else None
                 ),
                 input_modalities=modalities,
+                reasoning_levels=reasoning_levels,
+                default_reasoning_level=default_reasoning_level,
             )
         )
     return tuple(result)
@@ -557,37 +599,10 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
 def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
     result: list[Family] = []
     for raw in (catalog or load_catalog()).get("families", []):
-        raw_reasoning_levels = raw.get("reasoning_levels", [])
-        if not isinstance(raw_reasoning_levels, list) or any(
-            not isinstance(item, dict) for item in raw_reasoning_levels
-        ):
-            raise ValueError(
-                f"family {raw['id']} reasoning_levels must be a list of tables"
-            )
-        reasoning_levels = tuple(
-            ReasoningLevel(
-                effort=str(item["effort"]).strip(),
-                description=str(item.get("description", "")).strip(),
-            )
-            for item in raw_reasoning_levels
+        reasoning_levels, default_reasoning_level = _reasoning_configuration(
+            raw,
+            f"family {raw['id']}",
         )
-        efforts = [level.effort for level in reasoning_levels]
-        if any(not effort for effort in efforts):
-            raise ValueError(f"family {raw['id']} has an empty reasoning effort")
-        if len(efforts) != len(set(efforts)):
-            raise ValueError(f"family {raw['id']} has duplicate reasoning efforts")
-        default_reasoning_level = raw.get("default_reasoning_level")
-        if default_reasoning_level is not None:
-            default_reasoning_level = str(default_reasoning_level).strip()
-            if default_reasoning_level not in efforts:
-                raise ValueError(
-                    f"family {raw['id']} default reasoning effort "
-                    f"{default_reasoning_level!r} is not supported"
-                )
-        elif reasoning_levels:
-            raise ValueError(
-                f"family {raw['id']} has reasoning levels without a default"
-            )
         profiles = tuple(
             Profile(
                 id=item["id"],
