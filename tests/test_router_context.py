@@ -1127,6 +1127,129 @@ context = 32768
         self.assertTrue(router_module._is_warmup_root(warmup))
         self.assertFalse(router_module._is_warmup_root(generated))
 
+    def test_non_generating_warmup_prepares_prefix_for_first_turn(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.lineage_lock = asyncio.Lock()
+        state.lineage = {}
+        state.last_response_by_model = {}
+        state.live_slot_by_model = {}
+        state.live_prompt_cache_key_by_model = {}
+        state.experimental_delta_only = False
+        state.slot_id = 0
+        state.backend_lock = asyncio.Lock()
+        state.prepare_starter_cache = mock.AsyncMock(
+            side_effect=[
+                {
+                    "mode": "restore-starter-cache",
+                    "status": "restored",
+                },
+                {
+                    "mode": "starter-cache-miss",
+                    "status": "miss",
+                },
+            ]
+        )
+        state.erase_slot = mock.AsyncMock()
+        state._run_responses_loop = mock.AsyncMock(
+            return_value=(
+                {
+                    "id": "resp_first",
+                    "usage": {
+                        "input_tokens": 10_500,
+                        "input_tokens_details": {"cached_tokens": 8_000},
+                    },
+                },
+                [],
+                0,
+            )
+        )
+        state.schedule_conversation_checkpoint = mock.Mock(
+            return_value={"status": "scheduled"}
+        )
+        state.telemetry = mock.Mock()
+        state.trace_request = mock.Mock()
+        state.lock = threading.Lock()
+        state._trace_seq = 0
+        state._response_id_seq = 0
+        state.debug = False
+
+        warmup = asyncio.run(
+            state.process_websocket_create(
+                {
+                    "model": profile.slug,
+                    "prompt_cache_key": "session-a",
+                    "instructions": "stable system prompt",
+                    "tools": [],
+                    "input": [],
+                    "generate": False,
+                }
+            )
+        )
+
+        state.prepare_starter_cache.assert_awaited_once()
+        self.assertTrue(
+            state.prepare_starter_cache.await_args.kwargs["expandable_instructions"]
+        )
+        self.assertEqual(
+            state.live_slot_by_model[profile.slug],
+            warmup["response_id"],
+        )
+
+        first_turn = asyncio.run(
+            state.process_websocket_create(
+                {
+                    "model": profile.slug,
+                    "prompt_cache_key": "session-a",
+                    "previous_response_id": warmup["response_id"],
+                    "instructions": "stable system prompt",
+                    "tools": [],
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "developer",
+                            "content": [
+                                {"type": "input_text", "text": "project policy"}
+                            ],
+                        },
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "first message"}
+                            ],
+                        },
+                    ],
+                }
+            )
+        )
+
+        self.assertEqual(state.prepare_starter_cache.await_count, 2)
+        self.assertTrue(
+            state.prepare_starter_cache.await_args_list[1].kwargs["restore_only"]
+        )
+        state.erase_slot.assert_not_awaited()
+        forwarded = state._run_responses_loop.await_args.kwargs["forward_request"]
+        self.assertTrue(forwarded["cache_prompt"])
+        self.assertEqual(
+            first_turn["usage"]["input_tokens_details"]["cached_tokens"],
+            8_000,
+        )
+        completed = [
+            call.args[1]
+            for call in state.telemetry.emit.call_args_list
+            if call.args[0] == "router.response.completed"
+        ]
+        self.assertEqual(
+            completed[0]["slot"]["prepare_mode"],
+            "restore-starter-cache",
+        )
+        self.assertEqual(
+            completed[1]["slot"]["prepare_mode"],
+            "reuse-live-reconnect-root",
+        )
+
     def test_lineage_uses_parent_chains_and_rebases_at_the_lru_limit(self) -> None:
         state = object.__new__(router_module.RouterState)
         state.lineage = router_module.OrderedDict()
@@ -1491,6 +1614,23 @@ context = 32768
             )
             restarted._request_json.assert_not_awaited()
             restarted.erase_slot.assert_not_awaited()
+
+            changed = make_state()
+            missed = asyncio.run(
+                changed.prepare_starter_cache(
+                    profile,
+                    {
+                        "instructions": "changed project instructions",
+                        "tools": [],
+                    },
+                    restore_only=True,
+                )
+            )
+
+            self.assertEqual(missed["mode"], "starter-cache-miss")
+            changed.restore_slot.assert_not_awaited()
+            changed._request_json.assert_not_awaited()
+            changed.erase_slot.assert_not_awaited()
 
     def test_conversation_checkpoint_body_ends_before_next_user(self) -> None:
         body = router_module._conversation_checkpoint_chat_body(

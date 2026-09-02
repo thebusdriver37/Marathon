@@ -131,6 +131,8 @@ DEFAULT_STARTER_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
 STARTER_CACHE_SCHEMA = 5
 STARTER_CACHE_SENTINEL = "__MARATHON_STARTER_CACHE_SENTINEL__"
 STARTER_CACHE_ALTERNATE_SENTINEL = "Z_CACHE_BOUNDARY_SENTINEL"
+STARTER_CACHE_INSTRUCTION_SENTINEL = "__MARATHON_INSTRUCTION_CACHE_SENTINEL__"
+STARTER_CACHE_ALTERNATE_INSTRUCTION_SENTINEL = "Z_INSTRUCTION_BOUNDARY_SENTINEL"
 STARTER_CACHE_ROLLBACK_TOKENS = 4
 DEFAULT_TOOL_OUTPUT_MAX_CHARS = 16_384
 DEFAULT_WEB_TOOL_CACHE_MAX_ENTRIES = 256
@@ -2998,6 +3000,9 @@ class RouterState:
         self,
         profile: ModelProfile,
         request: dict[str, Any],
+        *,
+        restore_only: bool = False,
+        expandable_instructions: bool = False,
     ) -> dict[str, Any]:
         """Restore or create the persistent system-and-tools prompt prefix."""
 
@@ -3007,11 +3012,29 @@ class RouterState:
                 "status": "skipped",
             }
 
-        scaffold_body = _starter_scaffold_chat_body(request)
-        alternate_scaffold_body = _starter_scaffold_chat_body(
-            request,
-            STARTER_CACHE_ALTERNATE_SENTINEL,
-        )
+        if expandable_instructions:
+            scaffold_requests: list[dict[str, Any]] = []
+            instructions = request.get("instructions")
+            instructions_text = instructions if isinstance(instructions, str) else ""
+            for sentinel in (
+                STARTER_CACHE_INSTRUCTION_SENTINEL,
+                STARTER_CACHE_ALTERNATE_INSTRUCTION_SENTINEL,
+            ):
+                scaffold_request = dict(request)
+                scaffold_request["instructions"] = "\n\n".join(
+                    part for part in (instructions_text, sentinel) if part
+                )
+                scaffold_requests.append(scaffold_request)
+            scaffold_body = _starter_scaffold_chat_body(scaffold_requests[0])
+            alternate_scaffold_body = _starter_scaffold_chat_body(
+                scaffold_requests[1]
+            )
+        else:
+            scaffold_body = _starter_scaffold_chat_body(request)
+            alternate_scaffold_body = _starter_scaffold_chat_body(
+                request,
+                STARTER_CACHE_ALTERNATE_SENTINEL,
+            )
         fingerprint = _starter_cache_fingerprint(
             profile,
             self.backend_cache_id,
@@ -3043,6 +3066,15 @@ class RouterState:
                     snapshot_path.unlink()
                 except OSError:
                     pass
+
+        if restore_only:
+            return {
+                "mode": "starter-cache-miss",
+                "status": "miss",
+                "fingerprint": fingerprint,
+                "snapshot_filename": filename,
+                "restore_error": restore_error,
+            }
 
         try:
             erased = await self.erase_slot(profile)
@@ -4596,6 +4628,27 @@ class RouterState:
 
         if generate is False:
             response_id = preset_response_id or self.mint_response_id("warm")
+            starter_cache_result: dict[str, Any] | None = None
+            slot_prepare_mode = "warmup-backend-prefix-cache"
+            slot_prepare_start = time.perf_counter()
+            if profile.supports_slots:
+                async with self.backend_lock:
+                    if profile.slug in self.live_slot_by_model:
+                        slot_prepare_mode = "reuse-live-warmup-prefix"
+                    else:
+                        starter_cache_result = await self.prepare_starter_cache(
+                            profile,
+                            forward_request,
+                            expandable_instructions=True,
+                        )
+                        slot_prepare_mode = str(starter_cache_result["mode"])
+                        if starter_cache_result.get("status") in {"built", "restored"}:
+                            self.live_slot_by_model[profile.slug] = response_id
+                            if prompt_cache_key:
+                                self.live_prompt_cache_key_by_model[profile.slug] = (
+                                    prompt_cache_key
+                                )
+            slot_prepare_ms = (time.perf_counter() - slot_prepare_start) * 1000.0
             async with self.lineage_lock:
                 self._store_response_snapshot(
                     ResponseSnapshot(
@@ -4646,7 +4699,9 @@ class RouterState:
                         },
                         "slot": {
                             "slot_id": self.slot_id,
-                            "prepare_ms": 0.0,
+                            "prepare_mode": slot_prepare_mode,
+                            "prepare_ms": slot_prepare_ms,
+                            "starter_cache": starter_cache_result,
                             "save_ms": 0.0,
                             "erase_result": None,
                             "restore_error": None,
@@ -4716,22 +4771,39 @@ class RouterState:
                 }
             elif starter_root:
                 if profile.slug in self.live_slot_by_model:
-                    slot_prepare_mode = _root_prompt_cache_mode(
-                        profile.slug,
-                        prompt_cache_key,
-                        self.live_slot_by_model,
-                        self.live_prompt_cache_key_by_model,
-                    )
-                    # llama.cpp compares the complete token stream before
-                    # reusing live KV state, so changed scaffolds naturally
-                    # invalidate only the mismatched suffix.
-                    restore_result = {
-                        "status": "skipped",
-                        "reason": (
-                            "new conversation; llama.cpp will reuse only the "
-                            "token-exact prompt prefix"
-                        ),
-                    }
+                    if _is_warmup_root(parent_snapshot) and not scaffold_matches:
+                        starter_cache_result = await self.prepare_starter_cache(
+                            profile,
+                            forward_request,
+                            restore_only=True,
+                        )
+                    if starter_cache_result is not None and (
+                        starter_cache_result.get("status") == "restored"
+                    ):
+                        slot_prepare_mode = str(starter_cache_result["mode"])
+                        action_result = starter_cache_result.get("restore_result")
+                        restore_result = (
+                            action_result
+                            if isinstance(action_result, dict)
+                            else starter_cache_result
+                        )
+                    else:
+                        slot_prepare_mode = _root_prompt_cache_mode(
+                            profile.slug,
+                            prompt_cache_key,
+                            self.live_slot_by_model,
+                            self.live_prompt_cache_key_by_model,
+                        )
+                        # llama.cpp compares the complete token stream before
+                        # reusing live KV state, so changed scaffolds naturally
+                        # invalidate only the mismatched suffix.
+                        restore_result = {
+                            "status": "skipped",
+                            "reason": (
+                                "new conversation; llama.cpp will reuse only the "
+                                "token-exact prompt prefix"
+                            ),
+                        }
                 else:
                     conversation_checkpoint_result = (
                         await self.prepare_conversation_checkpoint(
