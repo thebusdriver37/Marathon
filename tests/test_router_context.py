@@ -1394,6 +1394,141 @@ context = 32768
         )
         self.assertEqual(result["usage"]["input_tokens_details"]["cached_tokens"], 10_000)
 
+    def test_slot_residency_uses_current_prompt_tokens(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.slot_id = 0
+        state._request_json = mock.AsyncMock(
+            side_effect=[
+                [
+                    {
+                        "id": 0,
+                        "n_prompt_tokens": 5_924,
+                        "n_prompt_tokens_cache": 0,
+                    }
+                ],
+                [
+                    {
+                        "id": 0,
+                    }
+                ],
+            ]
+        )
+
+        self.assertTrue(asyncio.run(state._slot_has_cached_prompt(profile)))
+        self.assertFalse(asyncio.run(state._slot_has_cached_prompt(profile)))
+
+    def test_empty_live_slot_restores_rolling_checkpoint_after_worker_restart(self) -> None:
+        profile = fixture_profile()
+        instructions = "stable system prompt"
+        parent = router_module.ResponseSnapshot(
+            response_id="resp_parent",
+            profile_slug=profile.slug,
+            parent_response_id=None,
+            input_items=[],
+            output_items=[],
+            conversation_item_count=0,
+            snapshot_filename="",
+            instructions_text=instructions,
+            base_instructions_hash=router_module._sha256_text(instructions),
+            instructions_hash=router_module._sha256_text(instructions),
+            tools_hash=router_module._sha256_text("[]"),
+            prompt_cache_key="session-a",
+            created_at=0,
+        )
+        state = object.__new__(router_module.RouterState)
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.lineage_lock = asyncio.Lock()
+        state.lineage = {parent.response_id: parent}
+        state.last_response_by_model = {profile.slug: parent.response_id}
+        state.live_slot_by_model = {profile.slug: parent.response_id}
+        state.live_prompt_cache_key_by_model = {profile.slug: "session-a"}
+        state.experimental_delta_only = False
+        state.slot_id = 0
+        state.backend_lock = asyncio.Lock()
+        state._slot_has_cached_prompt = mock.AsyncMock(return_value=False)
+        state.prepare_conversation_checkpoint = mock.AsyncMock(
+            return_value={
+                "mode": "restore-conversation-checkpoint",
+                "status": "restored",
+                "restore_result": {
+                    "status": "restored",
+                    "n_restored": 100_000,
+                },
+            }
+        )
+        state.erase_slot = mock.AsyncMock()
+        state._run_responses_loop = mock.AsyncMock(
+            return_value=(
+                {
+                    "id": "resp_new",
+                    "usage": {
+                        "input_tokens": 100_100,
+                        "input_tokens_details": {"cached_tokens": 100_000},
+                        "output_tokens": 100,
+                        "total_tokens": 100_200,
+                    },
+                },
+                [],
+                0,
+            )
+        )
+        state.schedule_conversation_checkpoint = mock.Mock(
+            return_value={"status": "scheduled"}
+        )
+        state.telemetry = mock.Mock()
+        state.trace_request = mock.Mock()
+        state.lock = threading.Lock()
+        state._trace_seq = 0
+        state._response_id_seq = 0
+        state.debug = False
+
+        result = asyncio.run(
+            state.process_websocket_create(
+                {
+                    "model": profile.slug,
+                    "prompt_cache_key": "session-a",
+                    "previous_response_id": parent.response_id,
+                    "instructions": instructions,
+                    "tools": [],
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "continue"}
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+        state._slot_has_cached_prompt.assert_awaited_once_with(profile)
+        state.prepare_conversation_checkpoint.assert_awaited_once()
+        state.erase_slot.assert_not_awaited()
+        completed = [
+            call.args[1]
+            for call in state.telemetry.emit.call_args_list
+            if call.args[0] == "router.response.completed"
+        ][0]
+        self.assertEqual(
+            completed["slot"]["prepare_mode"],
+            "restore-conversation-checkpoint",
+        )
+        self.assertEqual(
+            result["usage"]["input_tokens_details"]["cached_tokens"],
+            100_000,
+        )
+        state.telemetry.emit.assert_any_call(
+            "router.slot.invalidated",
+            {
+                "profile_slug": profile.slug,
+                "response_id": parent.response_id,
+                "reason": "backend slot has no cached prompt",
+            },
+        )
+
     def test_cold_root_restores_rolling_checkpoint_before_starter_cache(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)

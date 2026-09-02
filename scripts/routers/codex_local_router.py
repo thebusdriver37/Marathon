@@ -2933,6 +2933,30 @@ class RouterState:
     async def restore_slot(self, profile: ModelProfile, filename: str) -> dict[str, Any]:
         return await self._slot_action(profile, "restore", filename)
 
+    async def _slot_has_cached_prompt(self, profile: ModelProfile) -> bool | None:
+        """Return whether llama.cpp still has KV state for Marathon's slot."""
+
+        try:
+            slots = await self._request_json(
+                profile,
+                "GET",
+                "/slots",
+                retry_connection_error=True,
+            )
+        except Exception:
+            return None
+        if not isinstance(slots, list):
+            return None
+        for slot in slots:
+            if not isinstance(slot, dict) or slot.get("id") != self.slot_id:
+                continue
+            prompt_tokens = slot.get("n_prompt_tokens")
+            if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
+                return prompt_tokens > 0
+            # llama.cpp omits the prompt counters entirely for a fresh slot.
+            return False
+        return False
+
     def _slot_save_dir(self, profile: ModelProfile) -> Path:
         return self.slot_save_root / profile.slug
 
@@ -3297,7 +3321,7 @@ class RouterState:
         stale_checkpoint_bytes = 0
         try:
             stale = self.slot_checkpoint_store.find_any(
-                profile_alias=profile.alias,
+                profile_slug=profile.slug,
                 prompt_cache_key=prompt_cache_key,
             )
             if stale is not None:
@@ -3547,7 +3571,7 @@ class RouterState:
 
             existing = await asyncio.to_thread(
                 self.slot_checkpoint_store.find_any,
-                profile_alias=profile.alias,
+                profile_slug=profile.slug,
                 prompt_cache_key=candidate.prompt_cache_key,
             )
             if existing is not None and existing.metadata is not None:
@@ -3608,7 +3632,7 @@ class RouterState:
                     "status": "skipped",
                     "reason": "checkpoint has no verifiable conversation prefix",
                 }
-            checkpoint_dir = self.slot_checkpoint_store.profile_dir(profile.alias)
+            checkpoint_dir = self.slot_checkpoint_store.profile_dir(profile.slug)
             try:
                 checkpoint_dir.mkdir(
                     parents=True,
@@ -3618,7 +3642,7 @@ class RouterState:
                 os.chmod(checkpoint_dir, 0o700)
                 await asyncio.to_thread(
                     self.slot_checkpoint_store.discard_pending,
-                    profile.alias,
+                    profile.slug,
                     pending_filename,
                 )
                 boundary_result = (
@@ -3649,7 +3673,7 @@ class RouterState:
             except BaseException:
                 await asyncio.to_thread(
                     self.slot_checkpoint_store.discard_pending,
-                    profile.alias,
+                    profile.slug,
                     pending_filename,
                 )
                 raise
@@ -4739,6 +4763,19 @@ class RouterState:
             conversation_checkpoint_result: dict[str, Any] | None = None
             slot_prepare_mode = "erase-root"
             slot_prepare_start = time.perf_counter()
+            if profile.supports_slots and profile.slug in self.live_slot_by_model:
+                live_slot_valid = await self._slot_has_cached_prompt(profile)
+                if live_slot_valid is False:
+                    stale_response_id = self.live_slot_by_model.pop(profile.slug)
+                    self.live_prompt_cache_key_by_model.pop(profile.slug, None)
+                    self.telemetry.emit(
+                        "router.slot.invalidated",
+                        {
+                            "profile_slug": profile.slug,
+                            "response_id": stale_response_id,
+                            "reason": "backend slot has no cached prompt",
+                        },
+                    )
             live_parent = (
                 parent_snapshot is not None
                 and previous_response_id is not None
@@ -4843,20 +4880,42 @@ class RouterState:
             elif live_parent:
                 slot_prepare_mode = "reuse-live-parent"
                 restore_result = {"status": "skipped", "reason": "live slot already matches parent"}
-            elif not parent_snapshot.snapshot_filename:
-                slot_prepare_mode = "erase-parent-no-snapshot"
-                erase_result = await self.erase_slot(profile)
-                self.live_slot_by_model.pop(profile.slug, None)
             else:
-                slot_prepare_mode = "restore-parent"
-                try:
-                    restore_result = await self.restore_slot(profile, parent_snapshot.snapshot_filename)
+                conversation_checkpoint_result = (
+                    await self.prepare_conversation_checkpoint(
+                        profile,
+                        forward_request,
+                        prompt_cache_key,
+                    )
+                )
+                if conversation_checkpoint_result.get("status") == "restored":
+                    slot_prepare_mode = str(conversation_checkpoint_result["mode"])
+                    action_result = conversation_checkpoint_result.get(
+                        "restore_result"
+                    )
+                    restore_result = (
+                        action_result
+                        if isinstance(action_result, dict)
+                        else conversation_checkpoint_result
+                    )
                     self.live_slot_by_model[profile.slug] = previous_response_id
-                except Exception as exc:
-                    restore_error = str(exc)
-                    slot_prepare_mode = "erase-restore-error"
+                elif not parent_snapshot.snapshot_filename:
+                    slot_prepare_mode = "erase-parent-no-snapshot"
                     erase_result = await self.erase_slot(profile)
                     self.live_slot_by_model.pop(profile.slug, None)
+                else:
+                    slot_prepare_mode = "restore-parent"
+                    try:
+                        restore_result = await self.restore_slot(
+                            profile,
+                            parent_snapshot.snapshot_filename,
+                        )
+                        self.live_slot_by_model[profile.slug] = previous_response_id
+                    except Exception as exc:
+                        restore_error = str(exc)
+                        slot_prepare_mode = "erase-restore-error"
+                        erase_result = await self.erase_slot(profile)
+                        self.live_slot_by_model.pop(profile.slug, None)
             slot_prepare_ms = (time.perf_counter() - slot_prepare_start) * 1000.0
 
             backend_start = time.perf_counter()

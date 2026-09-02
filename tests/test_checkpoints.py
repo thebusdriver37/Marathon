@@ -93,6 +93,62 @@ class RollingCheckpointStoreTests(unittest.TestCase):
             self.assertEqual(metadata["conversation_item_count"], 2)
             self.assertEqual(metadata["conversation_prefix_hash"], "a" * 64)
 
+    def test_profile_slug_selects_slot_directory_when_alias_differs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            profile_slug = "marathon-profile"
+            profile_alias = "backend-model"
+            prompt_cache_key = "synthetic-session"
+            key_hash = checkpoints.conversation_key_hash(prompt_cache_key)
+            pending = store.pending_filename(key_hash, "response-one")
+            profile_dir = store.profile_dir(profile_slug)
+            profile_dir.mkdir(parents=True)
+            (profile_dir / pending).write_bytes(b"checkpoint")
+
+            result = store.commit(
+                profile_slug=profile_slug,
+                profile_alias=profile_alias,
+                prompt_cache_key=prompt_cache_key,
+                backend_cache_id="backend-v1",
+                scaffold_fingerprint="scaffold-v1",
+                response_id="response-one",
+                context_tokens=20_000,
+                conversation_item_count=2,
+                conversation_prefix_hash="a" * 64,
+                pending_filename=pending,
+            )
+            restored = store.find(
+                profile_slug=profile_slug,
+                profile_alias=profile_alias,
+                prompt_cache_key=prompt_cache_key,
+                backend_cache_id="backend-v1",
+                scaffold_fingerprint="scaffold-v1",
+            )
+
+            self.assertEqual(result["status"], "saved")
+            self.assertIsNotNone(restored)
+            self.assertFalse(store.profile_dir(profile_alias).exists())
+
+    def test_commit_accepts_container_owned_snapshot_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory))
+            real_chmod = checkpoints.os.chmod
+
+            def chmod(path: object, mode: int) -> None:
+                if str(path).endswith(".pending.bin"):
+                    raise PermissionError("container-owned snapshot")
+                real_chmod(path, mode)
+
+            with mock.patch.object(checkpoints.os, "chmod", side_effect=chmod):
+                result = self.commit(
+                    store,
+                    key="synthetic-session",
+                    response_id="response-one",
+                    content=b"checkpoint",
+                )
+
+            self.assertEqual(result["status"], "saved")
+
     def test_older_checkpoint_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             metadata_path = Path(directory) / "conversation.json"

@@ -133,8 +133,8 @@ class RollingCheckpointStore:
         response_hash = hashlib.sha256(response_id.encode("utf-8")).hexdigest()[:16]
         return f"{CHECKPOINT_PREFIX}{key_hash}__{response_hash}.pending.bin"
 
-    def profile_dir(self, profile_alias: str) -> Path:
-        return self.local_root / profile_alias
+    def profile_dir(self, profile_slug: str) -> Path:
+        return self.local_root / profile_slug
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
@@ -327,7 +327,7 @@ class RollingCheckpointStore:
         scaffold_fingerprint: str,
     ) -> CheckpointRecord | None:
         key_hash = conversation_key_hash(prompt_cache_key)
-        snapshot_path = self.profile_dir(profile_alias) / self.snapshot_filename(key_hash)
+        snapshot_path = self.profile_dir(profile_slug) / self.snapshot_filename(key_hash)
         record = self._record(snapshot_path)
         if record is None or record.metadata is None:
             return None
@@ -345,11 +345,11 @@ class RollingCheckpointStore:
     def find_any(
         self,
         *,
-        profile_alias: str,
+        profile_slug: str,
         prompt_cache_key: str,
     ) -> CheckpointRecord | None:
         key_hash = conversation_key_hash(prompt_cache_key)
-        snapshot_path = self.profile_dir(profile_alias) / self.snapshot_filename(key_hash)
+        snapshot_path = self.profile_dir(profile_slug) / self.snapshot_filename(key_hash)
         return self._record(snapshot_path)
 
     def mark_used(self, record: CheckpointRecord) -> None:
@@ -365,8 +365,8 @@ class RollingCheckpointStore:
         with self._locked():
             self._unlink_record(record)
 
-    def discard_pending(self, profile_alias: str, pending_filename: str) -> None:
-        path = self.profile_dir(profile_alias) / pending_filename
+    def discard_pending(self, profile_slug: str, pending_filename: str) -> None:
+        path = self.profile_dir(profile_slug) / pending_filename
         try:
             path.unlink()
         except OSError:
@@ -387,7 +387,7 @@ class RollingCheckpointStore:
         pending_filename: str,
     ) -> dict[str, object]:
         key_hash = conversation_key_hash(prompt_cache_key)
-        directory = self.profile_dir(profile_alias)
+        directory = self.profile_dir(profile_slug)
         pending_path = directory / pending_filename
         final_path = directory / self.snapshot_filename(key_hash)
         metadata_path = directory / self.metadata_filename(key_hash)
@@ -396,10 +396,10 @@ class RollingCheckpointStore:
         except OSError:
             return {"status": "error", "reason": "slot save produced no checkpoint"}
         if pending_size <= 0:
-            self.discard_pending(profile_alias, pending_filename)
+            self.discard_pending(profile_slug, pending_filename)
             return {"status": "error", "reason": "slot save produced an empty checkpoint"}
         if pending_size > self.max_bytes:
-            self.discard_pending(profile_alias, pending_filename)
+            self.discard_pending(profile_slug, pending_filename)
             return {
                 "status": "skipped",
                 "reason": "checkpoint exceeds the 32 GiB rolling-cache ceiling",
@@ -432,7 +432,12 @@ class RollingCheckpointStore:
         with self._locked():
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(directory, 0o700)
-            os.chmod(pending_path, 0o600)
+            try:
+                os.chmod(pending_path, 0o600)
+            except OSError:
+                # Container-backed llama.cpp workers can create the snapshot as
+                # root. The mode is still protected by the 0700 parent directory.
+                pass
             replaced = False
             try:
                 os.replace(pending_path, final_path)
