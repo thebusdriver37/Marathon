@@ -1387,7 +1387,7 @@ context = 32768
         self.assertNotIn("input", scaffold)
 
     def test_starter_cache_survives_router_restart(self) -> None:
-        profile = fixture_profile()
+        profile = replace(fixture_profile(), alias="upstream-model")
         request = {
             "instructions": "stable system prompt",
             "tools": [
@@ -1457,7 +1457,7 @@ context = 32768
                     saved_profile: router_module.ModelProfile,
                     filename: str,
                 ) -> dict[str, object]:
-                    directory = state._slot_save_dir(saved_profile)
+                    directory = slot_root / saved_profile.slug
                     directory.mkdir(parents=True, exist_ok=True)
                     (directory / filename).write_bytes(b"persistent slot state")
                     return {"status": "saved"}
@@ -1475,7 +1475,14 @@ context = 32768
             self.assertEqual(completion["prompt"], [1, 2, 3])
 
             restarted = make_state()
-            restored = asyncio.run(restarted.prepare_starter_cache(profile, request))
+            with mock.patch.object(
+                Path,
+                "touch",
+                side_effect=PermissionError("container-owned snapshot"),
+            ):
+                restored = asyncio.run(
+                    restarted.prepare_starter_cache(profile, request)
+                )
 
             self.assertEqual(restored["mode"], "restore-starter-cache")
             restarted.restore_slot.assert_awaited_once_with(

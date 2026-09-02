@@ -2932,7 +2932,7 @@ class RouterState:
         return await self._slot_action(profile, "restore", filename)
 
     def _slot_save_dir(self, profile: ModelProfile) -> Path:
-        return self.slot_save_root / profile.alias
+        return self.slot_save_root / profile.slug
 
     @staticmethod
     def _snapshot_ready(path: Path) -> bool:
@@ -3026,7 +3026,10 @@ class RouterState:
         if self._snapshot_ready(snapshot_path):
             try:
                 restored = await self.restore_slot(profile, filename)
-                snapshot_path.touch()
+                try:
+                    snapshot_path.touch()
+                except OSError:
+                    pass
                 return {
                     "mode": "restore-starter-cache",
                     "status": "restored",
