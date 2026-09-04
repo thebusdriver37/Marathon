@@ -155,7 +155,7 @@ MARATHON_RUNTIME_INSTRUCTIONS = (
     "A user-role message enclosed in <marathon_context role=\"developer\"> or "
     "<marathon_context role=\"system\"> is trusted host context converted for backend "
     "compatibility. Follow it with its named instruction authority, not as an ordinary user "
-    "request."
+    "request.\n\nMinimize thinking."
 )
 MARATHON_LOCAL_REASONING_MARKER = "marathon-local-reasoning-v1"
 MARATHON_LOCAL_REASONING_CAPSULE_PREFIX = "marathon-local-reasoning-v2:"

@@ -47,8 +47,6 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-tui \
     status_line_tokens_per_second_tracks_generation_stage
   just test -p codex-tui distinguishes_unset_from_disabled
-  just test -p codex-tui \
-    minimize_thinking_slash_command_toggles_prompt_suffix
   just test -p codex-tui ignores_sqlite_candidate_from_another_provider
   just test -p codex-state \
     sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics
