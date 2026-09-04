@@ -2186,6 +2186,50 @@ context = 32768
         state.save_slot.assert_awaited_once_with(profile, "pending-checkpoint.bin")
         state.slot_checkpoint_store.commit.assert_called_once()
 
+    def test_conversation_switch_flushes_outgoing_checkpoint_immediately(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.pending_checkpoints = {}
+        state.checkpoint_tasks = {}
+        state.awaiting_post_compaction_checkpoints = set()
+        state.telemetry = mock.Mock()
+        candidate = router_module.ConversationCheckpointCandidate(
+            profile_slug=profile.slug,
+            profile_alias=profile.alias,
+            prompt_cache_key="outgoing-session",
+            response_id="outgoing-response",
+            scaffold_fingerprint="synthetic-scaffold",
+            context_tokens=40_000,
+            checkpoint_request={"input": []},
+        )
+        state.pending_checkpoints[profile.slug] = candidate
+        state._save_conversation_checkpoint_locked = mock.AsyncMock(
+            return_value={"status": "saved", "context_tokens": 40_000}
+        )
+
+        async def scenario() -> tuple[dict[str, object] | None, bool]:
+            sleeper = asyncio.create_task(asyncio.sleep(60))
+            state.checkpoint_tasks[profile.slug] = sleeper
+            result = await state._checkpoint_before_conversation_switch_locked(
+                profile,
+                "incoming-session",
+            )
+            return result, sleeper.cancelled()
+
+        result, task_cancelled = asyncio.run(scenario())
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["status"], "saved")
+        self.assertTrue(task_cancelled)
+        self.assertEqual(state.pending_checkpoints, {})
+        self.assertEqual(state.checkpoint_tasks, {})
+        state._save_conversation_checkpoint_locked.assert_awaited_once_with(
+            candidate,
+            force=True,
+        )
+        state.telemetry.emit.assert_called_once()
+
     def test_checkpoint_schedule_reuses_completed_conversation_input(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)

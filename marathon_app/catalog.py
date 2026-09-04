@@ -474,7 +474,7 @@ def settings(catalog: dict[str, Any] | None = None) -> Settings:
             int(
                 os.environ.get(
                     "MARATHON_SLOT_SNAPSHOT_MAX_COUNT",
-                    raw.get("slot_snapshot_max_count", 2),
+                    raw.get("slot_snapshot_max_count", 8),
                 )
             ),
         ),

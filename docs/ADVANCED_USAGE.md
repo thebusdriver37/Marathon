@@ -88,7 +88,7 @@ Each conversation atomically replaces its previous checkpoint instead of accumul
 Speculative workers save the target model state, draft model state, and speculative boundary state as one managed bundle, so restoring a conversation cannot leave the two models at different token positions.
 Before restoring, Marathon verifies the system-and-tools scaffold with a content-free hash, then lets llama.cpp token-match the saved history prefix so harmless serialization changes can retain valid KV state.
 Multimodal checkpoints include the complete conversation history, including all text after image inputs.
-Each Marathon instance keeps at most two recent conversations, while all instances share a hard 32 GiB ceiling.
+Each Marathon instance keeps at most eight recent conversations, while all instances share a hard 32 GiB ceiling.
 An inactive checkpoint expires 48 hours after its last save or restore.
 Cleanup runs at startup, after saves, and periodically while Marathon remains open.
 Checkpoint metadata stores only hashed conversation and response identities, compatibility fingerprints, token counts, sizes, and timestamps.
@@ -97,7 +97,7 @@ Set `MARATHON_SLOT_SNAPSHOTS_ENABLED=0` or `slot_snapshots_enabled = false` to d
 
 The following environment variables have matching keys in the personal catalog's `[settings]` table:
 
-- `MARATHON_SLOT_SNAPSHOT_MAX_COUNT` controls recent conversations per instance and defaults to `2`.
+- `MARATHON_SLOT_SNAPSHOT_MAX_COUNT` controls recent conversations per instance and defaults to `8`.
 - `MARATHON_SLOT_SNAPSHOT_MAX_BYTES` controls the shared byte budget, is hard-capped at 32 GiB, and defaults to that ceiling.
 - `MARATHON_SLOT_SNAPSHOT_TTL_SECONDS` controls inactivity expiry and defaults to `172800`.
 - `MARATHON_SLOT_SNAPSHOT_IDLE_SECONDS` controls the background-save delay and defaults to `60`.

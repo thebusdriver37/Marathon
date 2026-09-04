@@ -121,7 +121,7 @@ HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS = float(
     os.getenv("MARATHON_HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS", "15")
 )
 ROUTER_MAX_REQUEST_BYTES = 32 * 1024 * 1024
-DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 2
+DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 8
 DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_TTL_SECONDS = 2 * 24 * 60 * 60
 DEFAULT_SLOT_SNAPSHOT_IDLE_SECONDS = 60
@@ -3629,6 +3629,57 @@ class RouterState:
             if self.checkpoint_tasks.get(profile_slug) is current_task:
                 self.checkpoint_tasks.pop(profile_slug, None)
 
+    async def _checkpoint_before_conversation_switch_locked(
+        self,
+        profile: ModelProfile,
+        incoming_prompt_cache_key: str,
+    ) -> dict[str, Any] | None:
+        """Persist the live conversation before another one replaces its slot."""
+
+        pending_checkpoints = getattr(self, "pending_checkpoints", None)
+        if not pending_checkpoints:
+            return None
+        candidate = pending_checkpoints.get(profile.slug)
+        if (
+            candidate is None
+            or not incoming_prompt_cache_key
+            or candidate.prompt_cache_key == incoming_prompt_cache_key
+        ):
+            return None
+
+        task = getattr(self, "checkpoint_tasks", {}).pop(profile.slug, None)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        try:
+            result = await self._save_conversation_checkpoint_locked(
+                candidate,
+                force=True,
+            )
+        except Exception as exc:
+            result = {"status": "error", "reason": str(exc)}
+
+        if pending_checkpoints.get(profile.slug) == candidate:
+            pending_checkpoints.pop(profile.slug, None)
+        if candidate.post_compaction and result.get("status") != "error":
+            self._post_compaction_checkpoint_keys().discard(
+                (candidate.profile_slug, candidate.prompt_cache_key)
+            )
+
+        event = {
+            "profile_slug": profile.slug,
+            "outgoing_key_hash": conversation_key_hash(
+                candidate.prompt_cache_key
+            ),
+            "incoming_key_hash": conversation_key_hash(
+                incoming_prompt_cache_key
+            ),
+            **result,
+        }
+        self.telemetry.emit("router.conversation_checkpoint.switch", event)
+        return event
+
     async def _prefill_conversation_checkpoint_boundary(
         self,
         profile: ModelProfile,
@@ -3709,172 +3760,188 @@ class RouterState:
             return {"status": "skipped", "reason": "model no longer supports slots"}
 
         async with self.backend_lock:
-            if (
-                self.live_slot_by_model.get(profile.slug) != candidate.response_id
-                or self.live_prompt_cache_key_by_model.get(profile.slug)
-                != candidate.prompt_cache_key
-            ):
-                return {
-                    "status": "skipped",
-                    "reason": "llama.cpp slot has advanced beyond this checkpoint",
-                }
-
-            existing = await asyncio.to_thread(
-                self.slot_checkpoint_store.find_any,
-                profile_slug=profile.slug,
-                prompt_cache_key=candidate.prompt_cache_key,
+            return await self._save_conversation_checkpoint_locked(
+                candidate,
+                force=force,
             )
-            if existing is not None and existing.metadata is not None:
-                metadata = existing.metadata
-                if (
-                    metadata.response_id_hash
-                    == self.slot_checkpoint_store.response_id_hash(candidate.response_id)
-                ):
-                    await asyncio.to_thread(
-                        self.slot_checkpoint_store.mark_used,
-                        existing,
-                    )
-                    return {
-                        "status": "skipped",
-                        "reason": "latest response is already checkpointed",
-                        "context_tokens": candidate.context_tokens,
-                    }
-                checkpoint_input = (
-                    candidate.checkpoint_request.get("input")
-                    if candidate.checkpoint_request is not None
-                    else None
-                )
-                checkpoint_item_count = (
-                    len(checkpoint_input) if isinstance(checkpoint_input, list) else 0
-                )
-                checkpoint_prefix_hash = (
-                    _conversation_checkpoint_prefix_hash(
-                        candidate.checkpoint_request,
-                        checkpoint_item_count,
-                    )
-                    if candidate.checkpoint_request is not None
-                    else None
-                )
-                if (
-                    checkpoint_prefix_hash is not None
-                    and metadata.conversation_item_count == checkpoint_item_count
-                    and metadata.conversation_prefix_hash == checkpoint_prefix_hash
-                ):
-                    await asyncio.to_thread(
-                        self.slot_checkpoint_store.mark_used,
-                        existing,
-                    )
-                    return {
-                        "status": "skipped",
-                        "reason": "checkpointable conversation prefix is unchanged",
-                        "context_tokens": metadata.context_tokens,
-                    }
-                compatible = (
-                    metadata.profile_slug == candidate.profile_slug
-                    and metadata.backend_cache_id == self.backend_cache_id
-                    and metadata.scaffold_fingerprint
-                    == candidate.scaffold_fingerprint
-                )
-                growth = candidate.context_tokens - metadata.context_tokens
-                required_growth = self.slot_snapshot_min_token_growth
-                if (
-                    not force
-                    and compatible
-                    and 0 <= growth < required_growth
-                ):
-                    await asyncio.to_thread(
-                        self.slot_checkpoint_store.mark_used,
-                        existing,
-                    )
-                    return {
-                        "status": "skipped",
-                        "reason": "conversation has not grown enough since the last checkpoint",
-                        "context_tokens": candidate.context_tokens,
-                        "token_growth": growth,
-                        "required_token_growth": required_growth,
-                    }
 
-            prompt_key_hash = conversation_key_hash(candidate.prompt_cache_key)
-            pending_filename = self.slot_checkpoint_store.pending_filename(
-                prompt_key_hash,
-                candidate.response_id,
-            )
-            if candidate.checkpoint_request is None:
-                return {
-                    "status": "skipped",
-                    "reason": "checkpoint has no verifiable conversation prefix",
-                }
-            checkpoint_dir = self.slot_checkpoint_store.profile_dir(profile.slug)
-            try:
-                checkpoint_dir.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                    mode=0o700,
-                )
-                os.chmod(checkpoint_dir, 0o700)
-                await asyncio.to_thread(
-                    self.slot_checkpoint_store.discard_pending,
-                    profile.slug,
-                    pending_filename,
-                )
-                checkpoint_input = candidate.checkpoint_request.get("input")
-                if (
-                    isinstance(checkpoint_input, list)
-                    and checkpoint_input
-                    and _conversation_has_image(checkpoint_input)
-                ):
-                    conversation_prefix_hash = _conversation_checkpoint_prefix_hash(
-                        candidate.checkpoint_request,
-                        len(checkpoint_input),
-                    )
-                    if conversation_prefix_hash is None:
-                        raise RuntimeError(
-                            "conversation checkpoint has no verifiable input prefix"
-                        )
-                    boundary_result = {
-                        "context_tokens": candidate.context_tokens,
-                        "conversation_item_count": len(checkpoint_input),
-                        "conversation_prefix_hash": conversation_prefix_hash,
-                        "source": "live-multimodal-slot",
-                        "timings": None,
-                    }
-                else:
-                    boundary_result = (
-                        await self._prefill_conversation_checkpoint_boundary(
-                            profile,
-                            candidate.checkpoint_request,
-                        )
-                    )
-                await self.save_slot(profile, pending_filename)
-                saved_context_tokens = int(boundary_result["context_tokens"])
-                result = await asyncio.to_thread(
-                    self.slot_checkpoint_store.commit,
-                    profile_slug=profile.slug,
-                    profile_alias=profile.alias,
-                    prompt_cache_key=candidate.prompt_cache_key,
-                    backend_cache_id=self.backend_cache_id,
-                    scaffold_fingerprint=candidate.scaffold_fingerprint,
-                    response_id=candidate.response_id,
-                    context_tokens=saved_context_tokens,
-                    conversation_item_count=int(
-                        boundary_result["conversation_item_count"]
-                    ),
-                    conversation_prefix_hash=str(
-                        boundary_result["conversation_prefix_hash"]
-                    ),
-                    pending_filename=pending_filename,
-                )
-            except BaseException:
-                await asyncio.to_thread(
-                    self.slot_checkpoint_store.discard_pending,
-                    profile.slug,
-                    pending_filename,
-                )
-                raise
+    async def _save_conversation_checkpoint_locked(
+        self,
+        candidate: ConversationCheckpointCandidate,
+        *,
+        force: bool,
+    ) -> dict[str, Any]:
+        """Save a checkpoint while the caller owns ``backend_lock``."""
+
+        profile = self.available_profiles.get(candidate.profile_slug)
+        if profile is None or not profile.supports_slots:
+            return {"status": "skipped", "reason": "model no longer supports slots"}
+        if (
+            self.live_slot_by_model.get(profile.slug) != candidate.response_id
+            or self.live_prompt_cache_key_by_model.get(profile.slug)
+            != candidate.prompt_cache_key
+        ):
             return {
-                **dict(result),
-                "boundary": boundary_result,
+                "status": "skipped",
+                "reason": "llama.cpp slot has advanced beyond this checkpoint",
             }
+
+        existing = await asyncio.to_thread(
+            self.slot_checkpoint_store.find_any,
+            profile_slug=profile.slug,
+            prompt_cache_key=candidate.prompt_cache_key,
+        )
+        if existing is not None and existing.metadata is not None:
+            metadata = existing.metadata
+            if (
+                metadata.response_id_hash
+                == self.slot_checkpoint_store.response_id_hash(candidate.response_id)
+            ):
+                await asyncio.to_thread(
+                    self.slot_checkpoint_store.mark_used,
+                    existing,
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "latest response is already checkpointed",
+                    "context_tokens": candidate.context_tokens,
+                }
+            checkpoint_input = (
+                candidate.checkpoint_request.get("input")
+                if candidate.checkpoint_request is not None
+                else None
+            )
+            checkpoint_item_count = (
+                len(checkpoint_input) if isinstance(checkpoint_input, list) else 0
+            )
+            checkpoint_prefix_hash = (
+                _conversation_checkpoint_prefix_hash(
+                    candidate.checkpoint_request,
+                    checkpoint_item_count,
+                )
+                if candidate.checkpoint_request is not None
+                else None
+            )
+            if (
+                checkpoint_prefix_hash is not None
+                and metadata.conversation_item_count == checkpoint_item_count
+                and metadata.conversation_prefix_hash == checkpoint_prefix_hash
+            ):
+                await asyncio.to_thread(
+                    self.slot_checkpoint_store.mark_used,
+                    existing,
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "checkpointable conversation prefix is unchanged",
+                    "context_tokens": metadata.context_tokens,
+                }
+            compatible = (
+                metadata.profile_slug == candidate.profile_slug
+                and metadata.backend_cache_id == self.backend_cache_id
+                and metadata.scaffold_fingerprint
+                == candidate.scaffold_fingerprint
+            )
+            growth = candidate.context_tokens - metadata.context_tokens
+            required_growth = self.slot_snapshot_min_token_growth
+            if (
+                not force
+                and compatible
+                and 0 <= growth < required_growth
+            ):
+                await asyncio.to_thread(
+                    self.slot_checkpoint_store.mark_used,
+                    existing,
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "conversation has not grown enough since the last checkpoint",
+                    "context_tokens": candidate.context_tokens,
+                    "token_growth": growth,
+                    "required_token_growth": required_growth,
+                }
+
+        prompt_key_hash = conversation_key_hash(candidate.prompt_cache_key)
+        pending_filename = self.slot_checkpoint_store.pending_filename(
+            prompt_key_hash,
+            candidate.response_id,
+        )
+        if candidate.checkpoint_request is None:
+            return {
+                "status": "skipped",
+                "reason": "checkpoint has no verifiable conversation prefix",
+            }
+        checkpoint_dir = self.slot_checkpoint_store.profile_dir(profile.slug)
+        try:
+            checkpoint_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+                mode=0o700,
+            )
+            os.chmod(checkpoint_dir, 0o700)
+            await asyncio.to_thread(
+                self.slot_checkpoint_store.discard_pending,
+                profile.slug,
+                pending_filename,
+            )
+            checkpoint_input = candidate.checkpoint_request.get("input")
+            if (
+                isinstance(checkpoint_input, list)
+                and checkpoint_input
+                and _conversation_has_image(checkpoint_input)
+            ):
+                conversation_prefix_hash = _conversation_checkpoint_prefix_hash(
+                    candidate.checkpoint_request,
+                    len(checkpoint_input),
+                )
+                if conversation_prefix_hash is None:
+                    raise RuntimeError(
+                        "conversation checkpoint has no verifiable input prefix"
+                    )
+                boundary_result = {
+                    "context_tokens": candidate.context_tokens,
+                    "conversation_item_count": len(checkpoint_input),
+                    "conversation_prefix_hash": conversation_prefix_hash,
+                    "source": "live-multimodal-slot",
+                    "timings": None,
+                }
+            else:
+                boundary_result = (
+                    await self._prefill_conversation_checkpoint_boundary(
+                        profile,
+                        candidate.checkpoint_request,
+                    )
+                )
+            await self.save_slot(profile, pending_filename)
+            saved_context_tokens = int(boundary_result["context_tokens"])
+            result = await asyncio.to_thread(
+                self.slot_checkpoint_store.commit,
+                profile_slug=profile.slug,
+                profile_alias=profile.alias,
+                prompt_cache_key=candidate.prompt_cache_key,
+                backend_cache_id=self.backend_cache_id,
+                scaffold_fingerprint=candidate.scaffold_fingerprint,
+                response_id=candidate.response_id,
+                context_tokens=saved_context_tokens,
+                conversation_item_count=int(
+                    boundary_result["conversation_item_count"]
+                ),
+                conversation_prefix_hash=str(
+                    boundary_result["conversation_prefix_hash"]
+                ),
+                pending_filename=pending_filename,
+            )
+        except BaseException:
+            await asyncio.to_thread(
+                self.slot_checkpoint_store.discard_pending,
+                profile.slug,
+                pending_filename,
+            )
+            raise
+        return {
+            **dict(result),
+            "boundary": boundary_result,
+        }
 
     async def flush_conversation_checkpoints(self) -> list[dict[str, Any]]:
         tasks = list(self.checkpoint_tasks.values())
@@ -4966,6 +5033,14 @@ class RouterState:
         ) and self.web_search is not None
 
         async with self.backend_lock:
+            switch_checkpoint_result = (
+                await self._checkpoint_before_conversation_switch_locked(
+                    profile,
+                    prompt_cache_key,
+                )
+                if profile.supports_slots
+                else None
+            )
             restore_result: dict[str, Any] | None = None
             erase_result: dict[str, Any] | None = None
             restore_error: str | None = None
@@ -5238,6 +5313,7 @@ class RouterState:
                 },
                 "slot": {
                     "slot_id": self.slot_id,
+                    "switch_checkpoint": switch_checkpoint_result,
                     "prepare_mode": slot_prepare_mode,
                     "prepare_ms": slot_prepare_ms,
                     "starter_cache": starter_cache_result,
