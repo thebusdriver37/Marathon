@@ -149,6 +149,100 @@ class RollingCheckpointStoreTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "saved")
 
+    def test_speculative_sidecars_are_managed_as_one_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self.make_store(root)
+            key = "speculative-session"
+            key_hash = checkpoints.conversation_key_hash(key)
+            pending_name = store.pending_filename(key_hash, "response-one")
+            profile_dir = store.profile_dir("model")
+            profile_dir.mkdir(parents=True)
+            pending = profile_dir / pending_name
+            pending.write_bytes(b"target-state")
+            Path(f"{pending}.draft").write_bytes(b"draft-state")
+            Path(f"{pending}.spec").write_bytes(b"spec-state")
+
+            result = store.commit(
+                profile_slug="model",
+                profile_alias="model",
+                prompt_cache_key=key,
+                backend_cache_id="backend-v1",
+                scaffold_fingerprint="scaffold-v1",
+                response_id="response-one",
+                context_tokens=20_000,
+                conversation_item_count=2,
+                conversation_prefix_hash="a" * 64,
+                pending_filename=pending_name,
+            )
+            record = store.find(
+                profile_slug="model",
+                profile_alias="model",
+                prompt_cache_key=key,
+                backend_cache_id="backend-v1",
+                scaffold_fingerprint="scaffold-v1",
+            )
+
+            self.assertEqual(result["status"], "saved")
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.size_bytes, 33)
+            self.assertEqual(
+                {path.suffix for path in record.sidecar_paths},
+                {".draft", ".spec"},
+            )
+            self.assertEqual(
+                record.metadata.sidecar_suffixes if record.metadata else (),
+                (".draft", ".spec"),
+            )
+
+            store.discard(record)
+            self.assertFalse(record.snapshot_path.exists())
+            self.assertTrue(all(not path.exists() for path in record.sidecar_paths))
+
+    def test_missing_recorded_sidecar_invalidates_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self.make_store(root)
+            key = "speculative-session"
+            key_hash = checkpoints.conversation_key_hash(key)
+            pending_name = store.pending_filename(key_hash, "response-one")
+            profile_dir = store.profile_dir("model")
+            profile_dir.mkdir(parents=True)
+            pending = profile_dir / pending_name
+            pending.write_bytes(b"target-state")
+            Path(f"{pending}.draft").write_bytes(b"draft-state")
+            self.commit(
+                store,
+                key="unrelated-session",
+                response_id="unrelated-response",
+                content=b"unrelated",
+            )
+            store.commit(
+                profile_slug="model",
+                profile_alias="model",
+                prompt_cache_key=key,
+                backend_cache_id="backend-v1",
+                scaffold_fingerprint="scaffold-v1",
+                response_id="response-one",
+                context_tokens=20_000,
+                conversation_item_count=2,
+                conversation_prefix_hash="a" * 64,
+                pending_filename=pending_name,
+            )
+            final = profile_dir / store.snapshot_filename(key_hash)
+            Path(f"{final}.draft").unlink()
+
+            self.assertIsNone(
+                store.find(
+                    profile_slug="model",
+                    profile_alias="model",
+                    prompt_cache_key=key,
+                    backend_cache_id="backend-v1",
+                    scaffold_fingerprint="scaffold-v1",
+                )
+            )
+
     def test_older_checkpoint_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             metadata_path = Path(directory) / "conversation.json"

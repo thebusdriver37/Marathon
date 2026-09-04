@@ -13,11 +13,16 @@ from pathlib import Path
 from typing import Iterator
 
 
-# Schema 5 checkpoints include replayable local reasoning capsules.
+# Schema 7 checkpoints track speculative-decoder snapshot sidecars.
+# Schema 6 preserved chronological developer and system context, but its slot
+# files only contained the target model state.
+# Schema 5 hoisted those messages ahead of the conversation, invalidating KV
+# state whenever Codex refreshed resume-time context.
 # Schema 4 could fingerprint reasoning that Codex omitted during persistence.
 # Older schemas cannot safely validate the reusable prompt prefix.
-CHECKPOINT_SCHEMA = 5
+CHECKPOINT_SCHEMA = 7
 CHECKPOINT_PREFIX = "conversation__"
+SNAPSHOT_SIDECAR_SUFFIXES = (".draft", ".spec")
 MAX_CHECKPOINT_CACHE_BYTES = 32 * 1024**3
 PENDING_MAX_AGE_SECONDS = 60 * 60
 
@@ -42,6 +47,7 @@ class CheckpointMetadata:
     context_tokens: int
     conversation_item_count: int
     conversation_prefix_hash: str
+    sidecar_suffixes: tuple[str, ...]
     created_at: float
     updated_at: float
 
@@ -59,12 +65,24 @@ class CheckpointMetadata:
                 int(payload["conversation_item_count"]),
             )
             conversation_prefix_hash = str(payload["conversation_prefix_hash"])
+            raw_sidecar_suffixes = payload["sidecar_suffixes"]
             if (
                 conversation_item_count <= 0
                 or len(conversation_prefix_hash) != 64
                 or any(
                     character not in "0123456789abcdef"
                     for character in conversation_prefix_hash
+                )
+                or not isinstance(raw_sidecar_suffixes, list)
+                or len(raw_sidecar_suffixes) > len(SNAPSHOT_SIDECAR_SUFFIXES)
+            ):
+                return None
+            sidecar_suffixes = tuple(str(value) for value in raw_sidecar_suffixes)
+            if (
+                len(set(sidecar_suffixes)) != len(sidecar_suffixes)
+                or any(
+                    suffix not in SNAPSHOT_SIDECAR_SUFFIXES
+                    for suffix in sidecar_suffixes
                 )
             ):
                 return None
@@ -79,6 +97,7 @@ class CheckpointMetadata:
                 context_tokens=max(0, int(payload["context_tokens"])),
                 conversation_item_count=conversation_item_count,
                 conversation_prefix_hash=conversation_prefix_hash,
+                sidecar_suffixes=sidecar_suffixes,
                 created_at=float(payload["created_at"]),
                 updated_at=float(payload["updated_at"]),
             )
@@ -89,6 +108,7 @@ class CheckpointMetadata:
 @dataclass(frozen=True)
 class CheckpointRecord:
     snapshot_path: Path
+    sidecar_paths: tuple[Path, ...]
     metadata_path: Path
     metadata: CheckpointMetadata | None
     size_bytes: int
@@ -153,6 +173,10 @@ class RollingCheckpointStore:
         return snapshot_path.with_suffix(".json")
 
     @staticmethod
+    def _sidecar_path(snapshot_path: Path, suffix: str) -> Path:
+        return Path(f"{snapshot_path}{suffix}")
+
+    @staticmethod
     def _write_metadata(path: Path, metadata: CheckpointMetadata) -> None:
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(
@@ -165,11 +189,12 @@ class RollingCheckpointStore:
     @staticmethod
     def _unlink_record(record: CheckpointRecord) -> int:
         removed_bytes = 0
-        try:
-            record.snapshot_path.unlink()
-            removed_bytes = record.size_bytes
-        except OSError:
-            pass
+        for path in (record.snapshot_path, *record.sidecar_paths):
+            try:
+                removed_bytes += path.stat().st_size
+                path.unlink()
+            except OSError:
+                pass
         try:
             record.metadata_path.unlink()
         except OSError:
@@ -186,15 +211,37 @@ class RollingCheckpointStore:
             return None
         metadata_path = cls._metadata_path(snapshot_path)
         metadata = CheckpointMetadata.from_path(metadata_path)
+        sidecar_paths = tuple(
+            cls._sidecar_path(snapshot_path, suffix)
+            for suffix in SNAPSHOT_SIDECAR_SUFFIXES
+            if cls._sidecar_path(snapshot_path, suffix).is_file()
+        )
+        if metadata is not None:
+            expected_sidecars = tuple(
+                cls._sidecar_path(snapshot_path, suffix)
+                for suffix in metadata.sidecar_suffixes
+            )
+            try:
+                sidecars_valid = all(
+                    path.is_file() and path.stat().st_size > 0
+                    for path in expected_sidecars
+                )
+            except OSError:
+                sidecars_valid = False
+            if not sidecars_valid:
+                metadata = None
         last_used_at = max(
             stat.st_mtime,
             metadata.updated_at if metadata is not None else 0.0,
         )
         return CheckpointRecord(
             snapshot_path=snapshot_path,
+            sidecar_paths=sidecar_paths,
             metadata_path=metadata_path,
             metadata=metadata,
-            size_bytes=stat.st_size,
+            size_bytes=stat.st_size + sum(
+                path.stat().st_size for path in sidecar_paths
+            ),
             last_used_at=last_used_at,
         )
 
@@ -236,7 +283,11 @@ class RollingCheckpointStore:
         ):
             try:
                 if path.is_file() and path.stat().st_mtime < cutoff:
-                    path.unlink()
+                    for member in (
+                        path,
+                        *(self._sidecar_path(path, suffix) for suffix in SNAPSHOT_SIDECAR_SUFFIXES),
+                    ):
+                        member.unlink(missing_ok=True)
                     deleted.append(str(path))
             except OSError:
                 continue
@@ -342,31 +393,6 @@ class RollingCheckpointStore:
             return None
         return record
 
-    def find_compatible(
-        self,
-        *,
-        profile_slug: str,
-        profile_alias: str,
-        prompt_cache_key: str,
-        backend_cache_id: str,
-    ) -> CheckpointRecord | None:
-        """Find a snapshot that this backend can safely token-match."""
-
-        key_hash = conversation_key_hash(prompt_cache_key)
-        snapshot_path = self.profile_dir(profile_slug) / self.snapshot_filename(key_hash)
-        record = self._record(snapshot_path)
-        if record is None or record.metadata is None:
-            return None
-        metadata = record.metadata
-        if (
-            metadata.key_hash != key_hash
-            or metadata.profile_slug != profile_slug
-            or metadata.profile_alias != profile_alias
-            or metadata.backend_cache_id != backend_cache_id
-        ):
-            return None
-        return record
-
     def find_any(
         self,
         *,
@@ -380,7 +406,11 @@ class RollingCheckpointStore:
     def mark_used(self, record: CheckpointRecord) -> None:
         now = time.time()
         with self._locked():
-            for path in (record.snapshot_path, record.metadata_path):
+            for path in (
+                record.snapshot_path,
+                *record.sidecar_paths,
+                record.metadata_path,
+            ):
                 try:
                     os.utime(path, (now, now))
                 except OSError:
@@ -392,10 +422,14 @@ class RollingCheckpointStore:
 
     def discard_pending(self, profile_slug: str, pending_filename: str) -> None:
         path = self.profile_dir(profile_slug) / pending_filename
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        for member in (
+            path,
+            *(self._sidecar_path(path, suffix) for suffix in SNAPSHOT_SIDECAR_SUFFIXES),
+        ):
+            try:
+                member.unlink()
+            except OSError:
+                pass
 
     def commit(
         self,
@@ -417,7 +451,15 @@ class RollingCheckpointStore:
         final_path = directory / self.snapshot_filename(key_hash)
         metadata_path = directory / self.metadata_filename(key_hash)
         try:
-            pending_size = pending_path.stat().st_size
+            pending_paths = (
+                pending_path,
+                *(
+                    self._sidecar_path(pending_path, suffix)
+                    for suffix in SNAPSHOT_SIDECAR_SUFFIXES
+                    if self._sidecar_path(pending_path, suffix).is_file()
+                ),
+            )
+            pending_size = sum(path.stat().st_size for path in pending_paths)
         except OSError:
             return {"status": "error", "reason": "slot save produced no checkpoint"}
         if pending_size <= 0:
@@ -450,6 +492,10 @@ class RollingCheckpointStore:
             context_tokens=max(0, context_tokens),
             conversation_item_count=max(0, conversation_item_count),
             conversation_prefix_hash=conversation_prefix_hash,
+            sidecar_suffixes=tuple(
+                str(path).removeprefix(str(pending_path))
+                for path in pending_paths[1:]
+            ),
             created_at=created_at,
             updated_at=now,
         )
@@ -457,20 +503,33 @@ class RollingCheckpointStore:
         with self._locked():
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(directory, 0o700)
-            try:
-                os.chmod(pending_path, 0o600)
-            except OSError:
-                # Container-backed llama.cpp workers can create the snapshot as
-                # root. The mode is still protected by the 0700 parent directory.
-                pass
+            for path in pending_paths:
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    # Container-backed llama.cpp workers can create snapshots as
+                    # root. The mode is protected by the 0700 parent directory.
+                    pass
             replaced = False
+            replaced_sidecars: list[Path] = []
             try:
+                for suffix in metadata.sidecar_suffixes:
+                    pending_sidecar = self._sidecar_path(pending_path, suffix)
+                    final_sidecar = self._sidecar_path(final_path, suffix)
+                    os.replace(pending_sidecar, final_sidecar)
+                    replaced_sidecars.append(final_sidecar)
                 os.replace(pending_path, final_path)
                 replaced = True
+                for suffix in SNAPSHOT_SIDECAR_SUFFIXES:
+                    if suffix not in metadata.sidecar_suffixes:
+                        self._sidecar_path(final_path, suffix).unlink(missing_ok=True)
                 self._write_metadata(metadata_path, metadata)
             except BaseException:
                 if replaced:
                     final_path.unlink(missing_ok=True)
+                for sidecar in replaced_sidecars:
+                    sidecar.unlink(missing_ok=True)
+                if replaced:
                     metadata_path.unlink(missing_ok=True)
                 metadata_path.with_suffix(".json.tmp").unlink(missing_ok=True)
                 raise
@@ -495,11 +554,8 @@ class RollingCheckpointStore:
                 for pending in self.local_root.glob(
                     f"*/{CHECKPOINT_PREFIX}*.pending.bin"
                 ):
-                    try:
-                        pending.unlink()
-                        deleted.append(str(pending))
-                    except OSError:
-                        pass
+                    self.discard_pending(pending.parent.name, pending.name)
+                    deleted.append(str(pending))
         return {
             "deleted": deleted,
             "deleted_count": len(deleted),

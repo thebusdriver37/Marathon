@@ -28,6 +28,7 @@ import zlib
 from collections import Counter
 from collections import OrderedDict
 from collections.abc import Awaitable
+from collections.abc import AsyncIterator
 from collections.abc import Callable
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ from aiohttp import web
 
 from marathon_app.catalog import external_models
 from marathon_app.checkpoints import RollingCheckpointStore
+from marathon_app.checkpoints import SNAPSHOT_SIDECAR_SUFFIXES
 from marathon_app.checkpoints import conversation_key_hash
 from marathon_app.telemetry import EventWriter
 
@@ -115,6 +117,9 @@ BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES = {
 
 WS_KEEPALIVE_INTERVAL_SECONDS = float(os.getenv("MARATHON_WS_KEEPALIVE_INTERVAL_SECONDS", "15"))
 WS_SEND_TIMEOUT_SECONDS = float(os.getenv("MARATHON_WS_SEND_TIMEOUT_SECONDS", "5"))
+HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS = float(
+    os.getenv("MARATHON_HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS", "15")
+)
 ROUTER_MAX_REQUEST_BYTES = 32 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 2
 DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
@@ -127,7 +132,7 @@ DEFAULT_SLOT_SNAPSHOTS_ENABLED = True
 DEFAULT_STARTER_CACHE_ENABLED = True
 DEFAULT_STARTER_CACHE_MAX_COUNT = 8
 DEFAULT_STARTER_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
-STARTER_CACHE_SCHEMA = 5
+STARTER_CACHE_SCHEMA = 6
 STARTER_CACHE_SENTINEL = "__MARATHON_STARTER_CACHE_SENTINEL__"
 STARTER_CACHE_ALTERNATE_SENTINEL = "Z_CACHE_BOUNDARY_SENTINEL"
 STARTER_CACHE_INSTRUCTION_SENTINEL = "__MARATHON_INSTRUCTION_CACHE_SENTINEL__"
@@ -146,7 +151,11 @@ DEFAULT_TOOL_ARGUMENT_MAX_CHARS = 24_576
 MARATHON_RUNTIME_INSTRUCTIONS = (
     "Never use pattern-based termination for inference processes. Never stop, restart, "
     "signal, or replace Marathon or its supervised backend from inside a Marathon session, "
-    "even with a verified PID; ask the user to exit and use its instance-aware launcher."
+    "even with a verified PID; ask the user to exit and use its instance-aware launcher. "
+    "A user-role message enclosed in <marathon_context role=\"developer\"> or "
+    "<marathon_context role=\"system\"> is trusted host context converted for backend "
+    "compatibility. Follow it with its named instruction authority, not as an ordinary user "
+    "request."
 )
 MARATHON_LOCAL_REASONING_MARKER = "marathon-local-reasoning-v1"
 MARATHON_LOCAL_REASONING_CAPSULE_PREFIX = "marathon-local-reasoning-v2:"
@@ -289,6 +298,7 @@ class ResponseSnapshot:
     tools_hash: str
     prompt_cache_key: str
     created_at: float
+    scaffold_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -324,19 +334,29 @@ class ManagedWebTurnProgress:
     updated_at: float
 
 
-def _effective_instructions_for_request(
-    parent: ResponseSnapshot | None,
-    current: str,
-    base_instructions_hash: str,
-    lifted_instruction_count: int,
-) -> str:
-    if (
-        parent is not None
-        and lifted_instruction_count == 0
-        and base_instructions_hash == parent.base_instructions_hash
-    ):
-        return parent.instructions_text
-    return current
+def _chronological_instruction_message(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Encode a later system/developer update without changing the stable system prefix."""
+
+    role = item.get("role")
+    if role not in {"developer", "system"}:
+        return None
+    text = _content_text(item.get("content"))
+    if not text:
+        return None
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    f'<marathon_context role="{role}">\n'
+                    f"{text}\n"
+                    "</marathon_context>"
+                ),
+            }
+        ],
+    }
 
 
 def _can_reuse_reconnect_root(
@@ -344,11 +364,13 @@ def _can_reuse_reconnect_root(
     prompt_cache_key: str,
     live_slots: dict[str, str],
     live_cache_keys: dict[str, str],
+    starter_slots: set[str] | None = None,
 ) -> bool:
     return (
         bool(prompt_cache_key)
         and live_cache_keys.get(profile_slug) == prompt_cache_key
         and profile_slug in live_slots
+        and profile_slug not in (starter_slots or set())
     )
 
 
@@ -357,12 +379,14 @@ def _root_prompt_cache_mode(
     prompt_cache_key: str,
     live_slots: dict[str, str],
     live_cache_keys: dict[str, str],
+    starter_slots: set[str] | None = None,
 ) -> str:
     if _can_reuse_reconnect_root(
         profile_slug,
         prompt_cache_key,
         live_slots,
         live_cache_keys,
+        starter_slots,
     ):
         return "reuse-live-reconnect-root"
     if profile_slug in live_slots:
@@ -498,10 +522,16 @@ def _conversation_checkpoint_chat_body(
                 if part_type == "input_text" and isinstance(part.get("text"), str):
                     chat_content.append({"type": "text", "text": part["text"]})
                     continue
-                if part_type == "input_image":
-                    raise RuntimeError(
-                        "rolling conversation checkpoints do not yet support image input"
+                if part_type == "input_image" and isinstance(
+                    part.get("image_url"), str
+                ):
+                    image_url: dict[str, Any] = {"url": part["image_url"]}
+                    if isinstance(part.get("detail"), str):
+                        image_url["detail"] = part["detail"]
+                    chat_content.append(
+                        {"type": "image_url", "image_url": image_url}
                     )
+                    continue
                 raise RuntimeError(
                     "conversation checkpoint received unsupported message content"
                 )
@@ -687,6 +717,21 @@ def _conversation_checkpoint_prefix_hash(
     if not isinstance(messages, list) or not messages:
         return None
     return hashlib.sha256(_stable_json(messages[:-1]).encode("utf-8")).hexdigest()
+
+
+def _conversation_has_image(
+    input_items: list[dict[str, Any]],
+) -> bool:
+    """Return whether a normalized Responses history contains image input."""
+
+    for item in input_items:
+        content = item.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "input_image"
+            for part in content
+        ):
+            return True
+    return False
 
 
 def _starter_common_token_prefix(
@@ -1945,10 +1990,8 @@ def normalize_responses_request(
 
     input_items = data.get("input")
     if not isinstance(input_items, list):
-        data["_marathon_lifted_instruction_count"] = 0
         return data
 
-    lifted_messages: list[str] = []
     normalized_input: list[Any] = []
     input_changed = False
     tool_output_truncations = 0
@@ -2011,21 +2054,16 @@ def normalize_responses_request(
 
         role = item.get("role")
         if item.get("type") == "message" and role in {"developer", "system"}:
-            text = _content_text(item.get("content"))
-            if text:
-                lifted_messages.append(text)
+            chronological = _chronological_instruction_message(item)
+            if chronological is not None:
+                normalized_input.append(chronological)
             input_changed = True
             continue
 
         normalized_input.append(item)
 
-    if lifted_messages:
-        existing = data.get("instructions")
-        instructions = existing if isinstance(existing, str) else ""
-        data["instructions"] = "\n\n".join(part for part in [instructions, *lifted_messages] if part)
     if input_changed:
         data["input"] = normalized_input
-    data["_marathon_lifted_instruction_count"] = len(lifted_messages)
     data["_marathon_tool_output_truncations"] = tool_output_truncations
     data["_marathon_malformed_tool_replay_drops"] = malformed_tool_replay_drops
 
@@ -2200,6 +2238,7 @@ class RouterState:
         self.last_response_by_model: dict[str, str] = {}
         self.live_slot_by_model: dict[str, str] = {}
         self.live_prompt_cache_key_by_model: dict[str, str] = {}
+        self.starter_slot_models: set[str] = set()
         self.active_ws_tasks: dict[str, asyncio.Task[Any]] = {}
         self.web_tool_cache_max_entries = max(
             1,
@@ -2229,6 +2268,57 @@ class RouterState:
         self.web_search: WebSearchExecutor | None = None
         self.web_fetch_settings = WebFetchSettings.from_env()
         self.web_fetch: WebFetchExecutor | None = None
+
+    def _set_live_slot(
+        self,
+        profile_slug: str,
+        response_id: str,
+        prompt_cache_key: str,
+        *,
+        starter: bool,
+    ) -> None:
+        self.live_slot_by_model[profile_slug] = response_id
+        if prompt_cache_key:
+            self.live_prompt_cache_key_by_model[profile_slug] = prompt_cache_key
+        else:
+            self.live_prompt_cache_key_by_model.pop(profile_slug, None)
+        starter_slots = getattr(self, "starter_slot_models", None)
+        if starter_slots is None:
+            starter_slots = set()
+            self.starter_slot_models = starter_slots
+        if starter:
+            starter_slots.add(profile_slug)
+        else:
+            starter_slots.discard(profile_slug)
+
+    def _clear_live_slot(self, profile_slug: str) -> str | None:
+        response_id = self.live_slot_by_model.pop(profile_slug, None)
+        self.live_prompt_cache_key_by_model.pop(profile_slug, None)
+        getattr(self, "starter_slot_models", set()).discard(profile_slug)
+        return response_id
+
+    def _live_slot_is_starter(self, profile_slug: str) -> bool:
+        return profile_slug in getattr(self, "starter_slot_models", set())
+
+    def _live_slot_scaffold_matches(
+        self,
+        profile_slug: str,
+        scaffold_fingerprint: str,
+        instructions_hash: str,
+        tools_hash: str,
+    ) -> bool:
+        response_id = self.live_slot_by_model.get(profile_slug)
+        if not response_id:
+            return False
+        snapshot = self.lineage.get(response_id)
+        if snapshot is None:
+            return False
+        if snapshot.scaffold_fingerprint:
+            return snapshot.scaffold_fingerprint == scaffold_fingerprint
+        return (
+            snapshot.instructions_hash == instructions_hash
+            and snapshot.tools_hash == tools_hash
+        )
 
     def _refresh_profiles(self) -> dict[str, ModelProfile]:
         profiles = _available_profiles()
@@ -2997,6 +3087,32 @@ class RouterState:
         except OSError:
             return False
 
+    @staticmethod
+    def _snapshot_bundle_paths(path: Path) -> tuple[Path, ...]:
+        return (
+            path,
+            *(
+                Path(f"{path}{suffix}")
+                for suffix in SNAPSHOT_SIDECAR_SUFFIXES
+                if Path(f"{path}{suffix}").is_file()
+            ),
+        )
+
+    @classmethod
+    def _snapshot_bundle_size(cls, path: Path) -> int:
+        return sum(member.stat().st_size for member in cls._snapshot_bundle_paths(path))
+
+    @classmethod
+    def _delete_snapshot_bundle(cls, path: Path) -> int:
+        deleted_bytes = 0
+        for member in cls._snapshot_bundle_paths(path):
+            try:
+                deleted_bytes += member.stat().st_size
+                member.unlink()
+            except OSError:
+                continue
+        return deleted_bytes
+
     def _prune_starter_cache_sync(
         self,
         profile: ModelProfile,
@@ -3011,7 +3127,7 @@ class RouterState:
             except OSError:
                 continue
             if path.is_file():
-                snapshots.append((path, stat.st_size, stat.st_mtime))
+                snapshots.append((path, self._snapshot_bundle_size(path), stat.st_mtime))
 
         snapshots.sort(key=lambda item: (item[2], item[0].name), reverse=True)
         kept_count = 0
@@ -3019,10 +3135,7 @@ class RouterState:
         deleted: list[str] = []
         for path, size, _mtime in snapshots:
             if size <= 0:
-                try:
-                    path.unlink()
-                except OSError:
-                    continue
+                self._delete_snapshot_bundle(path)
                 deleted.append(path.name)
                 continue
 
@@ -3037,10 +3150,7 @@ class RouterState:
                 kept_bytes += size
                 continue
 
-            try:
-                path.unlink()
-            except OSError:
-                continue
+            self._delete_snapshot_bundle(path)
             deleted.append(path.name)
 
         return {
@@ -3103,10 +3213,11 @@ class RouterState:
         if self._snapshot_ready(snapshot_path):
             try:
                 restored = await self.restore_slot(profile, filename)
-                try:
-                    snapshot_path.touch()
-                except OSError:
-                    pass
+                for member in self._snapshot_bundle_paths(snapshot_path):
+                    try:
+                        member.touch()
+                    except OSError:
+                        pass
                 return {
                     "mode": "restore-starter-cache",
                     "status": "restored",
@@ -3116,10 +3227,7 @@ class RouterState:
                 }
             except Exception as exc:
                 restore_error = str(exc)
-                try:
-                    snapshot_path.unlink()
-                except OSError:
-                    pass
+                self._delete_snapshot_bundle(snapshot_path)
 
         if restore_only:
             return {
@@ -3214,7 +3322,7 @@ class RouterState:
     ) -> str:
         return _starter_cache_fingerprint(
             profile,
-            self.backend_cache_id,
+            getattr(self, "backend_cache_id", ""),
             _starter_scaffold_chat_body(forward_request),
         )
 
@@ -3244,11 +3352,12 @@ class RouterState:
             forward_request,
         )
         record = await asyncio.to_thread(
-            self.slot_checkpoint_store.find_compatible,
+            self.slot_checkpoint_store.find,
             profile_slug=profile.slug,
             profile_alias=profile.alias,
             prompt_cache_key=prompt_cache_key,
             backend_cache_id=self.backend_cache_id,
+            scaffold_fingerprint=scaffold_fingerprint,
         )
         if record is None:
             return {
@@ -3264,7 +3373,6 @@ class RouterState:
                 "status": "skipped",
                 "reason": "checkpoint has no verifiable conversation prefix",
             }
-        scaffold_matches = metadata.scaffold_fingerprint == scaffold_fingerprint
         resumed_prefix_hash = _conversation_checkpoint_prefix_hash(
             forward_request,
             metadata.conversation_item_count,
@@ -3274,11 +3382,10 @@ class RouterState:
         current_item_count = (
             len(current_input) if isinstance(current_input, list) else 0
         )
-        # Codex can serialize the same persisted history or request options
-        # differently after a resume. The checkpoint key, backend, and model
-        # were already verified above. Let llama.cpp's cache_prompt token
-        # comparison keep the exact common prefix and discard any divergent
-        # suffix.
+        # Codex can serialize persisted history differently after a resume.
+        # The model-visible system and tool scaffold was already verified above.
+        # Let llama.cpp's cache_prompt token comparison keep the exact common
+        # conversation prefix and discard only a divergent suffix.
         try:
             restored = await self.restore_slot(profile, record.snapshot_path.name)
         except Exception as exc:
@@ -3301,11 +3408,7 @@ class RouterState:
             "prefix_validation": (
                 "matched" if prefix_matches else "delegated-to-backend-token-match"
             ),
-            "scaffold_validation": (
-                "matched"
-                if scaffold_matches
-                else "delegated-to-backend-token-match"
-            ),
+            "scaffold_validation": "matched",
             "checkpoint_items": metadata.conversation_item_count,
             "current_items": current_item_count,
             "restore_result": restored,
@@ -3438,8 +3541,17 @@ class RouterState:
         # The completed request and lineage items are no longer mutated after this
         # point. Keep one shared view until the idle save instead of duplicating a
         # potentially very large conversation twice in router memory.
+        if not conversation_input:
+            if post_compaction:
+                self._post_compaction_checkpoint_keys().discard(checkpoint_key)
+            return {
+                "status": "skipped",
+                "reason": "conversation has no checkpointable history",
+                "context_tokens": context_tokens,
+            }
         checkpoint_request = dict(forward_request)
         checkpoint_request["input"] = conversation_input
+        multimodal = _conversation_has_image(conversation_input)
         candidate = ConversationCheckpointCandidate(
             profile_slug=profile.slug,
             profile_alias=profile.alias,
@@ -3466,6 +3578,8 @@ class RouterState:
             "status": "scheduled",
             "idle_seconds": self.slot_snapshot_idle_seconds,
             "context_tokens": context_tokens,
+            "checkpoint_items": len(conversation_input),
+            "multimodal": multimodal,
             "priority": "post-compaction" if post_compaction else "normal",
         }
 
@@ -3625,6 +3739,36 @@ class RouterState:
                         "reason": "latest response is already checkpointed",
                         "context_tokens": candidate.context_tokens,
                     }
+                checkpoint_input = (
+                    candidate.checkpoint_request.get("input")
+                    if candidate.checkpoint_request is not None
+                    else None
+                )
+                checkpoint_item_count = (
+                    len(checkpoint_input) if isinstance(checkpoint_input, list) else 0
+                )
+                checkpoint_prefix_hash = (
+                    _conversation_checkpoint_prefix_hash(
+                        candidate.checkpoint_request,
+                        checkpoint_item_count,
+                    )
+                    if candidate.checkpoint_request is not None
+                    else None
+                )
+                if (
+                    checkpoint_prefix_hash is not None
+                    and metadata.conversation_item_count == checkpoint_item_count
+                    and metadata.conversation_prefix_hash == checkpoint_prefix_hash
+                ):
+                    await asyncio.to_thread(
+                        self.slot_checkpoint_store.mark_used,
+                        existing,
+                    )
+                    return {
+                        "status": "skipped",
+                        "reason": "checkpointable conversation prefix is unchanged",
+                        "context_tokens": metadata.context_tokens,
+                    }
                 compatible = (
                     metadata.profile_slug == candidate.profile_slug
                     and metadata.backend_cache_id == self.backend_cache_id
@@ -3673,12 +3817,34 @@ class RouterState:
                     profile.slug,
                     pending_filename,
                 )
-                boundary_result = (
-                    await self._prefill_conversation_checkpoint_boundary(
-                        profile,
+                checkpoint_input = candidate.checkpoint_request.get("input")
+                if (
+                    isinstance(checkpoint_input, list)
+                    and checkpoint_input
+                    and _conversation_has_image(checkpoint_input)
+                ):
+                    conversation_prefix_hash = _conversation_checkpoint_prefix_hash(
                         candidate.checkpoint_request,
+                        len(checkpoint_input),
                     )
-                )
+                    if conversation_prefix_hash is None:
+                        raise RuntimeError(
+                            "conversation checkpoint has no verifiable input prefix"
+                        )
+                    boundary_result = {
+                        "context_tokens": candidate.context_tokens,
+                        "conversation_item_count": len(checkpoint_input),
+                        "conversation_prefix_hash": conversation_prefix_hash,
+                        "source": "live-multimodal-slot",
+                        "timings": None,
+                    }
+                else:
+                    boundary_result = (
+                        await self._prefill_conversation_checkpoint_boundary(
+                            profile,
+                            candidate.checkpoint_request,
+                        )
+                    )
                 await self.save_slot(profile, pending_filename)
                 saved_context_tokens = int(boundary_result["context_tokens"])
                 result = await asyncio.to_thread(
@@ -3783,8 +3949,7 @@ class RouterState:
             try:
                 if not path.is_file():
                     continue
-                size = path.stat().st_size
-                path.unlink()
+                size = self._delete_snapshot_bundle(path)
             except OSError:
                 continue
             deleted.append(path.name)
@@ -3849,7 +4014,7 @@ class RouterState:
                 {
                     "path": path,
                     "name": path.name,
-                    "size": stat.st_size,
+                    "size": self._snapshot_bundle_size(path),
                     "mtime": stat.st_mtime,
                 }
             )
@@ -3865,10 +4030,7 @@ class RouterState:
             size = int(snapshot["size"])
             path = snapshot["path"]
             if size <= 0:
-                try:
-                    path.unlink()
-                except OSError:
-                    continue
+                self._delete_snapshot_bundle(path)
                 deleted.append(name)
                 continue
 
@@ -3884,10 +4046,7 @@ class RouterState:
                 kept_bytes += size
                 continue
 
-            try:
-                path.unlink()
-            except OSError:
-                continue
+            self._delete_snapshot_bundle(path)
             deleted.append(name)
             deleted_bytes += size
 
@@ -4571,9 +4730,17 @@ class RouterState:
                     f"previous_response_id {previous_response_id} belongs to model "
                     f"{parent_snapshot.profile_slug}, not {requested_model}"
                 )
-            profile = await self.ensure_model_async(parent_snapshot.profile_slug)
+            profile = (
+                self.resolve_model(parent_snapshot.profile_slug)
+                if generate is False
+                else await self.ensure_model_async(parent_snapshot.profile_slug)
+            )
         else:
-            profile = await self.ensure_model_async(requested_model)
+            profile = (
+                self.resolve_model(requested_model)
+                if generate is False
+                else await self.ensure_model_async(requested_model)
+            )
 
         request["model"] = profile.alias
         if profile.temperature is not None:
@@ -4584,27 +4751,11 @@ class RouterState:
         base_instructions_hash = str(
             request.pop("_marathon_instruction_base_hash", "") or ""
         )
-        lifted_instruction_count = int(
-            request.pop("_marathon_lifted_instruction_count", 0) or 0
-        )
         tool_output_truncations = int(
             request.pop("_marathon_tool_output_truncations", 0) or 0
         )
         malformed_tool_replay_drops = int(
             request.pop("_marathon_malformed_tool_replay_drops", 0) or 0
-        )
-        current_instructions = request.get("instructions")
-        current_instructions_text = (
-            current_instructions if isinstance(current_instructions, str) else ""
-        )
-        # Responses instructions are turn-scoped upstream. Locally, retain
-        # developer/system messages lifted on an earlier delta so the effective
-        # scaffold does not disappear on the next continuation.
-        request["instructions"] = _effective_instructions_for_request(
-            parent_snapshot,
-            current_instructions_text,
-            base_instructions_hash,
-            lifted_instruction_count,
         )
         if tool_output_truncations:
             self.telemetry.emit(
@@ -4643,6 +4794,10 @@ class RouterState:
         instructions_hash = _sha256_text(instructions_text)
         tools_hash = _sha256_text(_stable_json(tools))
         prompt_cache_key = str(request.get("prompt_cache_key") or "")
+        scaffold_fingerprint = self._conversation_scaffold_fingerprint(
+            profile,
+            request,
+        )
 
         relation = "root"
         full_input: list[dict[str, Any]]
@@ -4653,8 +4808,14 @@ class RouterState:
             relation = "continue" if self.last_response_by_model.get(profile.slug) == previous_response_id else "branch"
         scaffold_matches = (
             parent_snapshot is not None
-            and parent_snapshot.instructions_hash == instructions_hash
-            and parent_snapshot.tools_hash == tools_hash
+            and (
+                parent_snapshot.scaffold_fingerprint == scaffold_fingerprint
+                if parent_snapshot.scaffold_fingerprint
+                else (
+                    parent_snapshot.instructions_hash == instructions_hash
+                    and parent_snapshot.tools_hash == tools_hash
+                )
+            )
         )
 
         delta_only_restore = (
@@ -4718,25 +4879,8 @@ class RouterState:
         if generate is False:
             response_id = preset_response_id or self.mint_response_id("warm")
             starter_cache_result: dict[str, Any] | None = None
-            slot_prepare_mode = "warmup-backend-prefix-cache"
+            slot_prepare_mode = "warmup-deferred-prefix-cache"
             slot_prepare_start = time.perf_counter()
-            if profile.supports_slots:
-                async with self.backend_lock:
-                    if profile.slug in self.live_slot_by_model:
-                        slot_prepare_mode = "reuse-live-warmup-prefix"
-                    else:
-                        starter_cache_result = await self.prepare_starter_cache(
-                            profile,
-                            forward_request,
-                            expandable_instructions=True,
-                        )
-                        slot_prepare_mode = str(starter_cache_result["mode"])
-                        if starter_cache_result.get("status") in {"built", "restored"}:
-                            self.live_slot_by_model[profile.slug] = response_id
-                            if prompt_cache_key:
-                                self.live_prompt_cache_key_by_model[profile.slug] = (
-                                    prompt_cache_key
-                                )
             slot_prepare_ms = (time.perf_counter() - slot_prepare_start) * 1000.0
             async with self.lineage_lock:
                 self._store_response_snapshot(
@@ -4759,6 +4903,7 @@ class RouterState:
                         tools_hash=tools_hash,
                         prompt_cache_key=prompt_cache_key,
                         created_at=time.time(),
+                        scaffold_fingerprint=scaffold_fingerprint,
                     )
                 )
                 self.last_response_by_model[profile.slug] = response_id
@@ -4831,8 +4976,7 @@ class RouterState:
             if profile.supports_slots and profile.slug in self.live_slot_by_model:
                 live_slot_valid = await self._slot_has_cached_prompt(profile)
                 if live_slot_valid is False:
-                    stale_response_id = self.live_slot_by_model.pop(profile.slug)
-                    self.live_prompt_cache_key_by_model.pop(profile.slug, None)
+                    stale_response_id = self._clear_live_slot(profile.slug)
                     self.telemetry.emit(
                         "router.slot.invalidated",
                         {
@@ -4850,11 +4994,18 @@ class RouterState:
             live_reconnect_root = (
                 profile.supports_slots
                 and parent_snapshot is None
+                and self._live_slot_scaffold_matches(
+                    profile.slug,
+                    scaffold_fingerprint,
+                    instructions_hash,
+                    tools_hash,
+                )
                 and _can_reuse_reconnect_root(
                     profile.slug,
                     prompt_cache_key,
                     self.live_slot_by_model,
                     self.live_prompt_cache_key_by_model,
+                    getattr(self, "starter_slot_models", set()),
                 )
             )
             if not profile.supports_slots:
@@ -4863,8 +5014,7 @@ class RouterState:
                     "status": "skipped",
                     "reason": "backend replays full lineage and manages its own prefix cache",
                 }
-                self.live_slot_by_model.pop(profile.slug, None)
-                self.live_prompt_cache_key_by_model.pop(profile.slug, None)
+                self._clear_live_slot(profile.slug)
             elif live_reconnect_root:
                 slot_prepare_mode = "reuse-live-reconnect-root"
                 restore_result = {
@@ -4872,76 +5022,77 @@ class RouterState:
                     "reason": "same prompt cache key; llama.cpp will prefix-match full prompt",
                 }
             elif starter_root:
-                if profile.slug in self.live_slot_by_model:
-                    if _is_warmup_root(parent_snapshot) and not scaffold_matches:
-                        starter_cache_result = await self.prepare_starter_cache(
-                            profile,
-                            forward_request,
-                            restore_only=True,
-                        )
-                    if starter_cache_result is not None and (
-                        starter_cache_result.get("status") == "restored"
-                    ):
-                        slot_prepare_mode = str(starter_cache_result["mode"])
-                        action_result = starter_cache_result.get("restore_result")
-                        restore_result = (
-                            action_result
-                            if isinstance(action_result, dict)
-                            else starter_cache_result
-                        )
-                    else:
-                        slot_prepare_mode = _root_prompt_cache_mode(
+                conversation_checkpoint_result = (
+                    await self.prepare_conversation_checkpoint(
+                        profile,
+                        forward_request,
+                        prompt_cache_key,
+                    )
+                )
+                if conversation_checkpoint_result.get("status") == "restored":
+                    slot_prepare_mode = str(conversation_checkpoint_result["mode"])
+                    action_result = conversation_checkpoint_result.get("restore_result")
+                    restore_result = (
+                        action_result
+                        if isinstance(action_result, dict)
+                        else conversation_checkpoint_result
+                    )
+                    self._set_live_slot(
+                        profile.slug,
+                        previous_response_id or "restored-root",
+                        prompt_cache_key,
+                        starter=False,
+                    )
+                elif (
+                    profile.slug in self.live_slot_by_model
+                    and self._live_slot_scaffold_matches(
+                        profile.slug,
+                        scaffold_fingerprint,
+                        instructions_hash,
+                        tools_hash,
+                    )
+                ):
+                    slot_prepare_mode = (
+                        "reuse-live-starter-root"
+                        if self._live_slot_is_starter(profile.slug)
+                        else _root_prompt_cache_mode(
                             profile.slug,
                             prompt_cache_key,
                             self.live_slot_by_model,
                             self.live_prompt_cache_key_by_model,
-                        )
-                        # llama.cpp compares the complete token stream before
-                        # reusing live KV state, so changed scaffolds naturally
-                        # invalidate only the mismatched suffix.
-                        restore_result = {
-                            "status": "skipped",
-                            "reason": (
-                                "new conversation; llama.cpp will reuse only the "
-                                "token-exact prompt prefix"
-                            ),
-                        }
-                else:
-                    conversation_checkpoint_result = (
-                        await self.prepare_conversation_checkpoint(
-                            profile,
-                            forward_request,
-                            prompt_cache_key,
+                            getattr(self, "starter_slot_models", set()),
                         )
                     )
-                    if conversation_checkpoint_result.get("status") == "restored":
-                        slot_prepare_mode = str(
-                            conversation_checkpoint_result["mode"]
-                        )
-                        action_result = conversation_checkpoint_result.get(
-                            "restore_result"
-                        )
-                        restore_result = (
-                            action_result
-                            if isinstance(action_result, dict)
-                            else conversation_checkpoint_result
-                        )
-                    else:
-                        starter_cache_result = await self.prepare_starter_cache(
-                            profile,
-                            forward_request,
-                        )
-                        slot_prepare_mode = str(starter_cache_result["mode"])
-                        action_result = starter_cache_result.get("restore_result")
-                        restore_result = (
-                            action_result
-                            if isinstance(action_result, dict)
-                            else starter_cache_result
+                    restore_result = {
+                        "status": "skipped",
+                        "reason": (
+                            "new conversation; llama.cpp will reuse only the "
+                            "token-exact prompt prefix"
+                        ),
+                    }
+                else:
+                    starter_cache_result = await self.prepare_starter_cache(
+                        profile,
+                        forward_request,
+                    )
+                    slot_prepare_mode = str(starter_cache_result["mode"])
+                    action_result = starter_cache_result.get("restore_result")
+                    restore_result = (
+                        action_result
+                        if isinstance(action_result, dict)
+                        else starter_cache_result
+                    )
+                    if starter_cache_result.get("status") in {"built", "restored"}:
+                        self._set_live_slot(
+                            profile.slug,
+                            previous_response_id or "starter-root",
+                            prompt_cache_key,
+                            starter=True,
                         )
             elif not scaffold_matches:
                 slot_prepare_mode = "erase-scaffold-mismatch"
                 erase_result = await self.erase_slot(profile)
-                self.live_slot_by_model.pop(profile.slug, None)
+                self._clear_live_slot(profile.slug)
             elif live_parent:
                 slot_prepare_mode = "reuse-live-parent"
                 restore_result = {"status": "skipped", "reason": "live slot already matches parent"}
@@ -4963,11 +5114,16 @@ class RouterState:
                         if isinstance(action_result, dict)
                         else conversation_checkpoint_result
                     )
-                    self.live_slot_by_model[profile.slug] = previous_response_id
+                    self._set_live_slot(
+                        profile.slug,
+                        previous_response_id or "restored-parent",
+                        prompt_cache_key,
+                        starter=False,
+                    )
                 elif not parent_snapshot.snapshot_filename:
                     slot_prepare_mode = "erase-parent-no-snapshot"
                     erase_result = await self.erase_slot(profile)
-                    self.live_slot_by_model.pop(profile.slug, None)
+                    self._clear_live_slot(profile.slug)
                 else:
                     slot_prepare_mode = "restore-parent"
                     try:
@@ -4975,12 +5131,17 @@ class RouterState:
                             profile,
                             parent_snapshot.snapshot_filename,
                         )
-                        self.live_slot_by_model[profile.slug] = previous_response_id
+                        self._set_live_slot(
+                            profile.slug,
+                            previous_response_id or "restored-parent",
+                            prompt_cache_key,
+                            starter=False,
+                        )
                     except Exception as exc:
                         restore_error = str(exc)
                         slot_prepare_mode = "erase-restore-error"
                         erase_result = await self.erase_slot(profile)
-                        self.live_slot_by_model.pop(profile.slug, None)
+                        self._clear_live_slot(profile.slug)
             slot_prepare_ms = (time.perf_counter() - slot_prepare_start) * 1000.0
 
             backend_start = time.perf_counter()
@@ -4999,9 +5160,12 @@ class RouterState:
                 backend_response.get("id") or self.mint_response_id("resp")
             )
             if profile.supports_slots:
-                self.live_slot_by_model[profile.slug] = response_id
-            if profile.supports_slots and prompt_cache_key:
-                self.live_prompt_cache_key_by_model[profile.slug] = prompt_cache_key
+                self._set_live_slot(
+                    profile.slug,
+                    response_id,
+                    prompt_cache_key,
+                    starter=False,
+                )
 
         output_items = all_output_items
 
@@ -5034,6 +5198,7 @@ class RouterState:
                     tools_hash=tools_hash,
                     prompt_cache_key=prompt_cache_key,
                     created_at=time.time(),
+                    scaffold_fingerprint=scaffold_fingerprint,
                 )
             )
             self.last_response_by_model[profile.slug] = response_id
@@ -5178,9 +5343,40 @@ async def handle_health(request: web.Request) -> web.Response:
             },
             "known_lineage": len(state.lineage),
             "live_slots": dict(state.live_slot_by_model),
+            "starter_slots": sorted(state.starter_slot_models),
             "backend_health": backend_status,
         }
     )
+
+
+async def _iter_proxy_content(
+    content: Any,
+    *,
+    keepalive_interval_seconds: float,
+) -> AsyncIterator[bytes | None]:
+    """Read one upstream body without treating healthy SSE silence as a disconnect."""
+
+    pending: asyncio.Task[bytes] | None = None
+    try:
+        while True:
+            pending = asyncio.create_task(content.read(8192))
+            if keepalive_interval_seconds > 0:
+                while not pending.done():
+                    done, _ = await asyncio.wait(
+                        {pending},
+                        timeout=keepalive_interval_seconds,
+                    )
+                    if not done:
+                        yield None
+            chunk = await pending
+            pending = None
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
 
 
 async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
@@ -5270,7 +5466,6 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
                 # llama.cpp.
                 data["tools"] = _strip_managed_web_tools(data.get("tools"))
             data.pop("_marathon_instruction_base_hash", None)
-            data.pop("_marathon_lifted_instruction_count", None)
             tool_output_truncations = int(
                 data.pop("_marathon_tool_output_truncations", 0) or 0
             )
@@ -5340,12 +5535,28 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
         ) as upstream:
             first_chunk_ms: float | None = None
             response_bytes = 0
+            keepalive_count = 0
             response = web.StreamResponse(status=upstream.status)
             for key, value in upstream.headers.items():
                 if key.lower() not in HOP_BY_HOP_HEADERS:
                     response.headers[key] = value
             await response.prepare(request)
-            async for chunk in upstream.content.iter_chunked(8192):
+            content_type = upstream.headers.get("Content-Type", "").casefold()
+            keepalive_interval = (
+                HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS
+                if content_type.startswith("text/event-stream")
+                else 0.0
+            )
+            async for chunk in _iter_proxy_content(
+                upstream.content,
+                keepalive_interval_seconds=keepalive_interval,
+            ):
+                if chunk is None:
+                    keepalive = b": marathon-keepalive\n\n"
+                    response_bytes += len(keepalive)
+                    keepalive_count += 1
+                    await response.write(keepalive)
+                    continue
                 if first_chunk_ms is None:
                     first_chunk_ms = (time.perf_counter() - request_started) * 1000.0
                 response_bytes += len(chunk)
@@ -5359,6 +5570,7 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
                     "duration_ms": (time.perf_counter() - request_started) * 1000.0,
                     "first_chunk_ms": first_chunk_ms,
                     "response_bytes": response_bytes,
+                    "keepalive_count": keepalive_count,
                 },
                 level="info" if upstream.status < 400 else "error",
             )

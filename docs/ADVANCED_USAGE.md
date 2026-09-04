@@ -63,6 +63,7 @@ The default instance never moves, so existing installs and scripts retain their 
 
 Marathon enables llama.cpp prompt caching and keeps completed prompt prefixes available when a new conversation starts.
 llama.cpp compares the complete token stream and reuses only the exact common prefix, so edits to the system prompt, tools, plugins, skills, project context, or `AGENTS.md` automatically reprocess the changed suffix.
+Marathon keeps the base system prompt stable and preserves later Codex developer and system updates at their chronological positions, so a resume-time environment refresh does not invalidate the conversation before that update.
 No manual invalidation or cache clearing is required.
 
 The default host-memory cache is 8 GiB.
@@ -71,7 +72,8 @@ Exiting Marathon frees the GPUs and memory cache.
 
 Marathon also saves the stable system-and-tools prefix under `~/AI/cache/marathon/slots/`.
 After a cold backend start, the first conversation restores an exact matching disk snapshot instead of processing that prefix again.
-The cache fingerprint includes the model, projector, backend binary and arguments, instructions, and tools, so incompatible changes build a new snapshot automatically.
+The cache fingerprint includes the model, projector, backend binary and arguments, instructions, and tools, while broker-managed pools include their declared cache identity.
+Incompatible changes build a new snapshot automatically.
 Marathon retains up to eight starter snapshots within a 16 GiB default limit.
 The optional `MARATHON_STARTER_CACHE_MAX_COUNT` and `MARATHON_STARTER_CACHE_MAX_BYTES` environment variables adjust those limits.
 
@@ -79,10 +81,13 @@ Rolling conversation checkpoints are separate from the starter cache and are ena
 Marathon waits for 60 seconds of conversation inactivity before saving, which keeps the large disk write off the response path.
 Before writing the checkpoint, Marathon moves the live slot to a token boundary that any next user turn can extend.
 This preserves disk-cache reuse for recurrent and hybrid models whose generated tail cannot be rolled backward after a restore.
+For multimodal conversations, Marathon saves the already validated live slot directly because rebuilding a text-only boundary would discard every token after the first image.
 The first checkpoint starts at 16,384 context tokens.
-Another save is needed only after growth of at least 16,384 tokens or 10 percent of the saved context, whichever is larger, unless Marathon is shutting down or saving the first clean post-compaction state.
+Another save is needed only after the configured minimum token growth, which defaults to 4,096 tokens, unless Marathon is shutting down or saving the first clean post-compaction state.
 Each conversation atomically replaces its previous checkpoint instead of accumulating one file per response.
-Before restoring, Marathon verifies with content-free hashes that the resumed conversation still extends the exact saved history prefix, so cancellation rollbacks, forks, and rewritten histories cannot load stale KV state.
+Speculative workers save the target model state, draft model state, and speculative boundary state as one managed bundle, so restoring a conversation cannot leave the two models at different token positions.
+Before restoring, Marathon verifies the system-and-tools scaffold with a content-free hash, then lets llama.cpp token-match the saved history prefix so harmless serialization changes can retain valid KV state.
+Multimodal checkpoints include the complete conversation history, including all text after image inputs.
 Each Marathon instance keeps at most two recent conversations, while all instances share a hard 32 GiB ceiling.
 An inactive checkpoint expires 48 hours after its last save or restore.
 Cleanup runs at startup, after saves, and periodically while Marathon remains open.
@@ -97,10 +102,10 @@ The following environment variables have matching keys in the personal catalog's
 - `MARATHON_SLOT_SNAPSHOT_TTL_SECONDS` controls inactivity expiry and defaults to `172800`.
 - `MARATHON_SLOT_SNAPSHOT_IDLE_SECONDS` controls the background-save delay and defaults to `60`.
 - `MARATHON_SLOT_SNAPSHOT_MIN_TOKENS` controls the first-save threshold and defaults to `16384`.
-- `MARATHON_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH` controls the minimum rolling-save spacing and defaults to `16384`.
-  Marathon also requires growth of at least 10 percent of the saved context when that is larger.
+- `MARATHON_SLOT_SNAPSHOT_MIN_TOKEN_GROWTH` controls the minimum rolling-save spacing and defaults to `4096`.
 
 If a checkpoint is missing, expired, too large, corrupt, or incompatible, Marathon safely falls back to the starter cache and normal prompt replay.
+WebSocket capability probes complete without loading or pre-filling the backend, and HTTP streaming fallback sends SSE keepalives while a long prompt replay is otherwise silent.
 
 ## Model and Backend Paths
 

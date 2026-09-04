@@ -1079,32 +1079,73 @@ context = 32768
             router_module._completed_message_phase([items[1]]), "final_answer"
         )
 
-    def test_lifted_instructions_persist_until_base_instructions_change(self) -> None:
-        parent = router_module.ResponseSnapshot(
-            response_id="resp_1",
-            profile_slug="dynamic-model",
-            parent_response_id=None,
-            input_items=[],
-            output_items=[],
-            conversation_item_count=0,
-            snapshot_filename="",
-            instructions_text="base\n\ndeveloper policy",
-            base_instructions_hash="base-hash",
-            instructions_hash="effective-hash",
-            tools_hash="tools-hash",
-            prompt_cache_key="session",
-            created_at=0,
+    def test_context_instructions_preserve_the_stable_system_prefix(self) -> None:
+        normalized = router_module.normalize_responses_request(
+            {
+                "instructions": "stable base",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "earlier"}],
+                    },
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {"type": "input_text", "text": "updated permissions"}
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "resume"}],
+                    },
+                ],
+            }
         )
 
-        retained = router_module._effective_instructions_for_request(
-            parent, "base", "base-hash", 0
+        self.assertEqual(normalized["instructions"], "stable base")
+        self.assertEqual(
+            [item["role"] for item in normalized["input"]],
+            ["user", "user", "user"],
         )
-        changed = router_module._effective_instructions_for_request(
-            parent, "new base", "new-base-hash", 0
+        self.assertEqual(
+            normalized["input"][1]["content"][0]["text"],
+            '<marathon_context role="developer">\n'
+            "updated permissions\n"
+            "</marathon_context>",
         )
-
-        self.assertEqual(retained, "base\n\ndeveloper policy")
-        self.assertEqual(changed, "new base")
+        resumed = router_module.normalize_responses_request(
+            {
+                "instructions": "stable base",
+                "input": [
+                    *copy.deepcopy(normalized["input"]),
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {"type": "input_text", "text": "resume environment"}
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "continue"}],
+                    },
+                ],
+            }
+        )
+        self.assertEqual(
+            router_module._conversation_checkpoint_prefix_hash(
+                normalized,
+                len(normalized["input"]),
+            ),
+            router_module._conversation_checkpoint_prefix_hash(
+                resumed,
+                len(normalized["input"]),
+            ),
+        )
 
     def test_empty_non_generating_warmup_is_a_starter_root(self) -> None:
         warmup = router_module.ResponseSnapshot(
@@ -1127,29 +1168,31 @@ context = 32768
         self.assertTrue(router_module._is_warmup_root(warmup))
         self.assertFalse(router_module._is_warmup_root(generated))
 
-    def test_non_generating_warmup_prepares_prefix_for_first_turn(self) -> None:
+    def test_non_generating_warmup_defers_prefix_work_until_first_turn(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)
+        state.resolve_model = mock.Mock(return_value=profile)
         state.ensure_model_async = mock.AsyncMock(return_value=profile)
         state.lineage_lock = asyncio.Lock()
         state.lineage = {}
         state.last_response_by_model = {}
         state.live_slot_by_model = {}
         state.live_prompt_cache_key_by_model = {}
+        state.starter_slot_models = set()
         state.experimental_delta_only = False
         state.slot_id = 0
         state.backend_lock = asyncio.Lock()
         state.prepare_starter_cache = mock.AsyncMock(
-            side_effect=[
-                {
-                    "mode": "restore-starter-cache",
-                    "status": "restored",
-                },
-                {
-                    "mode": "starter-cache-miss",
-                    "status": "miss",
-                },
-            ]
+            return_value={
+                "mode": "build-starter-cache",
+                "status": "built",
+            }
+        )
+        state.prepare_conversation_checkpoint = mock.AsyncMock(
+            return_value={
+                "mode": "conversation-checkpoint-miss",
+                "status": "skipped",
+            }
         )
         state.erase_slot = mock.AsyncMock()
         state._run_responses_loop = mock.AsyncMock(
@@ -1188,14 +1231,9 @@ context = 32768
             )
         )
 
-        state.prepare_starter_cache.assert_awaited_once()
-        self.assertTrue(
-            state.prepare_starter_cache.await_args.kwargs["expandable_instructions"]
-        )
-        self.assertEqual(
-            state.live_slot_by_model[profile.slug],
-            warmup["response_id"],
-        )
+        state.prepare_starter_cache.assert_not_awaited()
+        state.ensure_model_async.assert_not_awaited()
+        self.assertNotIn(profile.slug, state.live_slot_by_model)
 
         first_turn = asyncio.run(
             state.process_websocket_create(
@@ -1204,7 +1242,17 @@ context = 32768
                     "prompt_cache_key": "session-a",
                     "previous_response_id": warmup["response_id"],
                     "instructions": "stable system prompt",
-                    "tools": [],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "read_file",
+                            "description": "Read one file",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                            },
+                        }
+                    ],
                     "input": [
                         {
                             "type": "message",
@@ -1225,10 +1273,13 @@ context = 32768
             )
         )
 
-        self.assertEqual(state.prepare_starter_cache.await_count, 2)
-        self.assertTrue(
-            state.prepare_starter_cache.await_args_list[1].kwargs["restore_only"]
+        state.prepare_starter_cache.assert_awaited_once()
+        self.assertFalse(
+            state.prepare_starter_cache.await_args.kwargs.get(
+                "expandable_instructions", False
+            )
         )
+        state.prepare_conversation_checkpoint.assert_awaited_once()
         state.erase_slot.assert_not_awaited()
         forwarded = state._run_responses_loop.await_args.kwargs["forward_request"]
         self.assertTrue(forwarded["cache_prompt"])
@@ -1243,11 +1294,115 @@ context = 32768
         ]
         self.assertEqual(
             completed[0]["slot"]["prepare_mode"],
-            "restore-starter-cache",
+            "warmup-deferred-prefix-cache",
         )
         self.assertEqual(
             completed[1]["slot"]["prepare_mode"],
-            "reuse-live-reconnect-root",
+            "build-starter-cache",
+        )
+
+    def test_root_resume_after_warmup_attempts_conversation_checkpoint(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.resolve_model = mock.Mock(return_value=profile)
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.lineage_lock = asyncio.Lock()
+        state.lineage = {}
+        state.last_response_by_model = {}
+        state.live_slot_by_model = {}
+        state.live_prompt_cache_key_by_model = {}
+        state.starter_slot_models = set()
+        state.experimental_delta_only = False
+        state.slot_id = 0
+        state.backend_lock = asyncio.Lock()
+        state.prepare_starter_cache = mock.AsyncMock(
+            return_value={
+                "mode": "restore-starter-cache",
+                "status": "restored",
+            }
+        )
+        state.prepare_conversation_checkpoint = mock.AsyncMock(
+            return_value={
+                "mode": "restore-conversation-checkpoint",
+                "status": "restored",
+                "restore_result": {"status": "restored"},
+            }
+        )
+        state._slot_has_cached_prompt = mock.AsyncMock(return_value=True)
+        state._run_responses_loop = mock.AsyncMock(
+            return_value=(
+                {
+                    "id": "resp_resumed",
+                    "usage": {
+                        "input_tokens": 157_000,
+                        "input_tokens_details": {"cached_tokens": 150_000},
+                    },
+                },
+                [],
+                0,
+            )
+        )
+        state.schedule_conversation_checkpoint = mock.Mock(
+            return_value={"status": "scheduled"}
+        )
+        state.telemetry = mock.Mock()
+        state.trace_request = mock.Mock()
+        state.lock = threading.Lock()
+        state._trace_seq = 0
+        state._response_id_seq = 0
+        state.debug = False
+
+        asyncio.run(
+            state.process_websocket_create(
+                {
+                    "model": profile.slug,
+                    "prompt_cache_key": "resumed-session",
+                    "instructions": "stable system prompt",
+                    "tools": [],
+                    "input": [],
+                    "generate": False,
+                }
+            )
+        )
+        asyncio.run(
+            state.process_websocket_create(
+                {
+                    "model": profile.slug,
+                    "prompt_cache_key": "resumed-session",
+                    "instructions": "stable system prompt",
+                    "tools": [],
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "developer",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": "resume-time environment",
+                                }
+                            ],
+                        },
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "complete history"}
+                            ],
+                        },
+                    ],
+                }
+            )
+        )
+
+        state.prepare_conversation_checkpoint.assert_awaited_once()
+        completed = [
+            call.args[1]
+            for call in state.telemetry.emit.call_args_list
+            if call.args[0] == "router.response.completed"
+        ]
+        self.assertEqual(
+            completed[1]["slot"]["prepare_mode"],
+            "restore-conversation-checkpoint",
         )
 
     def test_lineage_uses_parent_chains_and_rebases_at_the_lru_limit(self) -> None:
@@ -1301,6 +1456,15 @@ context = 32768
                 "model", "session-b", {"model": "resp"}, {"model": "session-a"}
             )
         )
+        self.assertFalse(
+            router_module._can_reuse_reconnect_root(
+                "model",
+                "session-a",
+                {"model": "warm"},
+                {"model": "session-a"},
+                {"model"},
+            )
+        )
 
     def test_new_conversation_preserves_token_exact_root_prefix(self) -> None:
         live_slots = {"model": "resp"}
@@ -1330,7 +1494,24 @@ context = 32768
         state = object.__new__(router_module.RouterState)
         state.ensure_model_async = mock.AsyncMock(return_value=profile)
         state.lineage_lock = asyncio.Lock()
-        state.lineage = {}
+        instructions = "stable system prompt"
+        state.lineage = {
+            "resp_old": router_module.ResponseSnapshot(
+                response_id="resp_old",
+                profile_slug=profile.slug,
+                parent_response_id=None,
+                input_items=[],
+                output_items=[],
+                conversation_item_count=0,
+                snapshot_filename="",
+                instructions_text=instructions,
+                base_instructions_hash=router_module._sha256_text(instructions),
+                instructions_hash=router_module._sha256_text(instructions),
+                tools_hash=router_module._sha256_text("[]"),
+                prompt_cache_key="session-a",
+                created_at=0,
+            )
+        }
         state.last_response_by_model = {profile.slug: "resp_old"}
         state.live_slot_by_model = {profile.slug: "resp_old"}
         state.live_prompt_cache_key_by_model = {profile.slug: "session-a"}
@@ -1364,7 +1545,7 @@ context = 32768
                 {
                     "model": profile.slug,
                     "prompt_cache_key": "session-b",
-                    "instructions": "stable system prompt",
+                    "instructions": instructions,
                     "tools": [],
                     "input": [
                         {
@@ -1920,7 +2101,15 @@ context = 32768
                 request,
                 "post-compaction-response",
                 {"usage": {"total_tokens": 8_000}},
-                [],
+                [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "post-compaction turn"}
+                        ],
+                    }
+                ],
             )
             task = state.checkpoint_tasks[profile.slug]
             await task
@@ -2038,7 +2227,148 @@ context = 32768
         candidate = asyncio.run(scenario())
 
         self.assertIsNotNone(candidate.checkpoint_request)
-        self.assertIs(candidate.checkpoint_request["input"], conversation_input)
+        self.assertEqual(candidate.checkpoint_request["input"], conversation_input)
+
+    def test_checkpoint_schedule_keeps_complete_multimodal_history(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.slot_snapshots_enabled = True
+        state._closing = False
+        state.slot_snapshot_min_tokens = 16_384
+        state.slot_snapshot_idle_seconds = 60
+        state.backend_cache_id = "backend-v1"
+        state.pending_checkpoints = {}
+        state.checkpoint_tasks = {}
+        state.awaiting_post_compaction_checkpoints = set()
+        text_message = {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "before screenshot"}],
+        }
+        image_message = {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,aGVsbG8=",
+                }
+            ],
+        }
+        trailing_message = {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "after screenshot"}],
+        }
+        conversation_input = [text_message, image_message, trailing_message]
+        request = {
+            "instructions": "synthetic system prompt",
+            "tools": [],
+            "prompt_cache_key": "synthetic-session",
+        }
+
+        async def scenario() -> tuple[dict[str, object], list[dict[str, object]]]:
+            result = state.schedule_conversation_checkpoint(
+                profile,
+                request,
+                "response-one",
+                {"usage": {"total_tokens": 20_000}},
+                conversation_input,
+            )
+            candidate = state.pending_checkpoints[profile.slug]
+            task = state.checkpoint_tasks[profile.slug]
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            assert candidate.checkpoint_request is not None
+            return result, candidate.checkpoint_request["input"]
+
+        result, checkpoint_input = asyncio.run(scenario())
+
+        self.assertEqual(checkpoint_input, conversation_input)
+        self.assertEqual(result["checkpoint_items"], 3)
+        self.assertTrue(result["multimodal"])
+
+    def test_multimodal_checkpoint_saves_live_slot_without_text_reprefill(self) -> None:
+        profile = fixture_profile()
+        with tempfile.TemporaryDirectory() as temporary:
+            slot_root = Path(temporary)
+            state = object.__new__(router_module.RouterState)
+            state.available_profiles = {profile.slug: profile}
+            state.backend_cache_id = "backend-v1"
+            state.slot_save_root = slot_root
+            state.slot_snapshot_min_token_growth = 4_096
+            state.slot_checkpoint_store = router_module.RollingCheckpointStore(
+                slot_root,
+                slot_root,
+                max_count=2,
+                max_bytes=32 * 1024**3,
+                ttl_seconds=172_800,
+            )
+            state.backend_lock = asyncio.Lock()
+            state.live_slot_by_model = {profile.slug: "response-one"}
+            state.live_prompt_cache_key_by_model = {
+                profile.slug: "synthetic-session"
+            }
+            state._prefill_conversation_checkpoint_boundary = mock.AsyncMock()
+
+            async def save_slot(
+                saved_profile: router_module.ModelProfile,
+                filename: str,
+            ) -> dict[str, object]:
+                directory = state._slot_save_dir(saved_profile)
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / filename).write_bytes(b"synthetic slot checkpoint")
+                return {"status": "saved"}
+
+            state.save_slot = mock.AsyncMock(side_effect=save_slot)
+            checkpoint_request = {
+                "instructions": "synthetic system prompt",
+                "tools": [],
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "inspect this"},
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,aGVsbG8=",
+                                "detail": "high",
+                            },
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "inspection complete"}
+                        ],
+                    },
+                ],
+            }
+            candidate = router_module.ConversationCheckpointCandidate(
+                profile_slug=profile.slug,
+                profile_alias=profile.alias,
+                prompt_cache_key="synthetic-session",
+                response_id="response-one",
+                scaffold_fingerprint=state._conversation_scaffold_fingerprint(
+                    profile,
+                    checkpoint_request,
+                ),
+                context_tokens=93_071,
+                checkpoint_request=checkpoint_request,
+            )
+
+            result = asyncio.run(
+                state._save_conversation_checkpoint(candidate, force=False)
+            )
+
+            self.assertEqual(result["status"], "saved")
+            self.assertEqual(result["context_tokens"], 93_071)
+            self.assertEqual(result["boundary"]["source"], "live-multimodal-slot")
+            self.assertEqual(result["boundary"]["conversation_item_count"], 2)
+            state._prefill_conversation_checkpoint_boundary.assert_not_awaited()
+            state.save_slot.assert_awaited_once()
 
     def test_rolling_conversation_checkpoint_survives_router_restart(self) -> None:
         profile = fixture_profile()
@@ -2200,7 +2530,7 @@ context = 32768
         state.backend_cache_id = "backend-v1"
         state.awaiting_post_compaction_checkpoints = set()
         state.slot_checkpoint_store = mock.Mock()
-        state.slot_checkpoint_store.find_compatible.return_value = record
+        state.slot_checkpoint_store.find.return_value = record
         state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})
         resumed_request = {
             "instructions": "synthetic system prompt",
@@ -2260,7 +2590,7 @@ context = 32768
         state.backend_cache_id = "backend-v1"
         state.awaiting_post_compaction_checkpoints = set()
         state.slot_checkpoint_store = mock.Mock()
-        state.slot_checkpoint_store.find_compatible.return_value = record
+        state.slot_checkpoint_store.find.return_value = record
         state.restore_slot = mock.AsyncMock(side_effect=RuntimeError("worker reloading"))
 
         result = asyncio.run(
@@ -2438,7 +2768,7 @@ context = 32768
             self.assertEqual(state._request_json.await_count, 5)
             state.save_slot.assert_awaited_once()
 
-    def test_rolling_checkpoint_delegates_changed_scaffold_to_backend(self) -> None:
+    def test_rolling_checkpoint_rejects_changed_scaffold(self) -> None:
         profile = fixture_profile()
         with tempfile.TemporaryDirectory() as temporary:
             slot_root = Path(temporary)
@@ -2528,16 +2858,9 @@ context = 32768
                 )
             )
 
-            self.assertEqual(result["mode"], "restore-conversation-checkpoint")
-            self.assertEqual(result["status"], "restored")
-            self.assertEqual(
-                result["scaffold_validation"],
-                "delegated-to-backend-token-match",
-            )
-            state.restore_slot.assert_awaited_once_with(
-                profile,
-                mock.ANY,
-            )
+            self.assertEqual(result["mode"], "conversation-checkpoint-miss")
+            self.assertEqual(result["status"], "skipped")
+            state.restore_slot.assert_not_awaited()
 
     def test_starter_cache_fingerprint_tracks_scaffold_and_backend(self) -> None:
         profile = fixture_profile()
@@ -2609,6 +2932,34 @@ context = 32768
 
         events = asyncio.run(collect())
         self.assertEqual(events, [{"type": "response.created"}])
+
+    def test_http_sse_reader_emits_keepalives_without_canceling_upstream(self) -> None:
+        class Content:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                if self.reads == 1:
+                    await asyncio.sleep(0.03)
+                    return b'data: {"type":"response.completed"}\n\n'
+                return b""
+
+        async def collect() -> list[bytes | None]:
+            return [
+                chunk
+                async for chunk in router_module._iter_proxy_content(
+                    Content(),
+                    keepalive_interval_seconds=0.005,
+                )
+            ]
+
+        chunks = asyncio.run(collect())
+        self.assertGreaterEqual(chunks.count(None), 2)
+        self.assertEqual(
+            chunks[-1],
+            b'data: {"type":"response.completed"}\n\n',
+        )
 
     def test_slow_live_backend_stream_is_not_canceled(self) -> None:
         profile = fixture_profile(65_536)
