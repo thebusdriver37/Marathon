@@ -222,12 +222,13 @@ This keeps context limits correct when `/model` switches between deployments wit
 The patched status line includes:
 
 - Live `Prefill`, `Thinking`, and `Answering` stages in the throughput position.
-- Live estimated generation throughput with a `~` prefix.
-- Exact completed-turn output tokens divided by active generation time.
+- Stable completed-turn output tokens divided by active generation time.
+- Time to first generated output, including prompt processing.
 - The active reasoning effort.
 - Context usage based on the backend's actual loaded window.
 
 Tool execution time is excluded from completed-turn generation throughput.
+The live status shows only the current generation stage so rapidly arriving stream chunks do not make the footer flicker.
 
 Use Codex's `/model` menu to change the active reasoning effort without reloading the GGUF or discarding the conversation.
 Supported values are defined per model family in the runtime catalog.
