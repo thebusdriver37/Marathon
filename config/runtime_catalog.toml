@@ -181,7 +181,7 @@ display_name = "Qwen 3.8 27B Dense"
 patterns = ["qwen3.8-27b", "qwen3_8-27b"]
 backend = "upstream"
 default_profile = "auto"
-default_reasoning_level = "xhigh"
+default_reasoning_level = "medium"
 reasoning_levels = [
   { effort = "none", description = "Disable reasoning for direct responses." },
   { effort = "low", description = "Fast, focused reasoning for straightforward tasks." },

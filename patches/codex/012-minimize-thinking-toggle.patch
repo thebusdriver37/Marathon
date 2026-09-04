@@ -1,0 +1,198 @@
+diff --git a/codex-rs/tui/src/bottom_pane/command_popup.rs b/codex-rs/tui/src/bottom_pane/command_popup.rs
+index f613e5ee3f..fb40f2f0c4 100644
+--- a/codex-rs/tui/src/bottom_pane/command_popup.rs
++++ b/codex-rs/tui/src/bottom_pane/command_popup.rs
+@@ -384,6 +384,7 @@ mod tests {
+             cmds,
+             vec![
+                 "model".to_string(),
++                "minimize-thinking".to_string(),
+                 "memories".to_string(),
+                 "mention".to_string(),
+                 "mcp".to_string()
+diff --git a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_default_items.snap b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_default_items.snap
+index 8bbb6892df..f2abeac545 100644
+--- a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_default_items.snap
++++ b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_default_items.snap
+@@ -3,6 +3,7 @@ source: tui/src/bottom_pane/command_popup.rs
+ expression: commands
+ ---
+ /model - choose what model and reasoning effort to use
++/minimize-thinking - toggle appending 'minimize thinking' to each user prompt
+ /ide - include current selection, open files, and other context from your IDE
+ /permissions - choose what Codex is allowed to do
+ /keymap - remap TUI shortcuts
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 0d0a16ad82..b367094d89 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -558,6 +558,7 @@ pub(crate) struct ChatWidget {
+     transcript: TranscriptState,
+     config: Config,
+     raw_output_mode: bool,
++    minimize_thinking: bool,
+     /// Runtime value resolved by core. `config.service_tier` remains the explicit user choice.
+     effective_service_tier: Option<String>,
+     /// The unmasked collaboration mode settings (always Default mode).
+diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index e90e47f22d..1641f902a6 100644
+--- a/codex-rs/tui/src/chatwidget/constructor.rs
++++ b/codex-rs/tui/src/chatwidget/constructor.rs
+@@ -110,6 +110,7 @@ impl ChatWidget {
+             }),
+             transcript: TranscriptState::new(active_cell),
+             raw_output_mode: config.tui_raw_output_mode,
++            minimize_thinking: false,
+             config,
+             effective_service_tier,
+             skills_all: Vec::new(),
+diff --git a/codex-rs/tui/src/chatwidget/input_submission.rs b/codex-rs/tui/src/chatwidget/input_submission.rs
+index 1fc8b6ba04..065cd927e9 100644
+--- a/codex-rs/tui/src/chatwidget/input_submission.rs
++++ b/codex-rs/tui/src/chatwidget/input_submission.rs
+@@ -2,6 +2,8 @@
+ 
+ use super::*;
+ 
++const MINIMIZE_THINKING_PROMPT_SUFFIX: &str = "minimize thinking";
++
+ impl ChatWidget {
+     pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
+         self.bottom_pane.set_task_mentions_enabled(enabled);
+@@ -192,9 +194,18 @@ impl ChatWidget {
+             });
+         }
+ 
+-        if !text.is_empty() {
++        if !text.is_empty() || self.minimize_thinking {
++            let model_text = if self.minimize_thinking {
++                if text.is_empty() {
++                    MINIMIZE_THINKING_PROMPT_SUFFIX.to_string()
++                } else {
++                    format!("{text}\n\n{MINIMIZE_THINKING_PROMPT_SUFFIX}")
++                }
++            } else {
++                text.clone()
++            };
+             items.push(UserInput::Text {
+-                text: text.clone(),
++                text: model_text,
+                 text_elements: app_server_text_elements(&text_elements),
+             });
+         }
+diff --git a/codex-rs/tui/src/chatwidget/slash_dispatch.rs b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
+index 69229ba4dd..7bed57f76d 100644
+--- a/codex-rs/tui/src/chatwidget/slash_dispatch.rs
++++ b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
+@@ -298,6 +298,17 @@ impl ChatWidget {
+                 self.open_model_popup();
+                 self.defer_input_until_settings_applied();
+             }
++            SlashCommand::MinimizeThinking => {
++                self.minimize_thinking = !self.minimize_thinking;
++                let state = if self.minimize_thinking { "on" } else { "off" };
++                self.add_info_message(
++                    format!("Minimize thinking is {state}."),
++                    Some(
++                        "The phrase 'minimize thinking' will be appended to each user prompt."
++                            .to_string(),
++                    ),
++                );
++            }
+             SlashCommand::Personality => {
+                 self.open_personality_popup();
+                 self.defer_input_until_settings_applied();
+@@ -1145,6 +1156,7 @@ impl ChatWidget {
+             | SlashCommand::Rollout
+             | SlashCommand::Copy
+             | SlashCommand::Raw
++            | SlashCommand::MinimizeThinking
+             | SlashCommand::Vim
+             | SlashCommand::Diff
+             | SlashCommand::App
+diff --git a/codex-rs/tui/src/chatwidget/tests/slash_commands.rs b/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
+index 2b681d40e2..70444d73ed 100644
+--- a/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
++++ b/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
+@@ -3505,6 +3505,51 @@ async fn raw_slash_command_reports_usage_for_invalid_arg() {
+     );
+ }
+ 
++#[tokio::test]
++async fn minimize_thinking_slash_command_toggles_prompt_suffix() {
++    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    chat.thread_id = Some(ThreadId::new());
++
++    chat.dispatch_command(SlashCommand::MinimizeThinking);
++    assert!(chat.minimize_thinking);
++    let cells = drain_insert_history(&mut rx);
++    let rendered = cells
++        .iter()
++        .map(|lines| lines_to_single_string(lines))
++        .collect::<Vec<_>>()
++        .join("\n");
++    assert!(
++        rendered.contains("Minimize thinking is on."),
++        "expected enabled confirmation, got {rendered:?}"
++    );
++
++    chat.submit_user_message(UserMessage::from("Solve this problem."));
++    match next_submit_op(&mut op_rx) {
++        Op::UserTurn { items, .. } => assert_eq!(
++            items,
++            vec![UserInput::Text {
++                text: "Solve this problem.\n\nminimize thinking".to_string(),
++                text_elements: Vec::new(),
++            }]
++        ),
++        other => panic!("expected suffixed user turn, got {other:?}"),
++    }
++
++    chat.dispatch_command(SlashCommand::MinimizeThinking);
++    assert!(!chat.minimize_thinking);
++    chat.submit_user_message(UserMessage::from("Solve normally."));
++    match next_submit_op(&mut op_rx) {
++        Op::UserTurn { items, .. } => assert_eq!(
++            items,
++            vec![UserInput::Text {
++                text: "Solve normally.".to_string(),
++                text_elements: Vec::new(),
++            }]
++        ),
++        other => panic!("expected unsuffixed user turn, got {other:?}"),
++    }
++}
++
+ #[tokio::test]
+ async fn compact_queues_user_messages_snapshot() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+diff --git a/codex-rs/tui/src/slash_command.rs b/codex-rs/tui/src/slash_command.rs
+index aab133ffb7..a9843ea278 100644
+--- a/codex-rs/tui/src/slash_command.rs
++++ b/codex-rs/tui/src/slash_command.rs
+@@ -13,6 +13,7 @@ pub enum SlashCommand {
+     // DO NOT ALPHA-SORT! Enum order is presentation order in the popup, so
+     // more frequently used commands should be listed first.
+     Model,
++    MinimizeThinking,
+     Ide,
+     Permissions,
+     Keymap,
+@@ -123,6 +124,9 @@ impl SlashCommand {
+             SlashCommand::MemoryDrop => "DO NOT USE",
+             SlashCommand::MemoryUpdate => "DO NOT USE",
+             SlashCommand::Model => "choose what model and reasoning effort to use",
++            SlashCommand::MinimizeThinking => {
++                "toggle appending 'minimize thinking' to each user prompt"
++            }
+             SlashCommand::Ide => {
+                 "include current selection, open files, and other context from your IDE"
+             }
+@@ -231,6 +235,7 @@ impl SlashCommand {
+             SlashCommand::Diff
+             | SlashCommand::Resume
+             | SlashCommand::Model
++            | SlashCommand::MinimizeThinking
+             | SlashCommand::Personality
+             | SlashCommand::Permissions
+             | SlashCommand::Copy

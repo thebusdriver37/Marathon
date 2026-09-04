@@ -290,7 +290,7 @@ class CatalogTests(unittest.TestCase):
         profile = catalog.find_profile(model, None, "codex")
         self.assertEqual(model.family.id, "qwen3.8-27b")
         self.assertEqual(model.quant, "Q8_0")
-        self.assertEqual(model.family.default_reasoning_level, "xhigh")
+        self.assertEqual(model.family.default_reasoning_level, "medium")
         self.assertEqual(
             [level.effort for level in model.family.reasoning_levels],
             ["none", "low", "medium", "xhigh"],
