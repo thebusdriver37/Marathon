@@ -315,9 +315,8 @@ index 2864dc1dd59d813ea72a08bf663f781d31c0604c..71dbf00056e74518ab9b7b05fa342183
      pub(super) fn on_task_complete(
          &mut self,
          last_agent_message: Option<String>,
-@@ -146,6 +159,8 @@ impl ChatWidget {
+@@ -146,5 +159,7 @@ impl ChatWidget {
          self.flush_unified_exec_wait_streak();
-         self.flush_completed_command_activity();
          if !from_replay {
 +            self.turn_throughput.finish_turn(Instant::now());
 +            self.refresh_status_line();

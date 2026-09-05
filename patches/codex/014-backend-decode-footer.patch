@@ -79,7 +79,7 @@ diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/t
 index 6397dde..9ed3250 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -2906,6 +2906,27 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -2906,6 +2906,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
          GenerationStage::Answering,
          started_at,
      );
@@ -92,6 +92,7 @@ index 6397dde..9ed3250 100644
 +                usage: None,
 +                usage_metadata: Some(codex_app_server_protocol::ResponseUsageMetadata {
 +                    amount: None,
++                    metadata: None,
 +                    marathon: Some(codex_app_server_protocol::MarathonResponseMetrics {
 +                        decode_tokens: 4_200,
 +                        decode_microseconds: 70_000_000,
@@ -107,7 +108,7 @@ index 6397dde..9ed3250 100644
      let response_usage = TokenUsage {
          total_tokens: 4_200,
          output_tokens: 4_200,
-@@ -2919,14 +2940,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -2919,14 +2941,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
              model_context_window: Some(131_072),
          }),
      );

@@ -37,13 +37,19 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-utils-cli
   just test -p codex-protocol \
     token_usage_percentage_uses_the_full_runtime_window
+  just test -p codex-app-server-protocol --lib
+  just test -p codex-core --test all suite::compact::manual_compact
+  just test -p codex-core --test all \
+    responses_websocket_preserves_credit_usage_metadata
+  just test -p codex-api --test sse_end_to_end \
+    responses_stream_parses_items_and_completed_end_to_end
   just test -p codex-tui \
     context_percentage_uses_the_full_runtime_window
   just test -p codex-tui \
     status_line_context_tokens_renders_live_context_count
   just test -p codex-tui turn_throughput
   just test -p codex-app-server --test all \
-    turn_start_emits_raw_response_completed_with_upstream_usage
+    -E 'test(turn_start_emits_raw_response_completed_with_upstream_usage) | test(thread_compact_start_triggers_compaction_and_returns_empty_response)'
   just test -p codex-tui \
     status_line_tokens_per_second_renders_completed_turn_rate_snapshot
   just test -p codex-tui \

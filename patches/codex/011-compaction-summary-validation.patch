@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 9994585011..3372d06827 100644
+index 49306c357c..795d2664b3 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -18,9 +18,9 @@ use crate::responses_metadata::CompactionTurnMetadata;
@@ -25,8 +25,8 @@ index 9994585011..3372d06827 100644
          )
          .await;
  
--    loop {
-+    let summary_suffix = loop {
+-    let compaction_response_id = loop {
++    let (compaction_response_id, summary_suffix) = loop {
          // Clone is required because of the loop
          let turn_input = history
              .clone()
@@ -34,19 +34,14 @@ index 9994585011..3372d06827 100644
          .await;
  
          match attempt_result {
--            Ok(()) => {
--                break;
-+            Ok(summary_suffix) => {
-+                break summary_suffix;
+-            Ok(response_id) => {
+-                break response_id;
++            Ok(response) => {
++                break response;
              }
              Err(err)
                  if matches!(
-@@ -347,12 +348,10 @@ async fn run_compact_task_inner_impl(
-                 }
-             }
-         }
--    }
-+    };
+@@ -351,8 +352,6 @@ async fn run_compact_task_inner_impl(
  
      let history_snapshot = sess.clone_history().await;
      let history_items = history_snapshot.annotated_items();
@@ -55,16 +50,16 @@ index 9994585011..3372d06827 100644
      let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
      let user_messages = collect_annotated_user_messages(history_items);
  
-@@ -738,7 +737,7 @@ async fn drain_to_completed(
+@@ -739,7 +738,7 @@ async fn drain_to_completed(
      client_session: &mut ModelClientSession,
      responses_metadata: &CodexResponsesMetadata,
      prompt: &Prompt,
--) -> CodexResult<()> {
-+) -> CodexResult<String> {
+-) -> CodexResult<String> {
++) -> CodexResult<(String, String)> {
      let mut stream = client_session
          .stream(
              prompt,
-@@ -753,6 +752,8 @@ async fn drain_to_completed(
+@@ -754,6 +753,8 @@ async fn drain_to_completed(
              &InferenceTraceContext::disabled(),
          )
          .await?;
@@ -73,7 +68,7 @@ index 9994585011..3372d06827 100644
      loop {
          let maybe_event = stream.next().await;
          let Some(event) = maybe_event else {
-@@ -762,8 +763,18 @@ async fn drain_to_completed(
+@@ -763,8 +764,18 @@ async fn drain_to_completed(
          };
          match event {
              Ok(ResponseEvent::OutputItemDone(item)) => {
@@ -94,12 +89,11 @@ index 9994585011..3372d06827 100644
              }
              Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                  sess.set_server_reasoning_included(included).await;
-@@ -777,6 +788,16 @@ async fn drain_to_completed(
-                 usage_metadata,
-                 ..
-             }) => {
-+                sess.update_token_usage_info(turn_context, token_usage.as_ref())
-+                    .await?;
+@@ -787,7 +798,15 @@ async fn drain_to_completed(
+                 .await;
+                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
+                     .await?;
+-                return Ok(response_id);
 +                let Some(summary_suffix) = summary_suffix else {
 +                    return Err(CodexErr::Stream(
 +                        "compaction response completed without a usable assistant summary"
@@ -108,55 +102,15 @@ index 9994585011..3372d06827 100644
 +                };
 +                sess.record_conversation_items(turn_context, &output_items)
 +                    .await;
-                 sess.send_event(
-                     turn_context,
-                     EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
-@@ -786,9 +807,7 @@ async fn drain_to_completed(
-                     }),
-                 )
-                 .await;
--                sess.update_token_usage_info(turn_context, token_usage.as_ref())
--                    .await?;
--                return Ok(());
-+                return Ok(summary_suffix);
++                return Ok((response_id, summary_suffix));
              }
              Ok(_) => continue,
              Err(e) => return Err(e),
-diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 4a749b28b8..ee381430a2 100644
---- a/codex-rs/core/src/session/turn.rs
-+++ b/codex-rs/core/src/session/turn.rs
-@@ -44,7 +44,6 @@ use crate::stream_events_utils::TurnItemContributorPolicy;
- use crate::stream_events_utils::finalize_non_tool_response_item;
- use crate::stream_events_utils::handle_non_tool_response_item;
- use crate::stream_events_utils::handle_output_item_done;
--use crate::stream_events_utils::last_assistant_message_from_item;
- use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
- use crate::stream_events_utils::raw_assistant_output_text_from_item;
- use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
-@@ -2805,17 +2804,6 @@ async fn try_run_sampling_request(
-     outcome
- }
- 
--pub(crate) fn get_last_assistant_message_from_turn<'a>(
--    responses: impl DoubleEndedIterator<Item = &'a ResponseItem>,
--) -> Option<String> {
--    for item in responses.rev() {
--        if let Some(message) = last_assistant_message_from_item(item, /*plan_mode*/ false) {
--            return Some(message);
--        }
--    }
--    None
--}
--
- #[cfg(test)]
- #[path = "turn_tests.rs"]
- mod tests;
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
-index bd97ff635e..aece364ce2 100644
+index 3473e39628..8f0dc582b3 100644
 --- a/codex-rs/core/tests/suite/compact.rs
 +++ b/codex-rs/core/tests/suite/compact.rs
-@@ -3773,6 +3773,189 @@ async fn manual_compact_retries_after_context_window_error() {
+@@ -3837,6 +3837,200 @@ async fn manual_compact_retries_after_context_window_error() {
      }
  }
  
@@ -225,6 +179,17 @@ index bd97ff635e..aece364ce2 100644
 +        "expected compaction retry, got {retry_message}"
 +    );
 +    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
++
++    let compaction_response_ids = fs::read_to_string(codex.rollout_path().expect("rollout path"))
++        .expect("read rollout")
++        .lines()
++        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
++        .filter_map(|line| match line.item {
++            RolloutItem::Compacted(compacted) => Some(compacted.compaction_response_id),
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(compaction_response_ids, vec![Some("r3".to_string())]);
 +
 +    codex
 +        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -346,3 +311,33 @@ index bd97ff635e..aece364ce2 100644
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  // TODO(ccunningham): Re-enable after the follow-up compaction behavior PR lands.
  // Current main behavior around non-context manual /compact failures is known-incorrect.
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index f7c42680c2..e23882ec18 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -45,7 +45,6 @@ use crate::stream_events_utils::TurnItemContributorPolicy;
+ use crate::stream_events_utils::finalize_non_tool_response_item;
+ use crate::stream_events_utils::handle_non_tool_response_item;
+ use crate::stream_events_utils::handle_output_item_done;
+-use crate::stream_events_utils::last_assistant_message_from_item;
+ use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
+ use crate::stream_events_utils::raw_assistant_output_text_from_item;
+ use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
+@@ -2827,17 +2826,6 @@ async fn try_run_sampling_request(
+     outcome
+ }
+ 
+-pub(crate) fn get_last_assistant_message_from_turn<'a>(
+-    responses: impl DoubleEndedIterator<Item = &'a ResponseItem>,
+-) -> Option<String> {
+-    for item in responses.rev() {
+-        if let Some(message) = last_assistant_message_from_item(item, /*plan_mode*/ false) {
+-            return Some(message);
+-        }
+-    }
+-    None
+-}
+-
+ #[cfg(test)]
+ #[path = "turn_tests.rs"]
+ mod tests;
