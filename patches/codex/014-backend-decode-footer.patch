@@ -1,0 +1,587 @@
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index 42c7c14..576dad0 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -32,9 +32,6 @@ impl ChatWidget {
+         }
+         match notification {
+             ServerNotification::ThreadTokenUsageUpdated(notification) => {
+-                if !from_replay {
+-                    self.complete_turn_response(Some(notification.token_usage.last.output_tokens));
+-                }
+                 self.set_token_info(Some(token_usage_info_from_app_server(
+                     notification.token_usage,
+                 )));
+@@ -287,7 +284,11 @@ impl ChatWidget {
+             ServerNotification::RawResponseCompleted(notification) => {
+                 if !from_replay {
+                     self.complete_turn_response(
+-                        notification.usage.map(|usage| usage.output_tokens),
++                        &notification.response_id,
++                        notification
++                            .usage_metadata
++                            .as_ref()
++                            .and_then(|metadata| metadata.marathon.as_ref()),
+                     );
+                 }
+             }
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+index 2ad47cf..8558e4e 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+@@ -1,10 +1,10 @@
+ ---
+ source: tui/src/chatwidget/tests/status_and_layout.rs
+-assertion_line: 2883
++assertion_line: 2955
+ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+-"                                                "
+-"                                                "
+-"› Ask Codex to do anything                      "
+-"                                                "
+-"  21 tok/s avg · first token 2.5s               "
++"                                                                        "
++"                                                                        "
++"› Ask Codex to do anything                                              "
++"                                                                        "
++"  60 tok/s decode · first output 2.5s · total 202s                      "
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index a5d0e1f..301ad8a 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -416,14 +416,16 @@ impl ChatWidget {
+             return Some(stage.label().to_string());
+         }
+ 
+-        self.turn_throughput.sample(Instant::now()).map(|sample| {
+-            let prefix = if sample.estimated { "~" } else { "" };
+-            let rate = format!("{prefix}{:.0} tok/s avg", sample.tokens_per_second);
+-            self.turn_throughput
+-                .time_to_first_output()
+-                .map(|latency| format!("{rate} · first token {}", format_latency(latency)))
+-                .unwrap_or(rate)
+-        })
++        let elapsed = self.turn_throughput.elapsed(Instant::now())?;
++        let mut label = self.turn_throughput.sample().map_or_else(
++            || "decode n/a".to_string(),
++            |sample| format!("{:.0} tok/s decode", sample.tokens_per_second),
++        );
++        if let Some(latency) = self.turn_throughput.time_to_first_output() {
++            label.push_str(&format!(" · first output {}", format_latency(latency)));
++        }
++        label.push_str(&format!(" · total {}", format_latency(elapsed)));
++        Some(label)
+     }
+ 
+     pub(super) fn status_line_limit_display(
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 6397dde..9ed3250 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -2906,6 +2906,27 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+         GenerationStage::Answering,
+         started_at,
+     );
++    chat.handle_server_notification(
++        ServerNotification::RawResponseCompleted(
++            codex_app_server_protocol::RawResponseCompletedNotification {
++                thread_id: "thread".to_string(),
++                turn_id: "turn".to_string(),
++                response_id: "response".to_string(),
++                usage: None,
++                usage_metadata: Some(codex_app_server_protocol::ResponseUsageMetadata {
++                    amount: None,
++                    marathon: Some(codex_app_server_protocol::MarathonResponseMetrics {
++                        decode_tokens: 4_200,
++                        decode_microseconds: 70_000_000,
++                        backend_calls: 2,
++                        timed_backend_calls: 2,
++                        ..Default::default()
++                    }),
++                }),
++            },
++        ),
++        /*replay_kind*/ None,
++    );
+     let response_usage = TokenUsage {
+         total_tokens: 4_200,
+         output_tokens: 4_200,
+@@ -2919,14 +2940,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+             model_context_window: Some(131_072),
+         }),
+     );
++    chat.turn_throughput
++        .finish_turn(started_at + Duration::from_secs(200));
+     chat.refresh_status_line();
+ 
+     assert_eq!(
+         status_line_text(&chat),
+-        Some("21 tok/s avg · first token 2.5s".to_string())
++        Some("60 tok/s decode · first output 2.5s · total 202s".to_string())
+     );
+ 
+-    let width = 48;
++    let width = 72;
+     let height = chat.desired_height(width);
+     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+     terminal
+diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+index b8073d5..0b336e2 100644
+--- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
++++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+@@ -115,9 +115,12 @@ impl ChatWidget {
+         }
+     }
+ 
+-    pub(super) fn complete_turn_response(&mut self, output_tokens: Option<i64>) {
+-        self.turn_throughput
+-            .complete_response(output_tokens, Instant::now());
++    pub(super) fn complete_turn_response(
++        &mut self,
++        response_id: &str,
++        metrics: Option<&codex_app_server_protocol::MarathonResponseMetrics>,
++    ) {
++        self.turn_throughput.complete_response(response_id, metrics);
+         self.refresh_status_line();
+     }
+ 
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+index 8397e6e..01c045c 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+@@ -1,11 +1,8 @@
+-//! Per-turn output throughput derived from live deltas and exact response usage.
+-
++use std::collections::HashSet;
+ use std::time::Duration;
+ use std::time::Instant;
+ 
+-use codex_utils_string::approx_tokens_from_byte_count;
+-
+-const MIN_SAMPLE_DURATION: Duration = Duration::from_millis(1);
++use codex_app_server_protocol::MarathonResponseMetrics;
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(super) enum GenerationStage {
+@@ -27,23 +24,19 @@ impl GenerationStage {
+ #[derive(Clone, Copy, Debug, PartialEq)]
+ pub(super) struct ThroughputSample {
+     pub(super) tokens_per_second: f64,
+-    pub(super) estimated: bool,
+-}
+-
+-#[derive(Debug)]
+-struct ActiveResponse {
+-    started_at: Instant,
+-    output_bytes: usize,
+ }
+ 
++/// Backend decode totals and client-observed latency have different clocks.
++/// Never infer decode throughput from streamed byte counts or tool-loop wall time.
+ #[derive(Debug, Default)]
+ pub(super) struct TurnThroughput {
+     turn_started_at: Option<Instant>,
++    turn_finished_at: Option<Instant>,
+     time_to_first_output: Option<Duration>,
+-    active_response: Option<ActiveResponse>,
+-    completed_output_tokens: u64,
+-    completed_generation_duration: Duration,
+-    last_sample: Option<ThroughputSample>,
++    seen_responses: HashSet<String>,
++    decode_tokens: u64,
++    decode_microseconds: u64,
++    missing_timings: bool,
+     generation_stage: Option<GenerationStage>,
+ }
+ 
+@@ -56,7 +49,7 @@ impl TurnThroughput {
+ 
+     pub(super) fn record_output_delta(
+         &mut self,
+-        delta: &str,
++        _delta: &str,
+         generation_stage: GenerationStage,
+         now: Instant,
+     ) {
+@@ -66,46 +59,40 @@ impl TurnThroughput {
+             self.time_to_first_output = Some(now.saturating_duration_since(turn_started_at));
+         }
+         self.generation_stage = Some(generation_stage);
+-        let response = self.active_response.get_or_insert(ActiveResponse {
+-            started_at: now,
+-            output_bytes: 0,
+-        });
+-        response.output_bytes = response.output_bytes.saturating_add(delta.len());
+     }
+ 
+-    pub(super) fn complete_response(&mut self, output_tokens: Option<i64>, now: Instant) {
+-        self.generation_stage = None;
+-        let live_sample = self.sample(now);
+-        let Some(response) = self.active_response.take() else {
++    pub(super) fn complete_response(
++        &mut self,
++        response_id: &str,
++        metrics: Option<&MarathonResponseMetrics>,
++    ) {
++        if self.turn_started_at.is_none() || !self.seen_responses.insert(response_id.to_string()) {
+             return;
+-        };
+-        let elapsed = now.saturating_duration_since(response.started_at);
+-        let Some(output_tokens) = output_tokens.and_then(|tokens| u64::try_from(tokens).ok())
+-        else {
+-            self.last_sample = live_sample;
++        }
++        self.generation_stage = None;
++        let Some(metrics) = metrics else {
++            self.missing_timings = true;
+             return;
+         };
+-        if output_tokens == 0 || elapsed < MIN_SAMPLE_DURATION {
+-            self.last_sample = live_sample;
++        if metrics.backend_calls == 0
++            || metrics.timed_backend_calls != metrics.backend_calls
++            || (metrics.decode_tokens > 0 && metrics.decode_microseconds == 0)
++        {
++            self.missing_timings = true;
+             return;
+         }
+-
+-        self.completed_output_tokens = self.completed_output_tokens.saturating_add(output_tokens);
+-        self.completed_generation_duration =
+-            self.completed_generation_duration.saturating_add(elapsed);
+-        self.last_sample = sample_from_totals(
+-            self.completed_output_tokens,
+-            self.completed_generation_duration,
+-            /*estimated*/ false,
+-        );
++        self.decode_tokens = self.decode_tokens.saturating_add(metrics.decode_tokens);
++        self.decode_microseconds = self
++            .decode_microseconds
++            .saturating_add(metrics.decode_microseconds);
+     }
+ 
+     pub(super) fn finish_turn(&mut self, now: Instant) {
+-        self.generation_stage = None;
+-        if self.active_response.is_some() {
+-            self.last_sample = self.sample(now);
+-            self.active_response = None;
++        if self.generation_stage.is_some() {
++            self.missing_timings = true;
+         }
++        self.generation_stage = None;
++        self.turn_finished_at.get_or_insert(now);
+     }
+ 
+     pub(super) fn generation_stage(&self) -> Option<GenerationStage> {
+@@ -116,37 +103,27 @@ impl TurnThroughput {
+         self.time_to_first_output
+     }
+ 
+-    pub(super) fn set_generation_stage(&mut self, generation_stage: GenerationStage) {
+-        self.generation_stage = Some(generation_stage);
++    pub(super) fn elapsed(&self, now: Instant) -> Option<Duration> {
++        self.turn_started_at.map(|start| {
++            self.turn_finished_at
++                .unwrap_or(now)
++                .saturating_duration_since(start)
++        })
+     }
+ 
+-    pub(super) fn sample(&self, now: Instant) -> Option<ThroughputSample> {
+-        let Some(response) = self.active_response.as_ref() else {
+-            return self.last_sample;
+-        };
+-        let elapsed = now.saturating_duration_since(response.started_at);
+-        let live_tokens = approx_tokens_from_byte_count(response.output_bytes);
+-        sample_from_totals(
+-            self.completed_output_tokens.saturating_add(live_tokens),
+-            self.completed_generation_duration.saturating_add(elapsed),
+-            /*estimated*/ true,
+-        )
+-        .or(self.last_sample)
++    pub(super) fn set_generation_stage(&mut self, generation_stage: GenerationStage) {
++        self.generation_stage = Some(generation_stage);
+     }
+-}
+ 
+-fn sample_from_totals(
+-    output_tokens: u64,
+-    generation_duration: Duration,
+-    estimated: bool,
+-) -> Option<ThroughputSample> {
+-    if output_tokens == 0 || generation_duration < MIN_SAMPLE_DURATION {
+-        return None;
++    pub(super) fn sample(&self) -> Option<ThroughputSample> {
++        if self.missing_timings || self.decode_tokens == 0 || self.decode_microseconds == 0 {
++            return None;
++        }
++        Some(ThroughputSample {
++            tokens_per_second: self.decode_tokens as f64 * 1_000_000.0
++                / self.decode_microseconds as f64,
++        })
+     }
+-    Some(ThroughputSample {
+-        tokens_per_second: output_tokens as f64 / generation_duration.as_secs_f64(),
+-        estimated,
+-    })
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+index 88d3a8f..b0645d8 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+@@ -1,157 +1,160 @@
+ use std::time::Duration;
+ use std::time::Instant;
+ 
++use codex_app_server_protocol::MarathonResponseMetrics;
+ use pretty_assertions::assert_eq;
+ 
+ use super::GenerationStage;
+ use super::ThroughputSample;
+ use super::TurnThroughput;
+ 
++fn metrics(tokens: u64, seconds: u64) -> MarathonResponseMetrics {
++    MarathonResponseMetrics {
++        decode_tokens: tokens,
++        decode_microseconds: seconds * 1_000_000,
++        backend_calls: 1,
++        timed_backend_calls: 1,
++        ..MarathonResponseMetrics::default()
++    }
++}
++
+ #[test]
+-fn live_sample_is_estimated_from_streamed_bytes() {
+-    let started_at = Instant::now();
++fn backend_decode_excludes_prefill_and_tool_waits() {
++    let start = Instant::now();
+     let mut throughput = TurnThroughput::default();
+-
+-    throughput.start_turn(started_at);
++    throughput.start_turn(start);
+     throughput.record_output_delta(
+-        "1234567890123456789012345678901234567890",
++        "first output",
+         GenerationStage::Thinking,
+-        started_at,
++        start + Duration::from_secs(5),
+     );
+-
++    throughput.complete_response("response", Some(&metrics(/*tokens*/ 2600, /*seconds*/ 40)));
++    throughput.finish_turn(start + Duration::from_secs(80));
+     assert_eq!(
+-        throughput.sample(started_at + Duration::from_secs(2)),
++        throughput.sample(),
+         Some(ThroughputSample {
+-            tokens_per_second: 5.0,
+-            estimated: true,
++            tokens_per_second: 65.0
+         })
+     );
+-}
+-
+-#[test]
+-fn completed_response_replaces_estimate_with_exact_usage() {
+-    let started_at = Instant::now();
+-    let completed_at = started_at + Duration::from_secs(2);
+-    let mut throughput = TurnThroughput::default();
+-
+-    throughput.start_turn(started_at);
+-    throughput.record_output_delta("streamed text", GenerationStage::Answering, started_at);
+-    throughput.complete_response(Some(30), completed_at);
+-
+     assert_eq!(
+-        throughput.sample(completed_at),
+-        Some(ThroughputSample {
+-            tokens_per_second: 15.0,
+-            estimated: false,
+-        })
++        throughput.time_to_first_output(),
++        Some(Duration::from_secs(5))
++    );
++    assert_eq!(
++        throughput.elapsed(start + Duration::from_secs(100)),
++        Some(Duration::from_secs(80))
+     );
+ }
+ 
+ #[test]
+-fn fast_completed_response_still_reports_throughput() {
+-    let started_at = Instant::now();
+-    let completed_at = started_at + Duration::from_millis(100);
++fn completed_calls_have_a_decode_time_weighted_average() {
+     let mut throughput = TurnThroughput::default();
+-
+-    throughput.start_turn(started_at);
+-    throughput.record_output_delta("READY", GenerationStage::Answering, started_at);
+-    throughput.complete_response(Some(4), completed_at);
+-
++    throughput.start_turn(Instant::now());
++    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
++    throughput.complete_response("second", Some(&metrics(/*tokens*/ 200, /*seconds*/ 6)));
+     assert_eq!(
+-        throughput.sample(completed_at),
++        throughput.sample(),
+         Some(ThroughputSample {
+-            tokens_per_second: 40.0,
+-            estimated: false,
++            tokens_per_second: 50.0
+         })
+     );
+ }
+ 
+ #[test]
+-fn completed_responses_form_a_generation_time_weighted_turn_average() {
+-    let started_at = Instant::now();
++fn duplicate_completion_does_not_count_twice() {
+     let mut throughput = TurnThroughput::default();
+-
+-    throughput.start_turn(started_at);
+-    throughput.record_output_delta("first", GenerationStage::Thinking, started_at);
+-    throughput.complete_response(Some(20), started_at + Duration::from_secs(2));
+-    throughput.record_output_delta(
+-        "second",
+-        GenerationStage::Answering,
+-        started_at + Duration::from_secs(10),
+-    );
+-    throughput.complete_response(Some(40), started_at + Duration::from_secs(14));
+-
++    throughput.start_turn(Instant::now());
++    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
++    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
++    throughput.complete_response("second", Some(&metrics(/*tokens*/ 200, /*seconds*/ 6)));
+     assert_eq!(
+-        throughput.sample(started_at + Duration::from_secs(14)),
++        throughput.sample(),
+         Some(ThroughputSample {
+-            tokens_per_second: 10.0,
+-            estimated: false,
++            tokens_per_second: 50.0
+         })
+     );
+ }
+ 
+ #[test]
+-fn starting_a_turn_clears_the_previous_sample() {
+-    let started_at = Instant::now();
+-    let mut throughput = TurnThroughput::default();
+-    throughput.record_output_delta("streamed text", GenerationStage::Answering, started_at);
+-    throughput.complete_response(Some(30), started_at + Duration::from_secs(2));
+-
+-    throughput.start_turn(started_at + Duration::from_secs(3));
+-
+-    assert_eq!(throughput.sample(started_at + Duration::from_secs(3)), None);
+-    assert_eq!(
+-        throughput.generation_stage(),
+-        Some(GenerationStage::Prefill)
+-    );
++fn incomplete_timing_coverage_is_not_reported_as_turn_decode() {
++    for missing in [
++        None,
++        Some(MarathonResponseMetrics {
++            backend_calls: 2,
++            ..metrics(/*tokens*/ 200, /*seconds*/ 2)
++        }),
++        Some(metrics(/*tokens*/ 200, /*seconds*/ 0)),
++    ] {
++        let mut throughput = TurnThroughput::default();
++        throughput.start_turn(Instant::now());
++        throughput.complete_response("measured", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
++        throughput.complete_response("missing", missing.as_ref());
++        assert_eq!(throughput.sample(), None);
++    }
+ }
+ 
+ #[test]
+-fn generation_stage_tracks_prefill_thinking_and_answering() {
+-    let started_at = Instant::now();
++fn a_new_turn_clears_previous_measurements() {
++    let start = Instant::now();
+     let mut throughput = TurnThroughput::default();
+-
+-    throughput.start_turn(started_at);
++    throughput.start_turn(start);
++    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
++    throughput.finish_turn(start + Duration::from_secs(4));
++    throughput.start_turn(start + Duration::from_secs(10));
++    assert_eq!(throughput.sample(), None);
++    assert_eq!(throughput.time_to_first_output(), None);
+     assert_eq!(
+         throughput.generation_stage(),
+         Some(GenerationStage::Prefill)
+     );
+-
+-    throughput.record_output_delta("thought", GenerationStage::Thinking, started_at);
+     assert_eq!(
+-        throughput.generation_stage(),
+-        Some(GenerationStage::Thinking)
++        throughput.elapsed(start + Duration::from_secs(12)),
++        Some(Duration::from_secs(2))
+     );
++}
+ 
+-    throughput.record_output_delta("answer", GenerationStage::Answering, started_at);
+-    assert_eq!(
+-        throughput.generation_stage(),
+-        Some(GenerationStage::Answering)
++#[test]
++fn interrupted_generation_does_not_publish_a_partial_turn_average() {
++    let start = Instant::now();
++    let mut throughput = TurnThroughput::default();
++    throughput.start_turn(start);
++    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
++    throughput.record_output_delta(
++        "unfinished",
++        GenerationStage::Thinking,
++        start + Duration::from_secs(5),
+     );
+-
+-    throughput.finish_turn(started_at + Duration::from_secs(1));
+-    assert_eq!(throughput.generation_stage(), None);
++    throughput.finish_turn(start + Duration::from_secs(6));
++    assert_eq!(throughput.sample(), None);
+ }
+ 
+ #[test]
+-fn records_time_to_first_output_once() {
+-    let started_at = Instant::now();
++fn first_output_is_recorded_once_and_stage_tracks_the_stream() {
++    let start = Instant::now();
+     let mut throughput = TurnThroughput::default();
+-
+-    throughput.start_turn(started_at);
++    throughput.start_turn(start);
+     throughput.record_output_delta(
+-        "first",
++        "thinking",
+         GenerationStage::Thinking,
+-        started_at + Duration::from_millis(2_500),
++        start + Duration::from_secs(2),
++    );
++    assert_eq!(
++        throughput.generation_stage(),
++        Some(GenerationStage::Thinking)
+     );
+     throughput.record_output_delta(
+-        "second",
++        "answer",
+         GenerationStage::Answering,
+-        started_at + Duration::from_secs(4),
++        start + Duration::from_secs(8),
++    );
++    assert_eq!(
++        throughput.generation_stage(),
++        Some(GenerationStage::Answering)
+     );
+-
+     assert_eq!(
+         throughput.time_to_first_output(),
+-        Some(Duration::from_millis(2_500))
++        Some(Duration::from_secs(2))
+     );
++    throughput.finish_turn(start + Duration::from_secs(10));
++    assert_eq!(throughput.generation_stage(), None);
+ }

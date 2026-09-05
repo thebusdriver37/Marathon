@@ -269,8 +269,11 @@ def summarize_run(path: Path, *, live: bool = False) -> dict[str, Any]:
     prompt_ms = 0.0
     generated_tokens = 0.0
     generated_ms = 0.0
+    decode_timing_complete = True
     router_tool_counts: Counter[str] = Counter()
     for response in router_responses:
+        if response.get("completion_replayed"):
+            continue
         is_warmup = response.get("relation") == "warmup"
         if is_warmup:
             warmups += 1
@@ -281,14 +284,25 @@ def summarize_run(path: Path, *, live: bool = False) -> dict[str, Any]:
         latency = _number(response.get("latency_ms") or response.get("backend", {}).get("latency_ms"))
         if latency is not None and not is_warmup:
             backend_latencies.append(latency)
-        timings = response.get("backend_timings") or response.get("backend", {}).get("timings") or {}
-        prompt_tokens += _number(timings.get("prompt_n")) or 0.0
-        prompt_ms += _number(timings.get("prompt_ms")) or 0.0
-        generated_tokens += _number(timings.get("predicted_n")) or 0.0
-        generated_ms += _number(timings.get("predicted_ms")) or 0.0
+        metrics = response.get("response_metrics")
+        if isinstance(metrics, dict) and not is_warmup:
+            decode_timing_complete = decode_timing_complete and (
+                metrics.get("backend_calls", 0) > 0
+                and metrics.get("backend_calls") == metrics.get("timed_backend_calls")
+            )
+            prompt_tokens += _number(metrics.get("prefill_tokens")) or 0.0
+            prompt_ms += (_number(metrics.get("prefill_microseconds")) or 0.0) / 1000.0
+            generated_tokens += _number(metrics.get("decode_tokens")) or 0.0
+            generated_ms += (_number(metrics.get("decode_microseconds")) or 0.0) / 1000.0
+        else:
+            timings = response.get("backend_timings") or response.get("backend", {}).get("timings") or {}
+            prompt_tokens += _number(timings.get("prompt_n")) or 0.0
+            prompt_ms += _number(timings.get("prompt_ms")) or 0.0
+            generated_tokens += max(0.0, (_number(timings.get("predicted_n")) or 0.0) - 1)
+            generated_ms += _number(timings.get("predicted_ms")) or 0.0
         router_tool_counts.update((response.get("output") or {}).get("tool_calls") or {})
 
-    if prompt_ms == 0 or generated_ms == 0:
+    if decode_timing_complete and (prompt_ms == 0 or generated_ms == 0):
         process_prompt_tokens = 0.0
         process_prompt_ms = 0.0
         process_generated_tokens = 0.0
@@ -439,8 +453,9 @@ def summarize_run(path: Path, *, live: bool = False) -> dict[str, Any]:
         ),
         "tool_failure_details": tool_failures[-10:],
         "avg_backend_latency_ms": sum(backend_latencies) / len(backend_latencies) if backend_latencies else None,
-        "prompt_tps": prompt_tokens / (prompt_ms / 1000.0) if prompt_ms > 0 else None,
-        "decode_tps": generated_tokens / (generated_ms / 1000.0) if generated_ms > 0 else None,
+        "prompt_tps": prompt_tokens / (prompt_ms / 1000.0) if prompt_ms > 0 and decode_timing_complete else None,
+        "decode_tps": generated_tokens / (generated_ms / 1000.0) if generated_ms > 0 and decode_timing_complete else None,
+        "decode_timing_complete": decode_timing_complete,
         "avg_direct_ttft_ms": sum(direct_ttft) / len(direct_ttft) if direct_ttft else None,
         "gpu_samples": len(gpu_samples),
         "avg_gpu_power_w": sum(gpu_power) / len(gpu_power) if gpu_power else None,

@@ -97,6 +97,15 @@ Later cold starts restore unchanged system instructions, tools, and `AGENTS.md` 
 Long conversations also receive a bounded rolling checkpoint after they become idle, so a compatible resumed session can restore model state instead of replaying its entire history.
 No manual cache management is required.
 
+## Performance Measurements
+
+Marathon's throughput footer separates backend decode speed from client-observed latency.
+For example, `65 tok/s decode · first output 2.5s · total 80s` means the model decoded at 65 tokens per second, the first streamed answer or reasoning text arrived after 2.5 seconds, and the whole user turn took 80 seconds including prompt processing and tools.
+Decode speed is weighted by backend generation time across all model calls in the turn.
+The footer reports `decode n/a` when backend timings are unavailable or incomplete, rather than estimating tokens from text bytes.
+Managed web-search calls contribute to cumulative usage without inflating the occupied-context meter.
+`marathon report` uses the same aggregate backend timing data and records prefill separately.
+
 ## Reasoning Control
 
 Open Codex's `/model` menu to change the reasoning level for the active session.

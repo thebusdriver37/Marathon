@@ -46,6 +46,7 @@ from marathon_app.checkpoints import RollingCheckpointStore
 from marathon_app.checkpoints import SNAPSHOT_SIDECAR_SUFFIXES
 from marathon_app.checkpoints import conversation_key_hash
 from marathon_app.telemetry import EventWriter
+from marathon_response_accounting import ResponseAccounting
 
 from marathon_web_search import WebFetchExecutor
 from marathon_web_search import WebFetchSettings
@@ -332,6 +333,7 @@ class ManagedWebTurnProgress:
     finalizing: bool
     completed_response: dict[str, Any] | None
     updated_at: float
+    accounting: ResponseAccounting = field(default_factory=ResponseAccounting)
 
 
 def _chronological_instruction_message(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -3008,6 +3010,8 @@ class RouterState:
                     response_payload = event.get("response")
                     if isinstance(response_payload, dict):
                         completed_response = copy.deepcopy(response_payload)
+                        if isinstance(event.get("timings"), dict):
+                            completed_response["timings"] = copy.deepcopy(event["timings"])
                     continue
 
                 if event_type == "response.failed":
@@ -3417,6 +3421,10 @@ class RouterState:
     @staticmethod
     def _response_context_tokens(backend_response: dict[str, Any]) -> int:
         usage = backend_response.get("usage")
+        metadata = backend_response.get("usage_metadata") or {}
+        metrics = metadata.get("marathon") or {}
+        if isinstance(metrics.get("context_usage"), dict):
+            usage = metrics["context_usage"]
         if not isinstance(usage, dict):
             return 0
         total = usage.get("total_tokens")
@@ -4442,6 +4450,7 @@ class RouterState:
         seen_signatures: set[str] = set()
         finalizing = False
         last_response: dict[str, Any] = {}
+        accounting = ResponseAccounting()
         iterations = 0
         stalled_recoveries = 0
         tool_protocol_recoveries = 0
@@ -4476,6 +4485,7 @@ class RouterState:
                     finalizing=finalizing,
                     completed_response=copy.deepcopy(completed_response),
                     updated_at=time.time(),
+                    accounting=copy.deepcopy(accounting),
                 ),
             )
 
@@ -4487,6 +4497,7 @@ class RouterState:
                 iterations = progress.iterations
                 seen_signatures = set(progress.seen_signatures)
                 finalizing = progress.finalizing
+                accounting = copy.deepcopy(progress.accounting)
                 request["input"] = list(request.get("input") or []) + copy.deepcopy(
                     request_suffix
                 )
@@ -4521,6 +4532,7 @@ class RouterState:
             attempt_output_limit = int(
                 request.get("max_output_tokens") or _max_output_tokens(profile)
             )
+            response = None
             try:
                 if event_sink is None:
                     request = copy.deepcopy(request)
@@ -4534,6 +4546,7 @@ class RouterState:
                         request,
                         event_sink=event_sink,
                     )
+                accounting.add(response)
                 protocol_error = _response_tool_protocol_error(
                     response,
                     _tool_argument_max_chars(),
@@ -4541,6 +4554,8 @@ class RouterState:
                 if protocol_error:
                     raise ToolProtocolError(protocol_error)
             except ToolProtocolError as error:
+                if response is None:
+                    accounting.add({})
                 if (
                     tool_protocol_recoveries >= max_tool_protocol_recoveries
                     or not request.get("tools")
@@ -4716,6 +4731,7 @@ class RouterState:
                         request,
                         event_sink=event_sink,
                     )
+                accounting.add(final)
                 last_response = final
                 final_items: list[dict[str, Any]] = []
                 for item in final.get("output", []):
@@ -4758,7 +4774,7 @@ class RouterState:
                         raise ConnectionError("websocket client disconnected")
 
         last_response = copy.deepcopy(last_response)
-        last_response["usage"] = self.usage_payload(last_response.get("usage"))
+        accounting.apply(last_response)
         persist_progress(completed_response=last_response)
         return last_response, cumulative_items, iterations
 
@@ -5303,6 +5319,8 @@ class RouterState:
                 "relation": relation,
                 "backend_ms": backend_ms,
                 "backend_timings": backend_response.get("timings"),
+                "response_metrics": backend_response.get("usage_metadata", {}).get("marathon"),
+                "completion_replayed": replayed_web_completion,
                 "restore_result": restore_result,
                 "lineage": {
                     "mode": relation,
@@ -5823,6 +5841,7 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                     "response": {
                         "id": result["response_id"],
                         "usage": result["usage"],
+                        "usage_metadata": result.get("backend_response", {}).get("usage_metadata"),
                     },
                 }
             )

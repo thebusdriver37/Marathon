@@ -42,6 +42,8 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-tui \
     status_line_context_tokens_renders_live_context_count
   just test -p codex-tui turn_throughput
+  just test -p codex-app-server --test all \
+    turn_start_emits_raw_response_completed_with_upstream_usage
   just test -p codex-tui \
     status_line_tokens_per_second_renders_completed_turn_rate_snapshot
   just test -p codex-tui \

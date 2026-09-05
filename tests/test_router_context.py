@@ -792,7 +792,7 @@ context = 32768
         self.assertEqual(payload["error"]["type"], "invalid_request_error")
         self.assertIn("choose one of: low, xhigh", payload["error"]["message"])
 
-    def test_managed_tool_loop_reports_final_context_not_cumulative_usage(self) -> None:
+    def test_managed_tool_loop_separates_final_context_from_cumulative_usage(self) -> None:
         profile = fixture_profile(131_072)
         state = object.__new__(router_module.RouterState)
         state.web_search_settings = SimpleNamespace(max_iterations=3)
@@ -845,9 +845,10 @@ context = 32768
         )
 
         self.assertEqual(iterations, 1)
-        self.assertEqual(response["usage"]["total_tokens"], 12_075)
+        self.assertEqual(response["usage"]["total_tokens"], 22_125)
+        self.assertEqual(state._response_context_tokens(response), 12_075)
         self.assertEqual(
-            response["usage"]["input_tokens_details"]["cached_tokens"], 10_000
+            response["usage"]["input_tokens_details"]["cached_tokens"], 19_000
         )
 
     def test_tool_outputs_are_bounded_with_head_and_tail_preserved(self) -> None:
@@ -3361,7 +3362,7 @@ context = 32768
         )
 
         self.assertEqual(response["output"], recovered["output"])
-        self.assertEqual(response["usage"]["output_tokens"], 80)
+        self.assertEqual(response["usage"]["output_tokens"], 8_272)
         second_request = state._request_json.await_args_list[1].args[3]
         self.assertEqual(second_request["tool_choice"], "required")
         self.assertEqual(second_request["input"][-1]["role"], "user")
@@ -3644,6 +3645,8 @@ context = 32768
 
         response, items, iterations = asyncio.run(scenario())
 
+        self.assertEqual(response["usage"]["output_tokens"], 30)
+        self.assertEqual(response["usage_metadata"]["marathon"]["backend_calls"], 2)
         resumed_request = state._request_responses_stream.await_args_list[1].args[1]
         resumed_types = [item.get("type") for item in resumed_request["input"]]
         self.assertIn("function_call", resumed_types)
@@ -3732,6 +3735,9 @@ context = 32768
 
         first, replayed = asyncio.run(scenario())
 
+        self.assertEqual(first[0]["usage"]["output_tokens"], 50)
+        self.assertEqual(replayed[0]["usage"], first[0]["usage"])
+        self.assertEqual(replayed[0]["usage_metadata"], first[0]["usage_metadata"])
         self.assertEqual(first[2], 2)
         self.assertEqual(state._request_responses_stream.await_count, 3)
         state._execute_managed_call.assert_awaited_once()

@@ -1787,7 +1787,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(summary["model"], "test-model")
         self.assertEqual(summary["usage"]["output_tokens"], 20)
         self.assertEqual(summary["prompt_tps"], 200)
-        self.assertEqual(summary["decode_tps"], 20)
+        self.assertEqual(summary["decode_tps"], 19)
         self.assertEqual(summary["duration_s"], 2)
 
     def test_run_summary_counts_hermes_and_chat_api_activity(self) -> None:
@@ -1808,6 +1808,27 @@ class TelemetryTests(unittest.TestCase):
 
         self.assertEqual(summary["hermes_sessions"], 1)
         self.assertEqual(summary["chat_completion_requests"], 1)
+
+    def test_run_summary_uses_complete_tool_loop_timings_not_final_call(self) -> None:
+        for covered in (True, False):
+            with self.subTest(covered=covered), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "run.jsonl"
+                writer = EventWriter(path, "run-test", "router")
+                response = {
+                    "backend_timings": {"predicted_n": 11, "predicted_ms": 100},
+                    "response_metrics": {
+                        "backend_calls": 2, "timed_backend_calls": 2 if covered else 1,
+                        "decode_tokens": 130, "decode_microseconds": 2_000_000,
+                        "prefill_tokens": 1000, "prefill_microseconds": 500_000,
+                    },
+                }
+                writer.emit("router.response.completed", response)
+                # Replaying a saved completion performs no additional inference.
+                writer.emit("router.response.completed", {**response, "completion_replayed": True})
+                summary = summarize_run(path)
+            self.assertEqual(summary["decode_tps"], 65 if covered else None)
+            self.assertEqual(summary["prompt_tps"], 2000 if covered else None)
+            self.assertEqual(summary["decode_timing_complete"], covered)
 
     def test_run_summary_falls_back_to_llama_process_timings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
