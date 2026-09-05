@@ -9,10 +9,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -35,6 +37,7 @@ from .catalog import (
 )
 from .instance import InstanceConfig, instance_path, normalize_instance_name, resolve_instance
 from .telemetry import EventWriter, create_run_writer, redact_text, runs_dir
+from .router_security import is_loopback, open_api_request
 
 
 def _xdg_path(env_name: str, fallback: Path) -> Path:
@@ -219,7 +222,7 @@ def _http_json(
     headers: dict[str, str] | None = None,
 ) -> dict[str, object]:
     request = urllib.request.Request(url, headers=headers or {})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with open_api_request(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -483,6 +486,9 @@ class Runtime:
         self.instance: InstanceConfig = resolve_instance(instance)
         self.profile = self.instance.apply_profile(profile)
         self.config = self.instance.settings
+        if not is_loopback(self.config.router_host):
+            raise ValueError("The Marathon router must bind to a loopback address")
+        self.router_token = secrets.token_urlsafe(32)
         self.paths = runtime_paths(self.instance.name)
         self._context_window = self.profile.context
         self.llama: subprocess.Popen[str] | None = None
@@ -522,7 +528,12 @@ class Runtime:
 
     @property
     def router_url(self) -> str:
-        return f"http://{self.config.router_host}:{self.config.router_port}"
+        host = "127.0.0.1" if self.config.router_host == "localhost" else self.config.router_host
+        return f"http://{'[' + host + ']' if ':' in host else host}:{self.config.router_port}"
+
+    @property
+    def router_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.router_token}"}
 
     @property
     def log_dir(self) -> Path:
@@ -1061,6 +1072,7 @@ class Runtime:
         if progress:
             progress("Starting Marathon router")
         router_env = environment.copy()
+        router_env["MARATHON_ROUTER_TOKEN"] = self.router_token
         router_env.update(
             {
                 "PYTHONDONTWRITEBYTECODE": "1",
@@ -1457,7 +1469,7 @@ class Runtime:
             if self.router and self.router.poll() is not None:
                 raise RuntimeError(f"router exited during startup; see {self.router_log}")
             try:
-                if _http_json(f"{self.router_url}/health").get("ok") is True:
+                if _http_json(f"{self.router_url}/health", headers=self.router_headers).get("ok") is True:
                     return
             except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError):
                 pass
@@ -1479,13 +1491,17 @@ class Runtime:
         return interesting[-1][-120:] if interesting else "Loading model weights"
 
     def _write_catalog(self) -> None:
-        payload = _http_json(f"{self.router_url}/v1/models")
+        payload = _http_json(f"{self.router_url}/v1/models", headers=self.router_headers)
         temporary = self.catalog_file.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         temporary.replace(self.catalog_file)
 
     def _write_session(self) -> None:
         ensure_dirs(self.instance.name)
+        self.paths.runtime_dir.chmod(0o700)
+        with tempfile.NamedTemporaryFile(mode="w", dir=self.paths.runtime_dir, delete=False) as handle:
+            handle.write(self.router_token)
+        Path(handle.name).replace(self.paths.session_file.with_name("router.token"))
         payload = {
             "schema": 1,
             "instance": self.instance.name,
@@ -1576,6 +1592,7 @@ class Runtime:
         )
         if self._owns_lock:
             self.paths.session_file.unlink(missing_ok=True)
+            self.paths.session_file.with_name("router.token").unlink(missing_ok=True)
             self.catalog_file.unlink(missing_ok=True)
         for signum, handler in self._old_handlers.items():
             signal.signal(signum, handler)

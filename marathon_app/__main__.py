@@ -19,6 +19,7 @@ from .catalog import discover_models, format_size
 from .instance import normalize_instance_name, resolve_instance
 from .model_library import register_model_root
 from .runtime import automatic_launch_instance, request_stop, runtime_paths
+from .router_security import open_api_request
 from .telemetry import resolve_run, summarize_run
 from .remote import run_remote_host_command
 from .ui import (
@@ -61,9 +62,15 @@ def _status(instance: str | None = None) -> int:
     session_file = runtime_paths(resolved.name).session_file
     try:
         session = json.loads(session_file.read_text(encoding="utf-8"))
-        with urllib.request.urlopen(
-            f"http://{config.router_host}:{config.router_port}/health", timeout=2
-        ) as response:
+        token = session_file.with_name("router.token").read_text(encoding="utf-8")
+        host = config.router_host
+        if ":" in host:
+            host = f"[{host}]"
+        request = urllib.request.Request(
+            f"http://{host}:{config.router_port}/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with open_api_request(request, timeout=2) as response:
             health = json.loads(response.read().decode("utf-8"))
     except (OSError, json.JSONDecodeError, urllib.error.URLError):
         if resolved.name:

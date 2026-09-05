@@ -46,6 +46,7 @@ from marathon_app.checkpoints import RollingCheckpointStore
 from marathon_app.checkpoints import SNAPSHOT_SIDECAR_SUFFIXES
 from marathon_app.checkpoints import conversation_key_hash
 from marathon_app.telemetry import EventWriter
+from marathon_app.router_security import is_loopback, router_security_middleware
 from marathon_response_accounting import ResponseAccounting
 
 from marathon_web_search import WebFetchExecutor
@@ -2103,9 +2104,7 @@ def _proxy_request_headers(
     profile: ModelProfile,
     request_headers: Mapping[str, str],
 ) -> dict[str, str]:
-    blocked = HOP_BY_HOP_HEADERS | {"host"}
-    if profile.external:
-        blocked |= EXTERNAL_SENSITIVE_HEADERS
+    blocked = HOP_BY_HOP_HEADERS | {"host"} | EXTERNAL_SENSITIVE_HEADERS
     headers = {
         key: value
         for key, value in request_headers.items()
@@ -5861,7 +5860,10 @@ async def on_cleanup(app: web.Application) -> None:
 
 
 def build_app(state: RouterState) -> web.Application:
-    app = web.Application(client_max_size=ROUTER_MAX_REQUEST_BYTES)
+    app = web.Application(
+        client_max_size=ROUTER_MAX_REQUEST_BYTES,
+        middlewares=[router_security_middleware()],
+    )
     app["state"] = state
     app.router.add_get("/health", handle_health)
     app.router.add_get("/v1/models", handle_models)
@@ -5888,6 +5890,9 @@ def main() -> None:
     parser.add_argument("--log-dir", default=str(_repo_root() / "logs"))
     parser.add_argument("--debug", action="store_true", default=bool(os.getenv("CODEX_LLAMA_DEBUG")))
     args = parser.parse_args()
+
+    if not is_loopback(args.host):
+        parser.error("The Marathon router must bind to a loopback address")
 
     _base_instructions()
     state = RouterState(

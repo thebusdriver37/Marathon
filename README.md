@@ -37,7 +37,9 @@ marathon
 ```
 
 Marathon loads the remembered model and opens Codex directly.
-Its writable Codex configuration and sessions stay separate from stock Codex while personal instructions, skills, plugins, hooks, and rules remain available.
+Its writable Codex configuration and sessions stay separate from stock Codex while personal instructions, skills, and rules remain available.
+Cloud credentials, plugins, hooks, and global MCP autostart settings are not inherited.
+The hardened frontend disables cloud analytics, metrics, feedback uploads, announcements, and automatic update checks.
 
 ## Multiple Instances
 

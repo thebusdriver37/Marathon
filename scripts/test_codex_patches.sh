@@ -34,6 +34,13 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
 (
   cd "$BUILD_CODEX_DIR/codex-rs"
   export RUST_MIN_STACK="${RUST_MIN_STACK:-8388608}"
+  # Nextest can inject SSL_CERT_FILE while probing system roots. The native-TLS
+  # unit tests need a clean environment; CA probes must retain their own fixtures.
+  host_triple="$(rustc -vV | sed -n 's/^host: //p' | tr '[:lower:]-' '[:upper:]_')"
+  env "CARGO_TARGET_${host_triple}_RUNNER=env -u SSL_CERT_FILE -u CODEX_CA_CERTIFICATE" \
+    just test -p codex-http-client --lib
+  just test -p codex-http-client --test ca_env
+  just test -p codex-core --lib local_runtime
   just test -p codex-utils-cli
   just test -p codex-protocol \
     token_usage_percentage_uses_the_full_runtime_window

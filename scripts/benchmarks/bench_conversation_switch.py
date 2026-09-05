@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ async def main() -> None:
         raise ValueError("Only reserved scratch workers are supported")
     out = Path(output).resolve()
     os.environ.update({
+        "MARATHON_ROUTER_TOKEN": secrets.token_urlsafe(32),
         "MARATHON_MODEL_PATH": "/home/deforest/AI/models/gguf/qwen3.8-27b-uncensored/Qwen3.8-27B-Uncensored-IQ4_XS.gguf",
         "MARATHON_MODEL_SLUG": "slots",
         "MARATHON_BACKEND_MODEL_ID": "qwen3.8-27b-uncensored",
@@ -98,7 +100,10 @@ async def main() -> None:
             start = time.perf_counter()
             first = None
             output_items = []
-            async with client.ws_connect(url, max_msg_size=8 * 1024**2) as ws:
+            async with client.ws_connect(
+                url, max_msg_size=8 * 1024**2,
+                headers={"Authorization": f"Bearer {os.environ['MARATHON_ROUTER_TOKEN']}"},
+            ) as ws:
                 await ws.send_json(body)
                 while True:
                     event = await ws.receive_json(timeout=900)

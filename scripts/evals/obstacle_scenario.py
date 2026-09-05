@@ -16,6 +16,7 @@ from marathon_app.catalog import discover_models, find_model, find_profile
 from marathon_app.codex_telemetry import snapshot_sessions, summarize_session_changes
 from marathon_app.codex_home import codex_environment
 from marathon_app.frontends import codex_command
+from marathon_app.frontends import require_hardened_codex
 from marathon_app.runtime import Runtime
 from marathon_app.telemetry import EventWriter
 
@@ -37,6 +38,7 @@ def active_runtime(model_query: str) -> tuple[Runtime, EventWriter]:
     model = find_model(model_query, discover_models())
     profile = find_profile(model, str(session["profile"]), "codex")
     runtime = Runtime(model, profile)
+    runtime.router_token = runtime.paths.session_file.with_name("router.token").read_text(encoding="utf-8")
     runtime._context_window = int(session["context"])
     writer = EventWriter(Path(session["run_log"]), str(session["run_id"]), "eval")
     return runtime, writer
@@ -72,9 +74,11 @@ def main() -> int:
     event_log = output_dir / f"{args.name}.codex.jsonl"
     last_message = output_dir / f"{args.name}.last.md"
     environment, codex_home, shared_profile = codex_environment()
+    environment["MARATHON_ROUTER_TOKEN"] = runtime.router_token
     before = snapshot_sessions(codex_home)
 
     base_command = codex_command(runtime, shared_profile=shared_profile)
+    require_hardened_codex(base_command[0])
     config_args = [] if args.use_user_config else ["--ignore-user-config"]
     if args.resume:
         command = [

@@ -201,18 +201,38 @@ Architecture-specific distributed backends keep their shipped profiles.
 
 ## Codex Integration
 
-Marathon prefers its patched Codex binary at `$XDG_DATA_HOME/marathon/bin/codex` and falls back to a stock `codex` command.
+Marathon requires its hardened Codex binary at `$XDG_DATA_HOME/marathon/bin/codex` or an explicitly selected compatible build.
+It refuses to launch an unhardened stock binary.
 Marathon gives Codex a separate writable home at `.marathon/codex-home` inside the Marathon installation.
 Configuration, sessions, logs, history, memory, and SQLite state therefore cannot modify or appear in stock Codex.
 
 Marathon refreshes a generated `marathon-shared` profile from the user's normal Codex configuration before each launch.
 It excludes the model, provider, reasoning effort, context, and catalog keys that Marathon owns.
-Authentication, `AGENTS.md`, hooks, rules, skills, and plugins are explicitly linked into the isolated home so the same user tools remain available.
+Only `AGENTS.md`, rules, and skills are linked into the isolated home.
+The generated profile inherits an allowlist of local preferences and project trust entries, not cloud accounts or executable startup integrations.
+Legacy links to stock authentication, hooks, and plugins are removed without changing the stock resources.
+Locally owned copies are preserved beside their former paths with a `.disabled-<id>` suffix.
 Project `.codex/config.toml` files continue to apply through normal Codex configuration precedence.
 
 On the first isolated launch, existing `marathon-local` rollout files are moved from the stock Codex session tree into Marathon's session tree.
 Set `MARATHON_CODEX_HOME` to relocate the isolated home or `MARATHON_STOCK_CODEX_HOME` when the normal Codex home is not `~/.codex`.
-`MARATHON_USE_USER_CONFIG=1` is an explicit compatibility escape hatch that disables this isolation.
+`MARATHON_USE_USER_CONFIG=1` is rejected because it bypasses local isolation.
+
+The hardened frontend enforces disabled analytics, metrics/tracing exports, feedback uploads, announcements, update checks, cloud plugins, and startup hooks even if a project configuration enables them.
+Its route-aware HTTP and WebSocket clients reject non-loopback destinations before DNS resolution and bypass proxies for local requests.
+The supervisor and direct-chat API clients also bypass environment proxies and refuse redirects, while Hermes receives loopback proxy exclusions.
+This is application hardening, not an operating-system egress sandbox or protection from malicious tools running as your user.
+Explicit model-invoked shell, browser, and Marathon web tools retain network access.
+Local stdio MCP servers can be configured explicitly in Marathon's own home, but their startup behavior must be reviewed before enabling them.
+
+The router requires a fresh per-runtime bearer token for every route, including health checks, and rejects browser Origin headers and non-loopback Host headers.
+The supervisor passes the token to its frontends without putting it on command lines, and stores it in a mode-600 `router.token` beside the instance's runtime `session.json` for `marathon status`.
+The token is removed during normal shutdown and replaced on the next launch.
+Other processes running as the same user, including full-access tools, are still inside this trust boundary.
+
+Run `.marathon/venv/bin/python3 scripts/test_local_security.py /path/to/codex` to test the real frontend against an authenticated loopback fixture inside an offline network namespace.
+The test records startup connections, executes a model-sanctioned network tool against a local fixture, and resumes a saved session without starting inference workers.
+It retains private evidence in the printed temporary directory for review.
 `MARATHON_CODEX_BIN` selects both the patched Codex install destination and the executable Marathon launches.
 
 Marathon supplies invocation-specific settings for the local provider, selected model, model catalog, and status line.

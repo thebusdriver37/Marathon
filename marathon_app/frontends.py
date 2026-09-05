@@ -19,6 +19,7 @@ from rich.prompt import Prompt
 from .codex_home import codex_environment
 from .codex_telemetry import snapshot_sessions, summarize_session_changes
 from .runtime import Runtime
+from .router_security import open_api_request
 
 
 MARATHON_STATUS_LINE = [
@@ -89,6 +90,7 @@ def codex_command(
         'model_providers.marathon-local={ name = "Marathon Local", '
         f'base_url = "{runtime.router_url}/v1", wire_api = "responses", '
         "requires_openai_auth = false, supports_websockets = true, "
+        'env_key = "MARATHON_ROUTER_TOKEN", '
         "stream_idle_timeout_ms = 900000 }"
     )
     command = [
@@ -109,10 +111,17 @@ def codex_command(
     return command
 
 
+def require_hardened_codex(binary: str) -> None:
+    if "local-runtime-security" not in _codex_features(binary):
+        raise RuntimeError("Marathon requires its hardened frontend; run: marathon build-codex")
+
+
 def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
     instance = getattr(getattr(runtime, "instance", None), "name", None)
     environment, codex_home, shared_profile = codex_environment(instance=instance)
     command = codex_command(runtime, extra_args, shared_profile=shared_profile)
+    require_hardened_codex(command[0])
+    environment["MARATHON_ROUTER_TOKEN"] = runtime.router_token
     environment["CODEX_CLI_NAME"] = _marathon_cli_name(instance)
     before = snapshot_sessions(codex_home)
     started = time.monotonic()
@@ -172,12 +181,15 @@ def run_hermes(runtime: Runtime, extra_args: list[str] | None = None) -> int:
 
     command = hermes_command(runtime, extra_args)
     environment = os.environ.copy()
+    for key in ("NO_PROXY", "no_proxy"):
+        environment[key] = ",".join(filter(None, [environment.get(key), "127.0.0.1,localhost,::1"]))
     environment.update(
         {
             # Hermes deliberately treats its YAML as the normal source of truth,
             # but CUSTOM_BASE_URL is its supported per-process custom-provider
             # override.  This leaves ~/.hermes, memory, rules, and skills intact.
             "CUSTOM_BASE_URL": f"{runtime.router_url}/v1",
+            "CUSTOM_API_KEY": runtime.router_token,
             "HERMES_INFERENCE_MODEL": runtime.model.alias,
             "HERMES_INFERENCE_PROVIDER": "custom",
         }
@@ -235,7 +247,7 @@ def _stream_chat(
     request = urllib.request.Request(
         f"{runtime.router_url}/v1/chat/completions",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **runtime.router_headers},
         method="POST",
     )
     parts: list[str] = []
@@ -248,7 +260,7 @@ def _stream_chat(
             "input_characters": sum(len(item.get("content", "")) for item in messages),
         },
     )
-    with urllib.request.urlopen(request, timeout=3600) as response:
+    with open_api_request(request, timeout=3600) as response:
         for raw in response:
             line = raw.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):

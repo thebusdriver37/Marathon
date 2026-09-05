@@ -1,0 +1,376 @@
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index dca329a..18ff1e6 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -162,6 +162,7 @@ use toml_edit::DocumentMut;
+ 
+ mod auth_keyring;
+ pub mod edit;
++mod local_runtime;
+ mod managed_features;
+ mod network_proxy_spec;
+ mod otel;
+@@ -4129,7 +4130,7 @@ impl Config {
+         )
+         .map_err(std::io::Error::from)?;
+         let otel = otel::resolve_config(cfg.otel.unwrap_or_default(), &mut startup_warnings);
+-        let config = Self {
++        let mut config = Self {
+             model,
+             service_tier,
+             review_model,
+@@ -4380,6 +4381,9 @@ impl Config {
+                 .unwrap_or_default(),
+             otel,
+         };
++        if codex_http_client::local_runtime_enabled() {
++            local_runtime::enforce(&mut config)?;
++        }
+         Ok(config)
+         })
+         .await
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index bc043c4..fe6d96f 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -999,7 +999,9 @@ async fn run_ratatui_app(
+     let workload_identity_selected = is_workload_identity_selected();
+     color_eyre::install()?;
+ 
+-    tooltips::announcement::prewarm(initial_config.http_client_factory());
++    if !codex_http_client::local_runtime_enabled() {
++        tooltips::announcement::prewarm(initial_config.http_client_factory());
++    }
+ 
+     // Forward panic reports through tracing so they appear in the UI status
+     // line, but do not swallow the default/color-eyre panic handler.
+diff --git a/codex-rs/http-client/src/lib.rs b/codex-rs/http-client/src/lib.rs
+index cb7f120..759b9c6 100644
+--- a/codex-rs/http-client/src/lib.rs
++++ b/codex-rs/http-client/src/lib.rs
+@@ -4,6 +4,7 @@ mod client;
+ mod client_builder;
+ mod custom_ca;
+ mod error;
++mod local_runtime;
+ mod outbound_proxy;
+ mod request;
+ mod route_aware_client_pool;
+@@ -31,6 +32,8 @@ pub use crate::custom_ca::build_rustls_client_config_with_custom_ca;
+ pub use crate::custom_ca::maybe_build_rustls_client_config_with_custom_ca;
+ pub use crate::error::StreamError;
+ pub use crate::error::TransportError;
++pub use crate::local_runtime::local_runtime_enabled;
++pub use crate::local_runtime::validate_local_runtime_url;
+ pub use crate::outbound_proxy::BuildRouteAwareHttpClientError;
+ pub use crate::outbound_proxy::ClientRouteClass;
+ pub use crate::outbound_proxy::HttpClientFactory;
+diff --git a/codex-rs/http-client/src/outbound_proxy.rs b/codex-rs/http-client/src/outbound_proxy.rs
+index 27d1a80..794c093 100644
+--- a/codex-rs/http-client/src/outbound_proxy.rs
++++ b/codex-rs/http-client/src/outbound_proxy.rs
+@@ -243,6 +243,10 @@ impl HttpClientFactory {
+         &self,
+         request_url: String,
+     ) -> io::Result<OutboundProxyRoute> {
++        if crate::local_runtime_enabled() {
++            crate::validate_local_runtime_url(&request_url)?;
++            return Ok(OutboundProxyRoute::Direct);
++        }
+         if matches!(
+             self.outbound_proxy_policy,
+             OutboundProxyPolicy::ReqwestDefault
+@@ -292,6 +296,17 @@ impl HttpClientFactory {
+         request_url: &str,
+         route_class: ClientRouteClass,
+     ) -> Result<reqwest::Client, BuildRouteAwareHttpClientError> {
++        if crate::local_runtime_enabled() {
++            crate::validate_local_runtime_url(request_url)
++                .map_err(BuildRouteAwareHttpClientError::LocalRuntime)?;
++            // This non-pooled client cannot revalidate redirect destinations.
++            return build_reqwest_client_with_custom_ca(
++                builder
++                    .no_proxy()
++                    .redirect(reqwest::redirect::Policy::none()),
++            )
++            .map_err(Into::into);
++        }
+         build_reqwest_client_for_route(
+             builder,
+             request_url,
+@@ -410,6 +425,8 @@ fn proxy_resolution_url(request_url: &str) -> Cow<'_, str> {
+ /// Error while building a resolver-aware reqwest client.
+ #[derive(Debug, Error)]
+ pub enum BuildRouteAwareHttpClientError {
++    #[error(transparent)]
++    LocalRuntime(io::Error),
+     #[error(transparent)]
+     CustomCa(#[from] BuildCustomCaTransportError),
+ 
+@@ -420,6 +437,7 @@ pub enum BuildRouteAwareHttpClientError {
+ impl From<BuildRouteAwareHttpClientError> for io::Error {
+     fn from(error: BuildRouteAwareHttpClientError) -> Self {
+         match error {
++            BuildRouteAwareHttpClientError::LocalRuntime(error) => error,
+             BuildRouteAwareHttpClientError::CustomCa(error) => error.into(),
+             BuildRouteAwareHttpClientError::InvalidProxyConfig { .. } => io::Error::other(error),
+         }
+diff --git a/codex-rs/http-client/src/route_aware_client_pool.rs b/codex-rs/http-client/src/route_aware_client_pool.rs
+index 29705e4..f75c299 100644
+--- a/codex-rs/http-client/src/route_aware_client_pool.rs
++++ b/codex-rs/http-client/src/route_aware_client_pool.rs
+@@ -140,7 +140,10 @@ impl RouteAwareRequestError {
+             Self::Route(RouteAwareClientPoolError::Resolve(_)) => {
+                 Some(RouteFailureClass::ProxyResolutionUnavailable)
+             }
+-            Self::Request(_)
++            Self::Route(RouteAwareClientPoolError::Build(
++                BuildRouteAwareHttpClientError::LocalRuntime(_),
++            ))
++            | Self::Request(_)
+             | Self::Build(_)
+             | Self::UnsupportedRedirectScheme(_)
+             | Self::TooManyRedirects
+@@ -750,7 +753,11 @@ impl RouteAwareClientPool {
+         )]
+         let client = match (
+             self.http_client_factory.outbound_proxy_policy(),
+-            self.custom_ca_fallback,
++            if crate::local_runtime_enabled() {
++                CustomCaFallback::Disabled
++            } else {
++                self.custom_ca_fallback
++            },
+         ) {
+             (OutboundProxyPolicy::ReqwestDefault, CustomCaFallback::LegacyTransportDefault) => {
+                 client_builder.build_with_transport_default_proxy_and_custom_ca_fallback()
+@@ -789,6 +796,7 @@ impl RouteAwareClientPool {
+         self.client_builder.follows_redirects()
+             && (self.http_client_factory.outbound_proxy_policy()
+                 == OutboundProxyPolicy::RespectSystemProxy
++                || crate::local_runtime_enabled()
+                 || self.rustls_clients.is_some())
+     }
+ 
+diff --git a/codex-rs/core/src/config/local_runtime.rs b/codex-rs/core/src/config/local_runtime.rs
+new file mode 100644
+index 0000000..75310da
+--- /dev/null
++++ b/codex-rs/core/src/config/local_runtime.rs
+@@ -0,0 +1,47 @@
++//! Fail-closed overrides for Marathon, independent of user/project config precedence.
++
++use super::Config;
++use codex_config::types::AuthCredentialsStoreMode;
++use codex_config::types::OtelExporterKind;
++use codex_features::Feature;
++
++pub(super) fn enforce(config: &mut Config) -> std::io::Result<()> {
++    if config.model_provider.requires_openai_auth {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::PermissionDenied,
++            "Marathon requires its local model provider",
++        ));
++    }
++    codex_http_client::validate_local_runtime_url(
++        config.model_provider.base_url.as_deref().unwrap_or(""),
++    )?;
++    config.check_for_update_on_startup = false;
++    config.analytics_enabled = Some(false);
++    config.feedback_enabled = false;
++    config.otel.exporter = OtelExporterKind::None;
++    config.otel.trace_exporter = OtelExporterKind::None;
++    config.otel.metrics_exporter = OtelExporterKind::None;
++    config.otel.log_user_prompt = false;
++    config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
++    config.orchestrator_skills_enabled = false;
++    config.orchestrator_mcp_enabled = false;
++    config.show_tooltips = false;
++    config.tui_pet = None;
++    config.notify = None;
++    for feature in [
++        Feature::Apps,
++        Feature::Plugins,
++        Feature::RemotePlugin,
++        Feature::ToolSuggest,
++        Feature::RecommendedPlugins,
++        Feature::CodexHooks,
++        Feature::PluginHooks,
++    ] {
++        config.features.disable(feature)?;
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++#[path = "local_runtime_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/config/local_runtime_tests.rs b/codex-rs/core/src/config/local_runtime_tests.rs
+new file mode 100644
+index 0000000..e9f22bc
+--- /dev/null
++++ b/codex-rs/core/src/config/local_runtime_tests.rs
+@@ -0,0 +1,81 @@
++use super::enforce;
++use crate::config::Config;
++use crate::config::ConfigOverrides;
++use codex_config::config_toml::ConfigToml;
++use codex_config::types::OtelExporterKind;
++use codex_features::Feature;
++use codex_utils_absolute_path::AbsolutePathBuf;
++use pretty_assertions::assert_eq;
++
++#[tokio::test]
++async fn local_runtime_overrides_cloud_settings_without_removing_explicit_tools() {
++    let home = tempfile::tempdir().unwrap();
++    let cfg: ConfigToml = toml::from_str(
++        r#"
++model_provider = "marathon-local"
++check_for_update_on_startup = true
++analytics.enabled = true
++feedback.enabled = true
++otel.metrics_exporter = "statsig"
++features.apps = true
++features.plugins = true
++features.hooks = true
++[model_providers.marathon-local]
++name = "Marathon Local"
++base_url = "http://127.0.0.1:18111/v1"
++wire_api = "responses"
++requires_openai_auth = false
++[mcp_servers.explicit-local-tool]
++command = "local-tool"
++"#,
++    )
++    .unwrap();
++    let mut config = Config::load_from_base_config_with_overrides(
++        cfg,
++        ConfigOverrides::default(),
++        AbsolutePathBuf::from_absolute_path(home.path()).unwrap(),
++    )
++    .await
++    .unwrap();
++    enforce(&mut config).unwrap();
++    assert_eq!(
++        (
++            config.check_for_update_on_startup,
++            config.analytics_enabled,
++            config.feedback_enabled
++        ),
++        (false, Some(false), false),
++    );
++    assert_eq!(
++        (
++            config.otel.exporter,
++            config.otel.trace_exporter,
++            config.otel.metrics_exporter
++        ),
++        (
++            OtelExporterKind::None,
++            OtelExporterKind::None,
++            OtelExporterKind::None
++        ),
++    );
++    assert!(!config.features.enabled(Feature::Apps));
++    assert!(!config.features.enabled(Feature::Plugins));
++    assert!(!config.features.enabled(Feature::CodexHooks));
++    assert!(config.mcp_servers.get().contains_key("explicit-local-tool"));
++}
++
++#[tokio::test]
++async fn local_runtime_rejects_cloud_model_provider() {
++    let home = tempfile::tempdir().unwrap();
++    let mut config = Config::load_from_base_config_with_overrides(
++        ConfigToml::default(),
++        ConfigOverrides::default(),
++        AbsolutePathBuf::from_absolute_path(home.path()).unwrap(),
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        enforce(&mut config).unwrap_err().kind(),
++        std::io::ErrorKind::PermissionDenied
++    );
++}
+diff --git a/codex-rs/http-client/src/local_runtime.rs b/codex-rs/http-client/src/local_runtime.rs
+new file mode 100644
+index 0000000..33759e5
+--- /dev/null
++++ b/codex-rs/http-client/src/local_runtime.rs
+@@ -0,0 +1,37 @@
++//! Marathon's frontend transport boundary. Tool subprocesses retain their own networking.
++
++use std::io;
++use std::net::IpAddr;
++
++pub fn local_runtime_enabled() -> bool {
++    std::env::var_os("MARATHON_LOCAL_ONLY").is_some_and(|value| value == "1")
++}
++
++/// Accept literal loopback destinations only, without DNS or proxy resolution.
++pub fn validate_local_runtime_url(url: &str) -> io::Result<()> {
++    let allowed = url.parse::<http::Uri>().ok().is_some_and(|uri| {
++        matches!(uri.scheme_str(), Some("http" | "https" | "ws" | "wss"))
++            && uri.host().is_some_and(|host| {
++                host.trim_start_matches('[')
++                    .trim_end_matches(']')
++                    .parse::<IpAddr>()
++                    .is_ok_and(|address| address.is_loopback())
++            })
++            && uri
++                .authority()
++                .is_some_and(|authority| !authority.as_str().contains('@'))
++    });
++    if allowed {
++        Ok(())
++    } else {
++        // Do not include URLs, which may contain credentials or private queries.
++        Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "Marathon local runtime blocked a non-loopback frontend destination",
++        ))
++    }
++}
++
++#[cfg(test)]
++#[path = "local_runtime_tests.rs"]
++mod tests;
+diff --git a/codex-rs/http-client/src/local_runtime_tests.rs b/codex-rs/http-client/src/local_runtime_tests.rs
+new file mode 100644
+index 0000000..1d4bec4
+--- /dev/null
++++ b/codex-rs/http-client/src/local_runtime_tests.rs
+@@ -0,0 +1,33 @@
++use super::validate_local_runtime_url;
++use pretty_assertions::assert_eq;
++
++#[test]
++fn local_runtime_accepts_only_literal_loopback_urls() {
++    for url in [
++        "http://127.0.0.1:18111/v1",
++        "ws://127.0.0.1:18111/v1/responses",
++        "http://[::1]:18111/",
++        "https://127.0.0.2/",
++    ] {
++        assert_eq!(validate_local_runtime_url(url).is_ok(), true, "{url}");
++    }
++    for url in [
++        "https://chatgpt.com/",
++        "https://api.github.com/",
++        "http://192.168.1.1/",
++        "http://8.8.8.8/",
++        "http://localhost/",
++        "http://127.0.0.1.example/",
++        "http://127.0.0.1@external.example/",
++        "http://secret@127.0.0.1/",
++        "file:///tmp/test",
++        "not a URL",
++        "http://[::ffff:8.8.8.8]/",
++    ] {
++        assert_eq!(
++            validate_local_runtime_url(url).unwrap_err().kind(),
++            std::io::ErrorKind::PermissionDenied,
++            "{url}"
++        );
++    }
++}

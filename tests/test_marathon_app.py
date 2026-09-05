@@ -1304,7 +1304,7 @@ class CodexHomeTests(unittest.TestCase):
             self.assertNotIn("sqlite_home", shared_config)
             self.assertNotIn("log_dir", shared_config)
             self.assertIn('personality = "pragmatic"', shared_config)
-            self.assertIn("[mcp_servers.example]", shared_config)
+            self.assertNotIn("mcp_servers", shared_config)
             self.assertEqual((isolated / SHARED_PROFILE_FILE).stat().st_mode & 0o777, 0o600)
             self.assertEqual(
                 (isolated / "AGENTS.md").resolve(), (stock / "AGENTS.md").resolve()
@@ -1573,6 +1573,10 @@ class FrontendTests(unittest.TestCase):
                     "marathon_app.frontends.subprocess.run", return_value=completed
                 ) as run,
                 mock.patch(
+                    "marathon_app.frontends._codex_features",
+                    return_value={"local-runtime-security"},
+                ),
+                mock.patch(
                     "marathon_app.frontends.snapshot_sessions", return_value={}
                 ),
                 mock.patch(
@@ -1695,7 +1699,7 @@ class FrontendTests(unittest.TestCase):
             self.assertEqual(timeout, 3600)
             return Response()
 
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with mock.patch("marathon_app.frontends.open_api_request", side_effect=fake_urlopen):
             answer = _stream_chat(runtime, [{"role": "user", "content": "hi"}])
 
         self.assertEqual(answer, "hello")
@@ -1723,7 +1727,7 @@ class FrontendTests(unittest.TestCase):
             captured.update(json.loads(request.data.decode("utf-8")))
             return Response()
 
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with mock.patch("marathon_app.frontends.open_api_request", side_effect=fake_urlopen):
             _stream_chat(runtime, [{"role": "user", "content": "hi"}])
 
         self.assertEqual(captured["temperature"], 0.0)

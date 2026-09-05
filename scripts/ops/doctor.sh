@@ -129,11 +129,16 @@ fi
 
 if [[ -x "$PATCHED_CODEX_BIN" ]]; then
   pass "Marathon Codex available: $($PATCHED_CODEX_BIN --version 2>&1)"
+  if rg -qx 'local-runtime-security' "$PATCHED_CODEX_BIN.features" 2>/dev/null; then
+    pass "Marathon local-runtime hardening marker present"
+  else
+    fail "frontend is not marked hardened; run: marathon build-codex"
+  fi
   if [[ -f "$PATCHED_CODEX_BIN.source" ]]; then
     info "Marathon Codex source: $(cat "$PATCHED_CODEX_BIN.source")"
   fi
 elif have codex; then
-  warn "using stock Codex; run 'marathon build-codex' for Marathon's status meters"
+  fail "stock Codex cannot be used as Marathon's hardened frontend; run: marathon build-codex"
 else
   fail "Codex is not installed; run: marathon build-codex"
 fi
@@ -288,7 +293,18 @@ while IFS='|' read -r kind identity path extra; do
 done <<<"$backend_inventory"
 
 router_url="http://$ROUTER_HOST:$ROUTER_PORT"
-health_json="$(curl -fsS --max-time 2 "$router_url/health" 2>/dev/null || true)"
+health_json="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" - "$router_url" <<'PY' 2>/dev/null || true
+import json
+import sys
+from urllib.parse import urlsplit
+from marathon_app.runtime import SESSION_FILE, _http_json
+from marathon_app.router_security import is_loopback
+if not is_loopback(urlsplit(sys.argv[1]).hostname or ""):
+    raise SystemExit(1)
+token = SESSION_FILE.with_name("router.token").read_text(encoding="utf-8")
+print(json.dumps(_http_json(sys.argv[1] + "/health", timeout=2, headers={"Authorization": f"Bearer {token}"})))
+PY
+)"
 if [[ -n "$health_json" ]]; then
   current_model="$(json_value "$health_json" current_model 2>/dev/null || true)"
   backend_status="$(json_value "$health_json" backend_health.status 2>/dev/null || true)"

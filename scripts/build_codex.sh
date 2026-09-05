@@ -112,6 +112,9 @@ FEATURES_TMP="$(mktemp "$install_dir/.codex.features.XXXXXX")"
 if rg -q 'tokens-per-second' "$BUILD_CODEX_DIR/codex-rs/tui/src"; then
   printf 'tokens-per-second\n' >"$FEATURES_TMP"
 fi
+if rg -q 'MARATHON_LOCAL_ONLY' "$BUILD_CODEX_DIR/codex-rs/http-client/src/local_runtime.rs"; then
+  printf 'local-runtime-security\n' >>"$FEATURES_TMP"
+fi
 mv -f "$FEATURES_TMP" "$INSTALL_BIN.features"
 FEATURES_TMP=""
 

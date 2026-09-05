@@ -3240,7 +3240,9 @@ context = 32768
 
     def test_http_fallback_accepts_context_sized_request_bodies(self) -> None:
         state = object.__new__(router_module.RouterState)
-        with warnings.catch_warnings():
+        with warnings.catch_warnings(), mock.patch.dict(
+            "os.environ", {"MARATHON_ROUTER_TOKEN": "test-secret"}
+        ):
             warnings.simplefilter("ignore", UserWarning)
             app = router_module.build_app(state)
 
