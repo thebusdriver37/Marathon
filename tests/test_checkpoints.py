@@ -37,12 +37,15 @@ class RollingCheckpointStoreTests(unittest.TestCase):
         content: bytes,
         profile: str = "model",
         context_tokens: int = 20_000,
+        sidecars: dict[str, bytes] | None = None,
     ) -> dict[str, object]:
         key_hash = checkpoints.conversation_key_hash(key)
         pending = store.pending_filename(key_hash, response_id)
         directory = store.profile_dir(profile)
         directory.mkdir(parents=True, exist_ok=True)
         (directory / pending).write_bytes(content)
+        for suffix, data in (sidecars or {}).items():
+            Path(f"{directory / pending}{suffix}").write_bytes(data)
         return store.commit(
             profile_slug=profile,
             profile_alias=profile,
@@ -162,6 +165,7 @@ class RollingCheckpointStoreTests(unittest.TestCase):
             pending.write_bytes(b"target-state")
             Path(f"{pending}.draft").write_bytes(b"draft-state")
             Path(f"{pending}.spec").write_bytes(b"spec-state")
+            Path(f"{pending}.checkpoints").write_bytes(b"rewind-state")
 
             result = store.commit(
                 profile_slug="model",
@@ -186,14 +190,14 @@ class RollingCheckpointStoreTests(unittest.TestCase):
             self.assertEqual(result["status"], "saved")
             self.assertIsNotNone(record)
             assert record is not None
-            self.assertEqual(record.size_bytes, 33)
+            self.assertEqual(record.size_bytes, 45)
             self.assertEqual(
                 {path.suffix for path in record.sidecar_paths},
-                {".draft", ".spec"},
+                {".draft", ".spec", ".checkpoints"},
             )
             self.assertEqual(
                 record.metadata.sidecar_suffixes if record.metadata else (),
-                (".draft", ".spec"),
+                (".draft", ".spec", ".checkpoints"),
             )
 
             store.discard(record)
@@ -211,7 +215,7 @@ class RollingCheckpointStoreTests(unittest.TestCase):
             profile_dir.mkdir(parents=True)
             pending = profile_dir / pending_name
             pending.write_bytes(b"target-state")
-            Path(f"{pending}.draft").write_bytes(b"draft-state")
+            Path(f"{pending}.checkpoints").write_bytes(b"rewind-state")
             self.commit(
                 store,
                 key="unrelated-session",
@@ -231,7 +235,7 @@ class RollingCheckpointStoreTests(unittest.TestCase):
                 pending_filename=pending_name,
             )
             final = profile_dir / store.snapshot_filename(key_hash)
-            Path(f"{final}.draft").unlink()
+            Path(f"{final}.checkpoints").unlink()
 
             self.assertIsNone(
                 store.find(
@@ -326,6 +330,20 @@ class RollingCheckpointStoreTests(unittest.TestCase):
             snapshot = next(store.local_root.glob("*/conversation__*.bin"))
             self.assertEqual(result["status"], "skipped")
             self.assertEqual(snapshot.read_bytes(), b"good")
+
+    def test_rewind_sidecar_counts_toward_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(Path(directory), max_bytes=8)
+            result = self.commit(
+                store,
+                key="rewind-session",
+                response_id="response-one",
+                content=b"target",
+                sidecars={".checkpoints": b"rewind"},
+            )
+            self.assertEqual(result["status"], "skipped")
+            self.assertEqual(result["size_bytes"], 12)
+            self.assertFalse(list(store.profile_dir("model").glob("*.bin*")))
 
     def test_configured_budget_cannot_exceed_32_gib(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

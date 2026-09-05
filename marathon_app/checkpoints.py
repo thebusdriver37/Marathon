@@ -22,7 +22,9 @@ from typing import Iterator
 # Older schemas cannot safely validate the reusable prompt prefix.
 CHECKPOINT_SCHEMA = 7
 CHECKPOINT_PREFIX = "conversation__"
-SNAPSHOT_SIDECAR_SUFFIXES = (".draft", ".spec")
+# Optional recurrent rewind state is tracked in schema 7 like the draft sidecars.
+# Older schema 7 bundles without it remain loadable, but cannot rewind after restore.
+SNAPSHOT_SIDECAR_SUFFIXES = (".draft", ".spec", ".checkpoints")
 MAX_CHECKPOINT_CACHE_BYTES = 32 * 1024**3
 PENDING_MAX_AGE_SECONDS = 60 * 60
 

@@ -249,6 +249,11 @@ Rolling conversation checkpoints are enabled by default for llama.cpp backends t
 Each conversation reuses one file, and each Marathon instance retains at most its two most recently used conversations.
 Inactive checkpoints expire 48 hours after their last use.
 All default and named instances share a hard 32 GiB rolling-checkpoint ceiling.
+Snapshot bundles include any target, draft, speculative, and optional `.checkpoints` rewind state supplied by the backend.
+Recurrent models need a backend that saves these rewind checkpoints to reuse a restored conversation whose final suffix has changed.
+This reduces resume-time prompt replay, not the cost of generating each new token.
+Older snapshots remain loadable, but cannot gain missing rewind state retroactively.
+Reuse still depends on a matching token prefix and an available checkpoint before the divergence; changed system instructions or earlier history can still require prompt replay.
 Checkpoint metadata contains only hashes, compatibility identifiers, token counts, sizes, and timestamps.
 Set `MARATHON_SLOT_SNAPSHOTS_ENABLED=0` to disable this acceleration without affecting saved Codex conversations.
 
