@@ -3642,7 +3642,7 @@ class RouterState:
         profile: ModelProfile,
         incoming_prompt_cache_key: str,
     ) -> dict[str, Any] | None:
-        """Persist the live conversation before another one replaces its slot."""
+        """Keep a resumable checkpoint before another conversation replaces the slot."""
 
         pending_checkpoints = getattr(self, "pending_checkpoints", None)
         if not pending_checkpoints:
@@ -3663,7 +3663,7 @@ class RouterState:
         try:
             result = await self._save_conversation_checkpoint_locked(
                 candidate,
-                force=True,
+                force=candidate.post_compaction,
             )
         except Exception as exc:
             result = {"status": "error", "reason": str(exc)}
@@ -3795,9 +3795,12 @@ class RouterState:
             }
 
         existing = await asyncio.to_thread(
-            self.slot_checkpoint_store.find_any,
+            self.slot_checkpoint_store.find,
             profile_slug=profile.slug,
+            profile_alias=profile.alias,
             prompt_cache_key=candidate.prompt_cache_key,
+            backend_cache_id=self.backend_cache_id,
+            scaffold_fingerprint=candidate.scaffold_fingerprint,
         )
         if existing is not None and existing.metadata is not None:
             metadata = existing.metadata
@@ -3825,16 +3828,16 @@ class RouterState:
             checkpoint_prefix_hash = (
                 _conversation_checkpoint_prefix_hash(
                     candidate.checkpoint_request,
-                    checkpoint_item_count,
+                    metadata.conversation_item_count,
                 )
                 if candidate.checkpoint_request is not None
                 else None
             )
-            if (
+            prefix_matches = (
                 checkpoint_prefix_hash is not None
-                and metadata.conversation_item_count == checkpoint_item_count
                 and metadata.conversation_prefix_hash == checkpoint_prefix_hash
-            ):
+            )
+            if prefix_matches and metadata.conversation_item_count == checkpoint_item_count:
                 await asyncio.to_thread(
                     self.slot_checkpoint_store.mark_used,
                     existing,
@@ -3844,17 +3847,13 @@ class RouterState:
                     "reason": "checkpointable conversation prefix is unchanged",
                     "context_tokens": metadata.context_tokens,
                 }
-            compatible = (
-                metadata.profile_slug == candidate.profile_slug
-                and metadata.backend_cache_id == self.backend_cache_id
-                and metadata.scaffold_fingerprint
-                == candidate.scaffold_fingerprint
-            )
             growth = candidate.context_tokens - metadata.context_tokens
             required_growth = self.slot_snapshot_min_token_growth
+            # A small append can replay from the existing checkpoint on resume.
+            # Similar token counts alone do not establish a compatible history.
             if (
                 not force
-                and compatible
+                and prefix_matches
                 and 0 <= growth < required_growth
             ):
                 await asyncio.to_thread(
@@ -5049,6 +5048,7 @@ class RouterState:
         ) and self.web_search is not None
 
         async with self.backend_lock:
+            slot_prepare_start = time.perf_counter()
             switch_checkpoint_result = (
                 await self._checkpoint_before_conversation_switch_locked(
                     profile,
@@ -5063,7 +5063,6 @@ class RouterState:
             starter_cache_result: dict[str, Any] | None = None
             conversation_checkpoint_result: dict[str, Any] | None = None
             slot_prepare_mode = "erase-root"
-            slot_prepare_start = time.perf_counter()
             if profile.supports_slots and profile.slug in self.live_slot_by_model:
                 live_slot_valid = await self._slot_has_cached_prompt(profile)
                 if live_slot_valid is False:

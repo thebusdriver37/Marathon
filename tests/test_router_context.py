@@ -2147,9 +2147,11 @@ context = 32768
             backend_cache_id="backend-v1",
             scaffold_fingerprint="synthetic-scaffold",
             context_tokens=62_127,
+            conversation_item_count=172,
+            conversation_prefix_hash="a" * 64,
         )
         state.slot_checkpoint_store = mock.Mock()
-        state.slot_checkpoint_store.find_any.return_value = SimpleNamespace(
+        state.slot_checkpoint_store.find.return_value = SimpleNamespace(
             metadata=metadata
         )
         state.slot_checkpoint_store.response_id_hash.return_value = (
@@ -2188,7 +2190,7 @@ context = 32768
         state.save_slot.assert_awaited_once_with(profile, "pending-checkpoint.bin")
         state.slot_checkpoint_store.commit.assert_called_once()
 
-    def test_conversation_switch_flushes_outgoing_checkpoint_immediately(self) -> None:
+    def test_conversation_switch_uses_normal_checkpoint_policy(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)
         state.pending_checkpoints = {}
@@ -2228,9 +2230,84 @@ context = 32768
         self.assertEqual(state.checkpoint_tasks, {})
         state._save_conversation_checkpoint_locked.assert_awaited_once_with(
             candidate,
-            force=True,
+            force=False,
         )
         state.telemetry.emit.assert_called_once()
+
+    def test_switch_reuses_only_recent_compatible_checkpoint(self) -> None:
+        profile = fixture_profile()
+        original = {
+            "instructions": "system", "tools": [],
+            "input": [{"type": "message", "role": "user", "content": "original"}],
+        }
+        extended = copy.deepcopy(original)
+        extended["input"].append({"type": "message", "role": "assistant", "content": "answer"})
+        divergent = copy.deepcopy(extended)
+        divergent["input"][0]["content"] = "different history"
+        cases = [
+            ("small append", extended, 40_160, "backend-v1", "scaffold", False, True, "skipped"),
+            ("unchanged", original, 40_000, "backend-v1", "scaffold", False, True, "skipped"),
+            ("divergence", divergent, 40_160, "backend-v1", "scaffold", False, True, "saved"),
+            ("rewind", original, 40_160, "backend-v1", "scaffold", False, True, "saved"),
+            ("growth threshold", extended, 44_096, "backend-v1", "scaffold", False, True, "saved"),
+            ("context shrank", extended, 39_999, "backend-v1", "scaffold", False, True, "saved"),
+            ("changed backend", original, 40_160, "backend-v2", "scaffold", False, True, "saved"),
+            ("changed tools", original, 40_160, "backend-v1", "new-scaffold", False, True, "saved"),
+            ("post compaction", extended, 40_160, "backend-v1", "scaffold", True, True, "saved"),
+            ("no checkpoint", extended, 40_160, "backend-v1", "scaffold", False, False, "saved"),
+        ]
+        for label, request, tokens, backend, scaffold, compacted, seed, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                store = router_module.RollingCheckpointStore(
+                    root, root, max_count=2, max_bytes=1024**2, ttl_seconds=172_800,
+                )
+                directory = store.profile_dir(profile.slug)
+                directory.mkdir()
+                if seed:
+                    saved_request = extended if label == "rewind" else original
+                    (directory / "seed.bin").write_bytes(b"saved state")
+                    store.commit(
+                        profile_slug=profile.slug, profile_alias=profile.alias,
+                        prompt_cache_key="outgoing", backend_cache_id="backend-v1",
+                        scaffold_fingerprint="scaffold", response_id="old-response",
+                        context_tokens=40_000, conversation_item_count=len(saved_request["input"]),
+                        conversation_prefix_hash=router_module._conversation_checkpoint_prefix_hash(saved_request, len(saved_request["input"])),
+                        pending_filename="seed.bin",
+                    )
+                state = object.__new__(router_module.RouterState)
+                state.available_profiles = {profile.slug: profile}
+                state.backend_cache_id = backend
+                state.slot_snapshot_min_token_growth = 4_096
+                state.slot_checkpoint_store = store
+                state.live_slot_by_model = {profile.slug: "new-response"}
+                state.live_prompt_cache_key_by_model = {profile.slug: "outgoing"}
+                state.checkpoint_tasks = {}
+                state.awaiting_post_compaction_checkpoints = {(profile.slug, "outgoing")} if compacted else set()
+                state.telemetry = mock.Mock()
+                candidate = router_module.ConversationCheckpointCandidate(
+                    profile_slug=profile.slug, profile_alias=profile.alias,
+                    prompt_cache_key="outgoing", response_id="new-response",
+                    scaffold_fingerprint=scaffold, context_tokens=tokens,
+                    checkpoint_request=request, post_compaction=compacted,
+                )
+                state.pending_checkpoints = {profile.slug: candidate}
+                state._prefill_conversation_checkpoint_boundary = mock.AsyncMock(return_value={
+                    "context_tokens": tokens, "conversation_item_count": len(request["input"]),
+                    "conversation_prefix_hash": router_module._conversation_checkpoint_prefix_hash(request, len(request["input"])),
+                })
+
+                async def save(_profile, filename):
+                    (directory / filename).write_bytes(b"updated state")
+                    return {"status": "saved"}
+
+                state.save_slot = mock.AsyncMock(side_effect=save)
+                result = asyncio.run(state._checkpoint_before_conversation_switch_locked(profile, "incoming"))
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(state.save_slot.await_count, int(expected == "saved"))
+                self.assertEqual(state._prefill_conversation_checkpoint_boundary.await_count, int(expected == "saved"))
+                self.assertEqual(state.pending_checkpoints, {})
+                self.assertEqual(state.awaiting_post_compaction_checkpoints, set())
 
     def test_checkpoint_schedule_reuses_completed_conversation_input(self) -> None:
         profile = fixture_profile()
