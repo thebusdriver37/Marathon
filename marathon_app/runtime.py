@@ -943,6 +943,10 @@ class Runtime:
         return process
 
     def start(self, progress: Callable[[str], None] | None = None) -> None:
+        if self.profile.bundle:
+            from .runtime_setup import prepare_bundle_profile
+
+            self.profile = prepare_bundle_profile(self.model, self.profile)
         self.acquire()
         self._install_handlers()
         self.telemetry = create_run_writer(self.model.id, self.instance.name)

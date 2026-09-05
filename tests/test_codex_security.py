@@ -84,3 +84,15 @@ trust_level = "trusted"
             with self.assertRaisesRegex(RuntimeError, "hardened frontend"):
                 run_codex(mock.Mock())
             run.assert_not_called()
+
+    def test_missing_sandbox_dependency_fails_before_execution(self):
+        with (
+            mock.patch("marathon_app.frontends.codex_environment", return_value=({}, Path("/unused"), None)),
+            mock.patch("marathon_app.frontends.codex_command", return_value=["codex"]),
+            mock.patch("marathon_app.frontends._codex_features", return_value={"local-runtime-security"}),
+            mock.patch("marathon_app.frontends.missing_runtime_tools", return_value=("bubblewrap (Linux sandbox)",)),
+            mock.patch("marathon_app.frontends.subprocess.run") as run,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "bubblewrap"):
+                run_codex(mock.Mock())
+            run.assert_not_called()

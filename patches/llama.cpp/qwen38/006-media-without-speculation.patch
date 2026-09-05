@@ -1,0 +1,54 @@
+diff --git a/tools/server/server-common.h b/tools/server/server-common.h
+index 6c681a2cf..3e37a6a4c 100644
+--- a/tools/server/server-common.h
++++ b/tools/server/server-common.h
+@@ -220,6 +220,8 @@ public:
+ 
+     bool empty() const { return tokens.empty(); }
+ 
++    bool has_media() const { return !map_idx_to_media.empty(); }
++
+     void clear() {
+         map_idx_to_media.clear();
+         tokens.clear();
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index f5477356d..a6ba9ad22 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -451,6 +451,7 @@ struct server_slot {
+ 
+         return task->type == other_slot.task->type
+             && inp_embd.size() == other_slot.inp_embd.size()
++            && can_speculate() == other_slot.can_speculate()
+             && are_lora_equal(lora, other_slot.lora);
+     }
+ 
+@@ -468,7 +469,9 @@ struct server_slot {
+     }
+ 
+     bool can_speculate() const {
+-        return !!spec;
++        // Draft contexts assume consecutive text token positions. Multimodal batches can use
++        // model-specific position layouts, such as M-RoPE, that cannot be mirrored safely.
++        return spec && (!task || !task->tokens.has_media());
+     }
+ 
+     void add_token(const completion_token_output & token) {
+@@ -750,7 +753,7 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
+         if (mbatch) {
+             float * embd = mtmd_batch_get_output_embd(mbatch.get(), chunk.get());
+             if (embd) {
+-                void * cb_data = slot.spec;
++                void * cb_data = slot.can_speculate() ? slot.spec : nullptr;
+                 static auto cb = [](llama_batch batch, void * user_data) {
+                     common_speculative * spec = static_cast<common_speculative *>(user_data);
+                     if (!common_speculative_process(spec, batch)) {
+@@ -3714,7 +3717,7 @@ private:
+         // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
+         //       for now, always re-evaluate for simplicity
+         //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
+-        if (spec) {
++        if (spec && batch.slot_batched->can_speculate()) {
+             bool ok = true;
+             queue_tasks.yield_to_queue([&]() {
+                 ok = common_speculative_process(spec.get(), batch_view);

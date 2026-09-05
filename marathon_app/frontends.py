@@ -20,6 +20,7 @@ from .codex_home import codex_environment
 from .codex_telemetry import snapshot_sessions, summarize_session_changes
 from .runtime import Runtime
 from .router_security import open_api_request
+from .runtime_setup import missing_runtime_tools
 
 
 MARATHON_STATUS_LINE = [
@@ -116,11 +117,19 @@ def require_hardened_codex(binary: str) -> None:
         raise RuntimeError("Marathon requires its hardened frontend; run: marathon build-codex")
 
 
+def hardened_codex_available() -> bool:
+    binary = _codex_binary()
+    return shutil.which(binary) is not None and "local-runtime-security" in _codex_features(binary)
+
+
 def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
     instance = getattr(getattr(runtime, "instance", None), "name", None)
     environment, codex_home, shared_profile = codex_environment(instance=instance)
     command = codex_command(runtime, extra_args, shared_profile=shared_profile)
     require_hardened_codex(command[0])
+    missing = missing_runtime_tools("codex")
+    if missing:
+        raise RuntimeError("Missing " + ", ".join(missing) + "; see docs/SETUP.md")
     environment["MARATHON_ROUTER_TOKEN"] = runtime.router_token
     environment["CODEX_CLI_NAME"] = _marathon_cli_name(instance)
     before = snapshot_sessions(codex_home)

@@ -112,6 +112,7 @@ class Profile:
     backend: str | None = None
     temperature: float | None = None
     gpus: tuple[int, ...] = ()
+    bundle: str | None = None
 
     def supports(self, frontend: str) -> bool:
         return frontend in self.frontends
@@ -635,6 +636,7 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                     else None
                 ),
                 gpus=tuple(int(gpu) for gpu in item.get("gpus", [])),
+                bundle=str(item["bundle"]) if item.get("bundle") else None,
             )
             for item in raw.get("profiles", [])
         )
@@ -783,8 +785,14 @@ def profiles_for_model(model: Model) -> tuple[Profile, ...]:
         tuned = load_tuned_profiles(model)
     except (KeyError, OSError, ValueError, TypeError):
         tuned = ()
-    shipped_ids = {profile.id for profile in model.family.profiles}
-    return model.family.profiles + tuple(
+    from .runtime_setup import bundle_matches_model
+
+    shipped = tuple(
+        profile for profile in model.family.profiles
+        if not profile.bundle or bundle_matches_model(profile.bundle, model.path)
+    )
+    shipped_ids = {profile.id for profile in shipped}
+    return shipped + tuple(
         profile for profile in tuned if profile.id not in shipped_ids
     )
 
@@ -929,7 +937,10 @@ def server_command(
         command.extend(["--tensor-split", profile.tensor_split])
     if profile.temperature is not None:
         command.extend(["--temp", str(profile.temperature)])
-    command.extend(profile.extra_args)
+    command.extend(
+        arg.replace("{model_dir}", str(model.path.parent)).replace("{ai_root}", str(cfg.ai_root))
+        for arg in profile.extra_args
+    )
     return command
 
 

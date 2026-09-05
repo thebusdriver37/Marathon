@@ -143,6 +143,7 @@ Set `MARATHON_LLAMACPP_DIR` or `MARATHON_LLAMACPP_BUILD_DIR` to override the sou
 
 The default Qwen 3.8 profile requests 262,144 tokens, automatic GPU layers, Q8 KV cache, and llama.cpp memory fitting.
 The exact four-GPU 256K profile remains available through the dashboard for validated machines.
+The optional single-GPU IQ4_XS bundle and its source build are described in [runtime packaging](RUNTIME.md).
 
 Marathon reads the embedded GGUF name, architecture, and trained context from the first shard and caches that inspection by file identity.
 This lets renamed models match architecture families without repeatedly scanning unchanged files.
@@ -351,8 +352,8 @@ Set `MARATHON_RUNS_DIR` to move traces to another disk.
 Set `MARATHON_TELEMETRY_INTERVAL=5` to reduce the default two-second sampling frequency.
 Set `MARATHON_TELEMETRY_PROCESS_OUTPUT=0` to omit mirrored backend and router lines.
 
-Optional disk prompt snapshots are disabled by default because long-context snapshots can be large.
-Their count and total size are bounded when enabled.
+Disk prompt snapshots are enabled by default for compatible backends.
+Their count and total size are bounded as described in the prompt-cache section.
 
 ## Web Search and Fetch
 

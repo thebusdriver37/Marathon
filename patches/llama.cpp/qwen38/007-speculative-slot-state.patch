@@ -1,0 +1,193 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index c2a5e34d5..08e53f399 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -893,6 +893,11 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
+         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+             return;
+         }
++        if (data.empty()) {
++            pending_pos_last[seq_id] = -1;
++            pending_g_last[seq_id].clear();
++            return;
++        }
+         if (data.size() != sizeof(llama_pos) + (size_t) n_embd_dec * sizeof(float)) {
+             return;
+         }
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index a6ba9ad22..9a80686f7 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -38,6 +38,76 @@
+ 
+ constexpr int HTTP_POLLING_SECONDS = 1;
+ 
++static constexpr const char * SLOT_DRAFT_STATE_SUFFIX = ".draft";
++static constexpr const char * SLOT_SPEC_STATE_SUFFIX  = ".spec";
++static constexpr uint32_t SLOT_SPEC_STATE_MAGIC       = 0x53504331; // SPC1
++static constexpr uint32_t SLOT_SPEC_STATE_VERSION     = 1;
++
++static void remove_slot_state_file(const std::string & filepath) {
++    std::error_code error;
++    std::filesystem::remove(filepath, error);
++}
++
++static size_t save_slot_spec_state(
++        const std::string & filepath,
++        common_speculative * spec,
++        llama_seq_id seq_id) {
++    std::vector<uint8_t> data;
++    common_speculative_get_state(spec, seq_id, data);
++
++    std::ofstream file(filepath, std::ios::binary | std::ios::trunc);
++    if (!file) {
++        return 0;
++    }
++
++    const uint64_t size = data.size();
++    file.write(reinterpret_cast<const char *>(&SLOT_SPEC_STATE_MAGIC), sizeof(SLOT_SPEC_STATE_MAGIC));
++    file.write(reinterpret_cast<const char *>(&SLOT_SPEC_STATE_VERSION), sizeof(SLOT_SPEC_STATE_VERSION));
++    file.write(reinterpret_cast<const char *>(&size), sizeof(size));
++    if (!data.empty()) {
++        file.write(reinterpret_cast<const char *>(data.data()), data.size());
++    }
++    file.close();
++
++    return file ? sizeof(SLOT_SPEC_STATE_MAGIC) + sizeof(SLOT_SPEC_STATE_VERSION) + sizeof(size) + data.size() : 0;
++}
++
++static bool load_slot_spec_state(const std::string & filepath, std::vector<uint8_t> & data, size_t & nread) {
++    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
++    if (!file) {
++        return false;
++    }
++
++    const std::streamsize file_size = file.tellg();
++    constexpr size_t header_size = sizeof(uint32_t) * 2 + sizeof(uint64_t);
++    if (file_size < 0 || static_cast<uint64_t>(file_size) < header_size) {
++        return false;
++    }
++    file.seekg(0);
++
++    uint32_t magic = 0;
++    uint32_t version = 0;
++    uint64_t size = 0;
++    file.read(reinterpret_cast<char *>(&magic), sizeof(magic));
++    file.read(reinterpret_cast<char *>(&version), sizeof(version));
++    file.read(reinterpret_cast<char *>(&size), sizeof(size));
++    if (!file || magic != SLOT_SPEC_STATE_MAGIC || version != SLOT_SPEC_STATE_VERSION ||
++            size != static_cast<uint64_t>(file_size) - header_size || size > SIZE_MAX) {
++        return false;
++    }
++
++    data.resize(static_cast<size_t>(size));
++    if (!data.empty()) {
++        file.read(reinterpret_cast<char *>(data.data()), data.size());
++    }
++    if (!file) {
++        return false;
++    }
++
++    nread = static_cast<size_t>(file_size);
++    return true;
++}
++
+ static common_speculative_output_limits server_output_limits(const common_params & params) {
+     if (params.embedding ||
+             (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED && params.pooling_type != LLAMA_POOLING_TYPE_NONE)) {
+@@ -2547,7 +2617,7 @@ private:
+                     }
+ 
+                     GGML_ASSERT(packed.size() % sizeof(llama_token) == 0);
+-                    const size_t nwrite = llama_state_seq_save_file(
++                    size_t nwrite = llama_state_seq_save_file(
+                         ctx_tgt, filepath.c_str(), slot->id,
+                         reinterpret_cast<const llama_token *>(packed.data()), packed.size() / sizeof(llama_token));
+                     if (nwrite == 0) {
+@@ -2555,6 +2625,26 @@ private:
+                         break;
+                     }
+ 
++                    const std::string draft_filepath = filepath + SLOT_DRAFT_STATE_SUFFIX;
++                    const std::string spec_filepath  = filepath + SLOT_SPEC_STATE_SUFFIX;
++                    if (ctx_dft != nullptr) {
++                        const size_t nwrite_dft = llama_state_seq_save_file(
++                            ctx_dft, draft_filepath.c_str(), slot->id,
++                            reinterpret_cast<const llama_token *>(packed.data()), packed.size() / sizeof(llama_token));
++                        const size_t nwrite_spec = nwrite_dft == 0 ? 0 : save_slot_spec_state(spec_filepath, spec.get(), slot->id);
++                        if (nwrite_dft == 0 || nwrite_spec == 0) {
++                            remove_slot_state_file(filepath);
++                            remove_slot_state_file(draft_filepath);
++                            remove_slot_state_file(spec_filepath);
++                            send_error(task, "Unable to save speculative slot state", ERROR_TYPE_SERVER);
++                            break;
++                        }
++                        nwrite += nwrite_dft + nwrite_spec;
++                    } else {
++                        remove_slot_state_file(draft_filepath);
++                        remove_slot_state_file(spec_filepath);
++                    }
++
+                     const int64_t t_end = ggml_time_us();
+                     const double t_save_ms = (t_end - t_start) / 1000.0;
+ 
+@@ -2593,15 +2683,47 @@ private:
+                         size_t n_packed = 0;
+                         llama_tokens packed;
+                         nread = llama_state_seq_load_file(ctx_tgt, filepath.c_str(), slot->id, nullptr, 0, &n_packed);
+-                        if (nread != 0) {
+-                            packed.resize(std::max<size_t>(1, n_packed));
+-                            nread = llama_state_seq_load_file(ctx_tgt, filepath.c_str(), slot->id, packed.data(), packed.size(), &n_packed);
+-                        }
+                         if (nread == 0) {
+                             throw std::runtime_error("No available space in KV cache or invalid slot save file");
+                         }
++
++                        size_t n_packed_dft = 0;
++                        size_t nread_dft = 0;
++                        std::vector<uint8_t> spec_data;
++                        size_t nread_spec = 0;
++                        const std::string draft_filepath = filepath + SLOT_DRAFT_STATE_SUFFIX;
++                        const std::string spec_filepath  = filepath + SLOT_SPEC_STATE_SUFFIX;
++                        if (ctx_dft != nullptr) {
++                            nread_dft = llama_state_seq_load_file(
++                                ctx_dft, draft_filepath.c_str(), slot->id, nullptr, 0, &n_packed_dft);
++                            if (nread_dft == 0 || n_packed_dft != n_packed) {
++                                throw std::runtime_error("Missing or incompatible speculative draft slot state");
++                            }
++                            if (!load_slot_spec_state(spec_filepath, spec_data, nread_spec)) {
++                                throw std::runtime_error("Missing or invalid speculative decoder slot state");
++                            }
++                        }
++
++                        packed.resize(std::max<size_t>(1, n_packed));
++                        slot->prompt_clear();
++                        nread = llama_state_seq_load_file(ctx_tgt, filepath.c_str(), slot->id, packed.data(), packed.size(), &n_packed);
++                        if (nread == 0) {
++                            throw std::runtime_error("Unable to restore target slot state");
++                        }
+                         packed.resize(n_packed);
+ 
++                        if (ctx_dft != nullptr) {
++                            llama_tokens packed_dft(std::max<size_t>(1, n_packed_dft));
++                            nread_dft = llama_state_seq_load_file(
++                                ctx_dft, draft_filepath.c_str(), slot->id, packed_dft.data(), packed_dft.size(), &n_packed_dft);
++                            packed_dft.resize(n_packed_dft);
++                            if (nread_dft == 0 || packed_dft != packed) {
++                                throw std::runtime_error("Speculative draft slot state does not match target prompt");
++                            }
++                            common_speculative_set_state(spec.get(), slot->id, spec_data);
++                            nread += nread_dft + nread_spec;
++                        }
++
+                         server_tokens restored = server_tokens::deserialize(packed, mctx != nullptr);
+ 
+                         if (restored.size() > (size_t) slot->n_ctx) {
+@@ -2612,7 +2734,6 @@ private:
+                             throw std::runtime_error("Invalid tokens in slot save file");
+                         }
+ 
+-                        slot->prompt.clear();
+                         slot->prompt.tokens = std::move(restored);
+                     } catch (const std::exception & err) {
+                         slot->prompt_clear();

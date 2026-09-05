@@ -1,0 +1,23 @@
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index c978b4421..22ce589b8 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -1407,6 +1407,18 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
+     CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, J, false>), nbytes_shared);
+     CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, J,  true>), nbytes_shared);
+ 
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++    if constexpr ((type == GGML_TYPE_IQ4_XS || type == GGML_TYPE_Q4_K ||
++                   type == GGML_TYPE_Q5_K || type == GGML_TYPE_Q6_K) && (J == 8 || J == 64)) {
++        static bool cache_preference_set[GGML_CUDA_MAX_DEVICES] = { false };
++        if (!cache_preference_set[id]) {
++            CUDA_CHECK(cudaFuncSetCacheConfig((mul_mat_q<type, J, false>), cudaFuncCachePreferL1));
++            CUDA_CHECK(cudaFuncSetCacheConfig((mul_mat_q<type, J,  true>), cudaFuncCachePreferL1));
++            cache_preference_set[id] = true;
++        }
++    }
++#endif
++
+     const int nty  = (args.nrows_x   + config.I - 1) / config.I;
+     const int ntx  = (args.ncols_max + config.J - 1) / config.J;
+     const int ntzw = args.nchannels_y * args.nsamples_y;

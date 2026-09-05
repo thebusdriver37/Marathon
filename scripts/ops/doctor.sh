@@ -129,7 +129,7 @@ fi
 
 if [[ -x "$PATCHED_CODEX_BIN" ]]; then
   pass "Marathon Codex available: $($PATCHED_CODEX_BIN --version 2>&1)"
-  if rg -qx 'local-runtime-security' "$PATCHED_CODEX_BIN.features" 2>/dev/null; then
+  if grep -qx 'local-runtime-security' "$PATCHED_CODEX_BIN.features" 2>/dev/null; then
     pass "Marathon local-runtime hardening marker present"
   else
     fail "frontend is not marked hardened; run: marathon build-codex"
@@ -141,6 +141,14 @@ elif have codex; then
   fail "stock Codex cannot be used as Marathon's hardened frontend; run: marathon build-codex"
 else
   fail "Codex is not installed; run: marathon build-codex"
+fi
+
+if [[ "$(uname -s)" == Linux ]]; then
+  if have bwrap; then
+    pass "bubblewrap is available for the Linux sandbox"
+  else
+    fail "bubblewrap is missing; install it with your OS package manager (see docs/SETUP.md)"
+  fi
 fi
 
 if have "$HERMES_BIN"; then
@@ -241,32 +249,44 @@ for ((index = 1; index < ${#model_lines[@]}; index++)); do
 done
 
 backend_inventory="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" - <<'PY' 2>/dev/null || true
-from marathon_app.catalog import backend_environment, backends, discover_models
+from marathon_app.catalog import backend_environment, backends, discover_models, find_profile
+from marathon_app.runtime import load_selection
 
 configured = backends()
+remembered = load_selection()
 seen_backends = set()
 seen_files = set()
 for model in discover_models():
-    for profile in model.family.profiles:
-        backend_id = profile.backend or model.family.backend
-        backend = configured.get(backend_id)
-        if backend_id not in seen_backends:
-            seen_backends.add(backend_id)
-            if backend is None:
-                print(f"backend|{backend_id}||")
-            else:
-                print(f"backend|{backend_id}|{backend.server}|{backend.worker or ''}")
+    requested = remembered.get("profile") if remembered.get("model") == model.id else None
+    try:
+        profile = find_profile(model, requested)
+    except ValueError:
+        profile = find_profile(model, None)
+    backend_id = profile.backend or model.family.backend
+    backend = configured.get(backend_id)
+    if backend_id not in seen_backends:
+        seen_backends.add(backend_id)
         if backend is None:
+            print(f"backend|{backend_id}||")
+        elif backend.kind == "llama_swap_pool":
+            print(f"managed|{backend_id}||")
+        else:
+            print(f"backend|{backend_id}|{backend.server}|{backend.worker or ''}")
+    if backend is None:
+        continue
+    for key, value in backend_environment(model, backend).items():
+        if not key.endswith("_GGUF") or (key, value) in seen_files:
             continue
-        for key, value in backend_environment(model, backend).items():
-            if not key.endswith("_GGUF") or (key, value) in seen_files:
-                continue
-            seen_files.add((key, value))
-            print(f"file|{key}|{value}|")
+        seen_files.add((key, value))
+        print(f"file|{key}|{value}|")
 PY
 )"
 while IFS='|' read -r kind identity path extra; do
   [[ -z "$kind" ]] && continue
+  if [[ "$kind" == "managed" ]]; then
+    info "$identity is managed by llama-swap; no local backend binary is required"
+    continue
+  fi
   if [[ "$kind" == "file" ]]; then
     if [[ -f "$path" ]]; then
       pass "$identity sidecar exists: $path"

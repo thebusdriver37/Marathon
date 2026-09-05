@@ -40,7 +40,7 @@ Commands:
   build           Build patched Marathon binaries
   build-codex     Build the patched local Codex binary
   build-llama     Build the patched local llama.cpp binaries
-  setup-llama     Clone and build the pinned llama.cpp backend
+  setup-llama [upstream|qwen38]  Build a pinned general or optional tuned backend
   update-codex    Fetch the pinned stable Codex, rebase patches, rebuild
 
 Environment:

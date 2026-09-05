@@ -1,0 +1,31 @@
+# Exact assets and eligibility for optional tested presets.
+# Other models and hardware continue to use the general setup flow.
+[qwen38-iq4-xs]
+profile = "qwen38-iq4-xs-196k"
+backend = "qwen38"
+gpu_names = ["NVIDIA GeForce RTX 3090", "NVIDIA GeForce RTX 3090 Ti"]
+minimum_free_vram_mib = 23500
+
+[[qwen38-iq4-xs.files]]
+role = "model"
+repository = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+revision = "b7ff25715ee2ae49c9ff32159bc73de864648aef"
+filename = "Qwen3.8-27B-Uncensored-IQ4_XS.gguf"
+size_bytes = 15309039008
+sha256 = "53adc4bbed67044d662273356bbf3a50fdec667ac21bbf18d13e5815fbccc7f5"
+
+[[qwen38-iq4-xs.files]]
+role = "draft"
+repository = "incoai/Qwen3.8-27B-DFlash2-GGUF"
+revision = "6cb5872e2cee6b4e780a8414922350be8e42d65c"
+filename = "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+size_bytes = 1143006752
+sha256 = "18a380efc9b7ed8d88677fc895f5c11ae170653434ee378f7348f715c14d0594"
+
+[[qwen38-iq4-xs.files]]
+role = "projector"
+repository = "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+revision = "dee0a3164d9e11bbbebf5b63f52ba99443d14fc3"
+filename = "Qwen3.8-27B-Uncensored-vision-f16.gguf"
+size_bytes = 927606912
+sha256 = "5ac423f8a29059dc24e51bc6a43e9380dcd57a9347f28b62591e0b3f60b7081c"

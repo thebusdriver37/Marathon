@@ -34,7 +34,7 @@ from .catalog import (
     settings,
 )
 from .dyno import OBJECTIVES, candidate_profiles, run_tuning
-from .frontends import _codex_binary, direct_chat, run_codex, run_hermes
+from .frontends import direct_chat, hardened_codex_available, run_codex, run_hermes
 from .model_library import (
     RECOMMENDED_QWEN_REPOSITORY,
     download_huggingface_gguf,
@@ -48,6 +48,7 @@ from .remote import (
     save_remote_selection,
 )
 from .runtime import Runtime, load_selection, save_selection
+from .runtime_setup import download_bundle, eligible_gpus, missing_build_tools, missing_runtime_tools, model_bundle
 
 
 FRONTEND_NAMES = {
@@ -67,6 +68,7 @@ class Selection:
     model: Model
     profile: Profile
     frontend: str
+    install_confirmed: bool = False
 
 
 @dataclass(frozen=True)
@@ -281,13 +283,13 @@ def _download_gguf(console: Console, repository: str) -> Path | None:
             str(index),
             (
                 f"{format_size(item.size_bytes)} · recommended"
-                if item.size_bytes is not None and item.quant == "Q4_K_M"
+                if item.size_bytes is not None and index == 0
                 else format_size(item.size_bytes)
                 if item.size_bytes is not None
                 else "size unknown"
             ),
         )
-        for item in primary
+        for index, item in enumerate(primary)
     ]
     if remaining:
         items.append(
@@ -301,7 +303,7 @@ def _download_gguf(console: Console, repository: str) -> Path | None:
     chosen = _arrow_menu(
         console,
         "Choose a quant",
-        "Q4_K_M is the best starting point for most systems.",
+        "Choose a quantization. Smaller files use less memory.",
         items,
         0,
         context=(repository, "The exact repository revision will be recorded"),
@@ -362,6 +364,13 @@ def _setup_model_selection(console: Console) -> Selection | None:
                     f"{len(models)} found",
                 )
             )
+        tuned_gpus = eligible_gpus("qwen38-iq4-xs")
+        if tuned_gpus:
+            items.append(MenuItem(
+                "Set up tuned Qwen 3.8 27B",
+                "Exact IQ4_XS model, DFlash2 drafter, CPU vision, and 196K preset. Source build required.",
+                "qwen38-iq4-xs", f"tested hardware: {tuned_gpus[0].name}",
+            ))
         items.extend(
             [
                 MenuItem(
@@ -397,6 +406,33 @@ def _setup_model_selection(console: Console) -> Selection | None:
         action = items[chosen].value
         if action == "quit":
             return None
+        if action == "qwen38-iq4-xs":
+            bundle = model_bundle(action)
+            if not _setup_prerequisites(console, bundle["backend"]):
+                continue
+            size = sum(asset["size_bytes"] for asset in bundle["files"]) / 1024**3
+            if not _confirm_install(
+                console, "the tuned Qwen bundle",
+                f"Download {size:.1f} GiB of uncensored model weights from Hugging Face; "
+                "verify checksums and build any missing local runtimes. "
+                "Requires CUDA, CMake, a C++ compiler, and Rust for the frontend. "
+                "Power settings stay unchanged. Rebuilt-runtime speed still needs release validation.",
+            ):
+                continue
+            try:
+                downloaded = download_bundle(action, settings().model_root)
+                selected = next(
+                    model for model in discover_models()
+                    if model.path.resolve() == downloaded.resolve()
+                )
+                return Selection(
+                    selected, find_profile(selected, bundle["profile"], "codex"),
+                    "codex", install_confirmed=True,
+                )
+            except Exception as error:
+                console.print(Panel(str(error), title="Bundle setup failed", border_style="red"))
+                Prompt.ask("Press Enter to continue", default="")
+                continue
         if action == "installed":
             selection = _choose_installed_model(console, models)
             if selection is not None:
@@ -426,6 +462,8 @@ def _setup_model_selection(console: Console) -> Selection | None:
                 return selection
             continue
         repository = RECOMMENDED_QWEN_REPOSITORY
+        if not _setup_prerequisites(console, "upstream"):
+            continue
         if action == "repository":
             console.clear()
             repository = Prompt.ask("Hugging Face repository (owner/name)").strip()
@@ -444,6 +482,26 @@ def _setup_model_selection(console: Console) -> Selection | None:
             Prompt.ask("Press Enter to continue", default="")
             continue
         return Selection(selected, find_profile(selected, None, "codex"), "codex")
+
+
+def _setup_prerequisites(console: Console, backend_id: str, frontend: str = "codex") -> bool:
+    missing = missing_runtime_tools(frontend)
+    backend = backends().get(backend_id)
+    if backend is not None and backend.kind == "llama_cpp":
+        missing += missing_build_tools(
+            runtime_installed=bool(backend.server and shutil.which(str(backend.server))),
+            frontend_installed=frontend != "codex" or hardened_codex_available(),
+            cuda=True if backend_id == "qwen38" else None,
+        )
+    if not missing:
+        return True
+    console.print(Panel(
+        "Missing setup prerequisites: " + ", ".join(missing)
+        + ". See docs/SETUP.md. No download or build has started.",
+        title="Setup prerequisites", border_style="yellow",
+    ))
+    Prompt.ask("Press Enter to continue", default="")
+    return False
 
 
 def _confirm_install(console: Console, component: str, description: str) -> bool:
@@ -482,14 +540,17 @@ def _run_install_command(console: Console, label: str, command: list[str]) -> bo
 def _ensure_local_tools(
     console: Console, selection: Selection, frontend: str = "codex"
 ) -> bool:
+    backend_id = selection.profile.backend or selection.model.family.backend
+    if not _setup_prerequisites(console, backend_id, frontend):
+        return False
     try:
         backend_for(selection.model, selection.profile)
     except ValueError as error:
         backend_id = selection.profile.backend or selection.model.family.backend
-        if backend_id != "upstream":
+        if backend_id not in {"upstream", "qwen38"}:
             console.print(Panel(str(error), title="Backend unavailable", border_style="red"))
             return False
-        if not _confirm_install(
+        if not selection.install_confirmed and not _confirm_install(
             console,
             "llama.cpp",
             "Build the pinned local inference engine for this machine.",
@@ -498,7 +559,7 @@ def _ensure_local_tools(
         if not _run_install_command(
             console,
             "Building llama.cpp",
-            [str(ROOT_DIR / "bin" / "marathon"), "setup-llama"],
+            [str(ROOT_DIR / "bin" / "marathon"), "setup-llama", backend_id],
         ):
             return False
         try:
@@ -512,10 +573,9 @@ def _ensure_local_tools(
     if frontend != "codex":
         return True
 
-    codex = _codex_binary()
-    if Path(codex).is_file() or shutil.which(codex):
+    if hardened_codex_available():
         return True
-    if not _confirm_install(
+    if not selection.install_confirmed and not _confirm_install(
         console,
         "Marathon Codex",
         "Build the pinned terminal agent with Marathon's local-model patches.",

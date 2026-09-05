@@ -1,0 +1,25 @@
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 49c24b608..391ec1a9f 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -599,10 +599,16 @@ void llama_context::sched_reserve() {
+ 
+     LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
+ 
+-    gf_res_prev.reset(new llm_graph_result(max_nodes));
+-    gf_res_reserve.reset(new llm_graph_result(max_nodes));
+-
+-    sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
++    static const bool reuse_scheduler = getenv("LLAMA_REUSE_SCHEDULER") != nullptr;
++    if (reuse_scheduler && sched && gf_res_prev && gf_res_prev->get_max_nodes() == (int64_t) max_nodes) {
++        ggml_backend_sched_reset(sched.get());
++        gf_res_prev->reset();
++        gf_res_reserve->reset();
++    } else {
++        gf_res_prev.reset(new llm_graph_result(max_nodes));
++        gf_res_reserve.reset(new llm_graph_result(max_nodes));
++        sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
++    }
+ 
+     llama_memory_context_ptr mctx;
+     if (memory) {

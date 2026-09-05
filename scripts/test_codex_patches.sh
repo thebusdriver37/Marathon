@@ -2,8 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_CODEX_DIR="${MARATHON_PATCHED_CODEX_DIR:-$ROOT_DIR/.marathon/codex-patched}"
+if [[ -z "${MARATHON_PATCHED_CODEX_DIR:-}" ]]; then
+  source "$ROOT_DIR/scripts/apply_codex_patches.sh"
+fi
+BUILD_CODEX_DIR="${MARATHON_PATCHED_CODEX_DIR:-$TARGET_CODEX_DIR}"
 TEMP_TARGET=""
+
+if ! command -v just >/dev/null 2>&1 || ! cargo nextest --version >/dev/null 2>&1; then
+  echo "error: native developer tests require a recent just and cargo-nextest; see docs/DEVELOPMENT.md" >&2
+  exit 1
+fi
 
 if [[ ! -d "$BUILD_CODEX_DIR/codex-rs" ]]; then
   echo "error: patched Codex tree not found: $BUILD_CODEX_DIR" >&2

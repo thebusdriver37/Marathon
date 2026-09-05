@@ -2071,14 +2071,15 @@ class UiTests(unittest.TestCase):
         console = mock.Mock()
         with (
             mock.patch("marathon_app.ui.backend_for"),
-            mock.patch("marathon_app.ui._codex_binary") as codex_binary,
+            mock.patch("marathon_app.ui.missing_build_tools", return_value=()),
+            mock.patch("marathon_app.ui.hardened_codex_available") as codex_available,
         ):
             ready = _ensure_local_tools(
                 console, Selection(model, model.family.profiles[0], "direct"), "direct"
             )
 
         self.assertTrue(ready)
-        codex_binary.assert_not_called()
+        codex_available.assert_not_called()
 
     def test_initial_selection_prefers_qwen38(self) -> None:
         older = fixture_model("qwen3.6-27b")

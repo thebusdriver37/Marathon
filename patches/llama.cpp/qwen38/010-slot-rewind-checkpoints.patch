@@ -1,0 +1,219 @@
+diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
+index 280bd9e19..7cc2872d9 100644
+--- a/tools/server/CMakeLists.txt
++++ b/tools/server/CMakeLists.txt
+@@ -31,7 +31,7 @@ endif()
+ 
+ target_include_directories(${TARGET} PRIVATE ../mtmd)
+ target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
+-target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
++target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT} PRIVATE vendor::hash)
+ 
+ # llama-server-impl: server logic, reusable by app
+ 
+diff --git a/tools/server/README.md b/tools/server/README.md
+index c6e907ba9..44c4ac28d 100644
+--- a/tools/server/README.md
++++ b/tools/server/README.md
+@@ -1153,6 +1153,13 @@ In *router mode* the query param `?model={model_id}` has to be set. This endpoin
+ 
+ `filename`: Name of the file to save the slot's prompt cache. The file will be saved in the directory specified by the `--slot-save-path` server parameter.
+ 
++When the slot has recurrent or sliding-window rewind checkpoints, the server also writes `filename.checkpoints`.
++Keep this sidecar together with the target snapshot and any `.draft` and `.spec` sidecars when moving or deleting a saved slot.
++The reported byte count includes the sidecars.
++Rewind state can be large, up to the checkpoints already retained by `--ctx-checkpoints`; exact-prefix continuation does not require it.
++Older snapshots without this optional sidecar remain loadable, but recurrent models may need full prompt reprocessing if the resumed prompt diverges before the saved endpoint.
++The sidecar binds checkpoints to the serialized prompt and checks positions, lengths, and a checksum before exposing them to decoding.
++
+ **Response format**
+ 
+ ```json
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 9a80686f7..3d3507e34 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -16,12 +16,14 @@
+ #include "speculative.h"
+ #include "mtmd.h"
+ #include "mtmd-helper.h"
++#include "hash/xxhash/xxhash.h"
+ 
+ #include <algorithm>
+ #include <cstddef>
+ #include <cinttypes>
+ #include <exception>
+ #include <memory>
++#include <list>
+ #include <filesystem>
+ #include <random>
+ #include <utility>
+@@ -42,6 +44,120 @@ static constexpr const char * SLOT_DRAFT_STATE_SUFFIX = ".draft";
+ static constexpr const char * SLOT_SPEC_STATE_SUFFIX  = ".spec";
+ static constexpr uint32_t SLOT_SPEC_STATE_MAGIC       = 0x53504331; // SPC1
+ static constexpr uint32_t SLOT_SPEC_STATE_VERSION     = 1;
++static constexpr const char * SLOT_CHECKPOINT_SUFFIX  = ".checkpoints";
++
++static void slot_checkpoint_hash(uint64_t & hash, const char * data, size_t size) {
++    hash = XXH64(data, size, hash);
++}
++
++static size_t save_slot_checkpoints(const std::string & filepath, const std::vector<char> & packed,
++        const std::list<common_prompt_checkpoint> & checkpoints) {
++    std::ofstream file(filepath, std::ios::binary | std::ios::trunc);
++    uint64_t hash = 0;
++    size_t written = 0;
++    const auto write = [&](const void * data, size_t size) {
++        file.write(static_cast<const char *>(data), size);
++        slot_checkpoint_hash(hash, static_cast<const char *>(data), size);
++        written += size;
++    };
++    const uint32_t magic = 0x43504331; // CPC1
++    const uint32_t version = 1;
++    const uint64_t packed_size = packed.size();
++    const uint64_t count = checkpoints.size();
++    write(&magic, sizeof(magic));
++    write(&version, sizeof(version));
++    write(&packed_size, sizeof(packed_size));
++    write(&count, sizeof(count));
++    write(packed.data(), packed.size());
++    for (const auto & checkpoint : checkpoints) {
++        write(&checkpoint.n_tokens, sizeof(checkpoint.n_tokens));
++        write(&checkpoint.pos_min, sizeof(checkpoint.pos_min));
++        write(&checkpoint.pos_max, sizeof(checkpoint.pos_max));
++        for (const auto * data : { &checkpoint.data_tgt, &checkpoint.data_dft, &checkpoint.data_spec }) {
++            const uint64_t size = data->size();
++            write(&size, sizeof(size));
++            write(data->data(), data->size());
++        }
++    }
++    file.write(reinterpret_cast<const char *>(&hash), sizeof(hash));
++    file.close();
++    return file ? written + sizeof(hash) : 0;
++}
++
++static size_t load_slot_checkpoints(const std::string & filepath, const llama_tokens & packed,
++        size_t n_tokens, llama_pos pos_next, int max_count, bool has_draft,
++        std::list<common_prompt_checkpoint> & checkpoints) {
++    // Old snapshots have no sidecar. They still restore, but cannot rewind recurrent state.
++    if (!std::filesystem::exists(filepath)) {
++        return 0;
++    }
++    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
++    const auto end = file.tellg();
++    if (!file || end < 32) {
++        throw std::runtime_error("Invalid slot checkpoint file");
++    }
++    uint64_t remaining = static_cast<uint64_t>(end) - sizeof(uint64_t);
++    uint64_t hash = 0;
++    file.seekg(0);
++    const auto read = [&](void * data, size_t size) {
++        if (size > remaining || !file.read(static_cast<char *>(data), size)) {
++            throw std::runtime_error("Truncated slot checkpoint file");
++        }
++        remaining -= size;
++        slot_checkpoint_hash(hash, static_cast<const char *>(data), size);
++    };
++    uint32_t magic, version;
++    uint64_t packed_size, count;
++    read(&magic, sizeof(magic));
++    read(&version, sizeof(version));
++    read(&packed_size, sizeof(packed_size));
++    read(&count, sizeof(count));
++    if (magic != 0x43504331 || version != 1 || packed_size != packed.size()*sizeof(llama_token) || packed_size > remaining) {
++        throw std::runtime_error("Incompatible slot checkpoint file");
++    }
++    llama_tokens stored(packed.size());
++    read(stored.data(), packed_size);
++    constexpr size_t checkpoint_header_size = sizeof(int64_t) + 2*sizeof(llama_pos) + 3*sizeof(uint64_t);
++    if (stored != packed || count > remaining/checkpoint_header_size) {
++        throw std::runtime_error("Slot checkpoints do not match the saved prompt");
++    }
++    std::list<common_prompt_checkpoint> restored;
++    int64_t previous_tokens = 0;
++    for (uint64_t i = 0; i < count; ++i) {
++        common_prompt_checkpoint checkpoint;
++        read(&checkpoint.n_tokens, sizeof(checkpoint.n_tokens));
++        read(&checkpoint.pos_min, sizeof(checkpoint.pos_min));
++        read(&checkpoint.pos_max, sizeof(checkpoint.pos_max));
++        if (checkpoint.n_tokens <= 0 || checkpoint.n_tokens < previous_tokens ||
++                static_cast<uint64_t>(checkpoint.n_tokens) > n_tokens || checkpoint.pos_min < 0 ||
++                checkpoint.pos_max < checkpoint.pos_min || checkpoint.pos_max >= pos_next) {
++            throw std::runtime_error("Invalid slot checkpoint position");
++        }
++        previous_tokens = checkpoint.n_tokens;
++        for (auto * data : { &checkpoint.data_tgt, &checkpoint.data_dft, &checkpoint.data_spec }) {
++            uint64_t size;
++            read(&size, sizeof(size));
++            if (size > remaining || size > SIZE_MAX) {
++                throw std::runtime_error("Invalid slot checkpoint state size");
++            }
++            data->resize(static_cast<size_t>(size));
++            read(data->data(), data->size());
++        }
++        if (checkpoint.empty() || (has_draft && checkpoint.data_dft.empty())) {
++            throw std::runtime_error("Incomplete slot checkpoint state");
++        }
++        // Task IDs do not survive a server restart. Respect the current retention limit.
++        if (count - i <= static_cast<uint64_t>(std::max(0, max_count))) {
++            restored.push_back(std::move(checkpoint));
++        }
++    }
++    uint64_t stored_hash;
++    if (remaining != 0 || !file.read(reinterpret_cast<char *>(&stored_hash), sizeof(stored_hash)) || stored_hash != hash) {
++        throw std::runtime_error("Slot checkpoint checksum mismatch");
++    }
++    checkpoints = std::move(restored);
++    return static_cast<size_t>(end);
++}
+ 
+ static void remove_slot_state_file(const std::string & filepath) {
+     std::error_code error;
+@@ -2627,6 +2743,7 @@ private:
+ 
+                     const std::string draft_filepath = filepath + SLOT_DRAFT_STATE_SUFFIX;
+                     const std::string spec_filepath  = filepath + SLOT_SPEC_STATE_SUFFIX;
++                    const std::string checkpoint_filepath = filepath + SLOT_CHECKPOINT_SUFFIX;
+                     if (ctx_dft != nullptr) {
+                         const size_t nwrite_dft = llama_state_seq_save_file(
+                             ctx_dft, draft_filepath.c_str(), slot->id,
+@@ -2636,6 +2753,7 @@ private:
+                             remove_slot_state_file(filepath);
+                             remove_slot_state_file(draft_filepath);
+                             remove_slot_state_file(spec_filepath);
++                            remove_slot_state_file(checkpoint_filepath);
+                             send_error(task, "Unable to save speculative slot state", ERROR_TYPE_SERVER);
+                             break;
+                         }
+@@ -2645,6 +2763,21 @@ private:
+                         remove_slot_state_file(spec_filepath);
+                     }
+ 
++                    if (slot->prompt.checkpoints.empty()) {
++                        remove_slot_state_file(checkpoint_filepath);
++                    } else {
++                        const size_t nwrite_checkpoints = save_slot_checkpoints(checkpoint_filepath, packed, slot->prompt.checkpoints);
++                        if (nwrite_checkpoints == 0) {
++                            remove_slot_state_file(filepath);
++                            remove_slot_state_file(draft_filepath);
++                            remove_slot_state_file(spec_filepath);
++                            remove_slot_state_file(checkpoint_filepath);
++                            send_error(task, "Unable to save slot rewind checkpoints", ERROR_TYPE_SERVER);
++                            break;
++                        }
++                        nwrite += nwrite_checkpoints;
++                    }
++
+                     const int64_t t_end = ggml_time_us();
+                     const double t_save_ms = (t_end - t_start) / 1000.0;
+ 
+@@ -2735,6 +2868,9 @@ private:
+                         }
+ 
+                         slot->prompt.tokens = std::move(restored);
++                        nread += load_slot_checkpoints(filepath + SLOT_CHECKPOINT_SUFFIX, packed,
++                                slot->prompt.tokens.size(), slot->prompt.tokens.pos_next(), params_base.n_ctx_checkpoints,
++                                ctx_dft != nullptr, slot->prompt.checkpoints);
+                     } catch (const std::exception & err) {
+                         slot->prompt_clear();
+                         send_error(task, std::string("Unable to restore slot: ") + err.what(), ERROR_TYPE_INVALID_REQUEST);
