@@ -1,0 +1,194 @@
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+index 8558e4e83e..8bcd98975e 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+@@ -1,10 +1,9 @@
+ ---
+ source: tui/src/chatwidget/tests/status_and_layout.rs
+-assertion_line: 2955
+ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                        "
+ "                                                                        "
+ "› Ask Codex to do anything                                              "
+ "                                                                        "
+-"  60 tok/s decode · first output 2.5s · total 202s                      "
++"  60.6 tok/s turn avg · first output 2.5s · total 202s                  "
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index 301ad8ab42..97d5aba5f4 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -417,9 +417,14 @@ impl ChatWidget {
+         }
+ 
+         let elapsed = self.turn_throughput.elapsed(Instant::now())?;
++        let rate_label = if self.turn_throughput.is_finished() {
++            "turn avg"
++        } else {
++            "decode"
++        };
+         let mut label = self.turn_throughput.sample().map_or_else(
+-            || "decode n/a".to_string(),
+-            |sample| format!("{:.0} tok/s decode", sample.tokens_per_second),
++            || format!("{rate_label} n/a"),
++            |sample| format!("{:.1} tok/s {rate_label}", sample.tokens_per_second),
+         );
+         if let Some(latency) = self.turn_throughput.time_to_first_output() {
+             label.push_str(&format!(" · first output {}", format_latency(latency)));
+diff --git a/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__status_and_layout__status_line_latest_decode.snap b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__status_and_layout__status_line_latest_decode.snap
+new file mode 100644
+index 0000000000..28c78da38e
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__status_and_layout__status_line_latest_decode.snap
+@@ -0,0 +1,5 @@
++---
++source: tui/src/chatwidget/tests/status_and_layout.rs
++expression: "live_label.split(\" · total\").next().unwrap()"
++---
++105.0 tok/s decode · first output 2.5s
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 2d116e79bd..640cec03e3 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -3003,13 +3003,30 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+             model_context_window: Some(131_072),
+         }),
+     );
++    chat.turn_throughput.complete_response(
++        "latest",
++        Some(&codex_app_server_protocol::MarathonResponseMetrics {
++            decode_tokens: 105,
++            decode_microseconds: 1_000_000,
++            backend_calls: 1,
++            timed_backend_calls: 1,
++            ..Default::default()
++        }),
++    );
++    chat.refresh_status_line();
++    let live_label = status_line_text(&chat).expect("latest call footer");
++    // Wall time is live here; snapshot the stable rate and latency prefix.
++    insta::assert_snapshot!(
++        "status_line_latest_decode",
++        live_label.split(" · total").next().unwrap()
++    );
+     chat.turn_throughput
+         .finish_turn(started_at + Duration::from_secs(200));
+     chat.refresh_status_line();
+ 
+     assert_eq!(
+         status_line_text(&chat),
+-        Some("60 tok/s decode · first output 2.5s · total 202s".to_string())
++        Some("60.6 tok/s turn avg · first output 2.5s · total 202s".to_string())
+     );
+ 
+     let width = 72;
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+index 01c045c543..fb65ea923b 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+@@ -37,6 +37,7 @@ pub(super) struct TurnThroughput {
+     decode_tokens: u64,
+     decode_microseconds: u64,
+     missing_timings: bool,
++    latest_sample: Option<ThroughputSample>,
+     generation_stage: Option<GenerationStage>,
+ }
+ 
+@@ -70,6 +71,7 @@ impl TurnThroughput {
+             return;
+         }
+         self.generation_stage = None;
++        self.latest_sample = None;
+         let Some(metrics) = metrics else {
+             self.missing_timings = true;
+             return;
+@@ -81,6 +83,12 @@ impl TurnThroughput {
+             self.missing_timings = true;
+             return;
+         }
++        if metrics.decode_tokens > 0 && metrics.decode_microseconds > 0 {
++            self.latest_sample = Some(ThroughputSample {
++                tokens_per_second: metrics.decode_tokens as f64 * 1_000_000.0
++                    / metrics.decode_microseconds as f64,
++            });
++        }
+         self.decode_tokens = self.decode_tokens.saturating_add(metrics.decode_tokens);
+         self.decode_microseconds = self
+             .decode_microseconds
+@@ -115,7 +123,15 @@ impl TurnThroughput {
+         self.generation_stage = Some(generation_stage);
+     }
+ 
++    pub(super) fn is_finished(&self) -> bool {
++        self.turn_finished_at.is_some()
++    }
++
++    // During tool loops report the latest response; only summarize at turn end.
+     pub(super) fn sample(&self) -> Option<ThroughputSample> {
++        if !self.is_finished() {
++            return self.latest_sample;
++        }
+         if self.missing_timings || self.decode_tokens == 0 || self.decode_microseconds == 0 {
+             return None;
+         }
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+index b0645d8ff1..eb6c202ec6 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+@@ -52,6 +52,13 @@ fn completed_calls_have_a_decode_time_weighted_average() {
+     throughput.start_turn(Instant::now());
+     throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
+     throughput.complete_response("second", Some(&metrics(/*tokens*/ 200, /*seconds*/ 6)));
++    assert_eq!(
++        throughput.sample(),
++        Some(ThroughputSample {
++            tokens_per_second: 200.0 / 6.0
++        })
++    );
++    throughput.finish_turn(Instant::now());
+     assert_eq!(
+         throughput.sample(),
+         Some(ThroughputSample {
+@@ -67,6 +74,13 @@ fn duplicate_completion_does_not_count_twice() {
+     throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
+     throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
+     throughput.complete_response("second", Some(&metrics(/*tokens*/ 200, /*seconds*/ 6)));
++    assert_eq!(
++        throughput.sample(),
++        Some(ThroughputSample {
++            tokens_per_second: 200.0 / 6.0
++        })
++    );
++    throughput.finish_turn(Instant::now());
+     assert_eq!(
+         throughput.sample(),
+         Some(ThroughputSample {
+@@ -158,3 +172,28 @@ fn first_output_is_recorded_once_and_stage_tracks_the_stream() {
+     throughput.finish_turn(start + Duration::from_secs(10));
+     assert_eq!(throughput.generation_stage(), None);
+ }
++
++#[test]
++fn latest_call_recovers_after_missing_timings_but_turn_average_does_not() {
++    let mut throughput = TurnThroughput::default();
++    throughput.start_turn(Instant::now());
++    throughput.complete_response("first", Some(&metrics(/*tokens*/ 6700, /*seconds*/ 100)));
++    throughput.complete_response("missing", None);
++    assert_eq!(throughput.sample(), None);
++    throughput.complete_response("latest", Some(&metrics(/*tokens*/ 105, /*seconds*/ 1)));
++    assert_eq!(
++        throughput.sample(),
++        Some(ThroughputSample {
++            tokens_per_second: 105.0
++        })
++    );
++    throughput.complete_response("first", Some(&metrics(/*tokens*/ 6700, /*seconds*/ 100)));
++    assert_eq!(
++        throughput.sample(),
++        Some(ThroughputSample {
++            tokens_per_second: 105.0
++        })
++    );
++    throughput.finish_turn(Instant::now());
++    assert_eq!(throughput.sample(), None);
++}
