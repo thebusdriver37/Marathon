@@ -3821,10 +3821,11 @@ context = 32768
         self.assertEqual(state._request_responses_stream.await_count, 3)
         state._execute_managed_call.assert_awaited_once()
         final_request = state._request_responses_stream.await_args_list[2].args[1]
-        final_tool_names = {
-            tool.get("name") for tool in final_request.get("tools", [])
-        }
-        self.assertNotIn("web_search", final_tool_names)
+        # Tool schemas are part of Qwen's prompt prefix. Finalizing must not
+        # invalidate either this request's cache or the next ordinary turn.
+        self.assertEqual(final_request["tools"], request["tools"])
+        self.assertEqual(final_request["tool_choice"], "none")
+        self.assertNotIn("tool_choice", request)
         self.assertTrue(
             replayed[0].get(router_module._WEB_REPLAYED_COMPLETION_KEY)
         )
@@ -3834,6 +3835,66 @@ context = 32768
             mock.ANY,
             level="warning",
         )
+
+    def test_web_iteration_cap_preserves_prefix_on_reconnect_and_next_turn(self) -> None:
+        profile = fixture_profile(196_000)
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=2)
+        state.telemetry = mock.Mock()
+        state._execute_managed_call = mock.AsyncMock(
+            return_value={
+                "type": "function_call_output", "call_id": "unused", "output": "result",
+            }
+        )
+        final = {
+            "output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "answer from existing results"},
+            ]}],
+        }
+        calls = [
+            {"output": [{
+                "type": "function_call", "name": "web_search", "call_id": f"search_{i}",
+                "arguments": json.dumps({"query": f"distinct query {i}"}),
+            }]}
+            for i in range(3)
+        ]
+        state._request_json = mock.AsyncMock(
+            side_effect=[*calls, ConnectionError("reconnect"), final, final],
+        )
+        request = {
+            "model": profile.alias, "prompt_cache_key": "cap-test",
+            "input": [{"role": "user", "content": "research this"}],
+            "tools": [router_module.web_search_function_tool(), {
+                "type": "function", "name": "exec_command",
+                "parameters": {"type": "object", "properties": {}},
+            }],
+            "max_output_tokens": 8192,
+        }
+
+        async def scenario():
+            with self.assertRaises(ConnectionError):
+                await state._run_responses_loop(
+                    profile=profile, forward_request=request, web_search_enabled=True,
+                )
+            await state._run_responses_loop(
+                profile=profile, forward_request=request, web_search_enabled=True,
+            )
+            next_request = copy.deepcopy(request)
+            next_request["input"].append({"role": "user", "content": "one more sentence"})
+            await state._run_responses_loop(
+                profile=profile, forward_request=next_request, web_search_enabled=True,
+            )
+
+        asyncio.run(scenario())
+        self.assertEqual(state._execute_managed_call.await_count, 2)
+        forwarded = [call.args[3] for call in state._request_json.await_args_list]
+        self.assertEqual(len(forwarded), 6)
+        for body in forwarded:
+            self.assertEqual(body["tools"], request["tools"])
+        self.assertEqual(forwarded[3]["tool_choice"], "none")
+        self.assertEqual(forwarded[4]["tool_choice"], "none")
+        self.assertNotIn("tool_choice", forwarded[5])
+        self.assertEqual(forwarded[3]["input"], forwarded[4]["input"])
 
     def test_web_turn_progress_is_bounded_and_expires(self) -> None:
         state = object.__new__(router_module.RouterState)

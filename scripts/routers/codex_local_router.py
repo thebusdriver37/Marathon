@@ -4500,7 +4500,7 @@ class RouterState:
                     request_suffix
                 )
                 if finalizing:
-                    request["tools"] = _strip_managed_web_tools(request.get("tools"))
+                    request["tool_choice"] = "none"
                 self.telemetry.emit(
                     "router.web_turn.resumed",
                     {
@@ -4676,7 +4676,9 @@ class RouterState:
             if iterations >= max_iters or repeated_only:
                 # A reconnect must never restart an already-completed web
                 # action indefinitely. Feed a valid output for the current
-                # call id, then remove managed tools and force a final answer.
+                # call id, then request a final answer. Keep the tool schemas:
+                # Qwen renders them at the start of the prompt, so removing
+                # them discards the KV prefix here and again on the next turn.
                 if repeated_only:
                     tool_outputs = []
                     for idx, call in enumerate(pending_calls):
@@ -4688,7 +4690,7 @@ class RouterState:
                             text
                             + "\n\n[Marathon: this exact web action already completed "
                             "during this user turn. Use the existing result and finish "
-                            "without requesting it again.]"
+                            "without making any more tool calls.]"
                         )
                         tool_outputs.append(output)
                     iterations += 1
@@ -4706,7 +4708,7 @@ class RouterState:
                         make_function_call_output(
                             synthesize_call_id(call, idx),
                             "Tool-call iteration cap reached; please answer from "
-                            "the results you already have.",
+                            "the results you already have without making any more tool calls.",
                         )
                         for idx, call in enumerate(pending_calls)
                     ]
@@ -4717,7 +4719,7 @@ class RouterState:
                 appended_items = copy.deepcopy(iter_items) + copy.deepcopy(tool_outputs)
                 request["input"] = list(request.get("input") or []) + appended_items
                 request_suffix.extend(copy.deepcopy(appended_items))
-                request["tools"] = _strip_managed_web_tools(request.get("tools"))
+                request["tool_choice"] = "none"
                 finalizing = True
                 persist_progress()
                 if event_sink is None:
