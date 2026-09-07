@@ -1,0 +1,35 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -682,9 +682,7 @@
+         //       also, need to leave space for 1 extra token to allow context shifts
+         int n_draft_max = n_ctx - prompt.n_tokens() - 2;
+         n_draft_max = std::min(n_draft_max, task->params.speculative.draft.n_max);
+-        if (task->tokens.has_media()) {
+-            n_draft_max = llama_get_single_column_n_max(ctx_tgt, id, std::min(n_draft_max, 3));
+-        }
++        n_draft_max = llama_get_single_column_n_max(ctx_tgt, id, n_draft_max);
+ 
+         if (n_remaining() > 0) {
+             n_draft_max = std::min(n_draft_max, n_remaining() - 1);
+@@ -3913,11 +3911,6 @@
+             has_output |= batch.tokens[i].output;
+         }
+ 
+-        llama_set_single_column_arithmetic(ctx_tgt, batch.slot_batched &&
+-                batch.slot_batched->state == SLOT_STATE_GENERATING &&
+-                batch.slot_batched->can_speculate() &&
+-                batch.slot_batched->task->tokens.has_media());
+-
+         // yield to the queue, so we can still handle metrics tasks while decoding
+         // note: the sync is done here too, so that the wait is also covered by the yield
+         int ret = 0;
+@@ -3927,8 +3920,6 @@
+                 llama_synchronize(ctx_tgt);
+             }
+         });
+-        llama_set_single_column_arithmetic(ctx_tgt, false);
+-
+         if (ret != 0) {
+             {
+                 std::string err;

@@ -1,0 +1,590 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index 08e53f399..29cd17b08 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -167,6 +167,8 @@ struct common_speculative_impl {
+ 
+     virtual bool process(const llama_batch & batch) = 0;
+ 
++    virtual bool supports_media() const { return false; }
++
+     virtual void draft(common_speculative_draft_params_vec & dparams) = 0;
+ 
+     virtual void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) = 0;
+@@ -933,6 +935,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+ 
+     bool    is_dflash2     = false;
+     bool    is_mrope       = false;
++    bool    media_arithmetic_supported = false;
+     int32_t selector_top_k = 0;
+ 
+     // draft-dspark: the draft carries a Markov head and uses an anchor-first block layout
+@@ -1022,6 +1025,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+ 
+         // embd batches on an M-RoPE draft need 4 position rows per token
+         is_mrope = llama_model_rope_type(model_dft) == LLAMA_ROPE_TYPE_MROPE;
++        media_arithmetic_supported = llama_supports_single_column_arithmetic(ctx_tgt);
+         if (is_mrope) {
+             free(batch_inject.pos);
+             batch_inject.pos = (llama_pos *) malloc(sizeof(llama_pos) * 4 * llama_n_batch(ctx_dft));
+@@ -1064,6 +1068,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+         llama_set_causal_attn(ctx_dft, causal_attn); // DFlash needs non-causal attention unless the model says otherwise
+     }
+ 
++    bool supports_media() const override {
++        return is_mrope && !is_dspark && media_arithmetic_supported;
++    }
++
+     ~common_speculative_impl_draft_dflash() override {
+         auto * ctx_dft = this->params.ctx_dft;
+         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) backend_chains.size(); ++seq_id) {
+@@ -1105,16 +1113,19 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+             return true;
+         }
+ 
+-        // Target prefill may contain token IDs or multimodal embeddings. Both
+-        // produce the target-layer features used to seed the draft KV cache, so
+-        // skipping the embedding batches leaves a hole in the draft's cache and
+-        // the next injection fails to initialize.
+-        // TODO: revisit after https://github.com/ggml-org/llama.cpp/pull/24669 is merged
++        // The target processes every image embedding. The draft only needs
++        // proposals and can use the following text's vision-conditioned features.
++        // Do not fill a small sliding draft cache with hundreds of image rows
++        // sharing one temporal position: none can expire until text resumes.
++        // M-RoPE permits the position jump over these deliberately omitted rows.
+         const bool has_tokens     = batch_in.token != nullptr;
+         const bool has_embeddings = batch_in.embd  != nullptr;
+         if (has_tokens == has_embeddings) {
+             return true;
+         }
++        if (has_embeddings && supports_media()) {
++            return true;
++        }
+ 
+         const int32_t n_tokens = batch_in.n_tokens;
+ 
+@@ -2608,6 +2619,8 @@ common_speculative_init_result::common_speculative_init_result(
+ 
+         pimpl->model.reset(model_dft);
+ 
++        llama_model_dflash_prepare_mrope(model_dft, model_tgt);
++
+         llama_context * ctx_dft = llama_init_from_model(model_dft, cparams);
+         if (ctx_dft == nullptr) {
+             LOG_ERR("%s: failed to create MTP context\n", __func__);
+@@ -2831,6 +2844,11 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
+     }
+ }
+ 
++bool common_speculative_supports_media(const common_speculative * spec) {
++    return spec && !spec->impls.empty() && std::all_of(spec->impls.begin(), spec->impls.end(),
++            [](const auto & impl) { return impl->supports_media(); });
++}
++
+ bool common_speculative_process(common_speculative * spec, const llama_batch & batch) {
+     bool result = true;
+ 
+diff --git a/common/speculative.h b/common/speculative.h
+index 22505891f..d23619458 100644
+--- a/common/speculative.h
++++ b/common/speculative.h
+@@ -79,6 +79,9 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
+ // process the batch and update the internal state of the speculative context
+ bool common_speculative_process(common_speculative * spec, const llama_batch & batch);
+ 
++// True only when every configured implementation can mirror media positions.
++bool common_speculative_supports_media(const common_speculative * spec);
++
+ // generate drafts for the sequences specified with `common_speculative_get_draft_params`
+ void common_speculative_draft(common_speculative * spec);
+ 
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index 26f31232f..e18d3de5e 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -443,6 +443,7 @@ extern "C" {
+     enum ggml_op_hint {
+         GGML_HINT_NONE             = 0,
+         GGML_HINT_SRC0_IS_HADAMARD = 1,
++        GGML_HINT_SINGLE_COLUMN   = 2,
+     };
+ 
+     // model file types
+@@ -2453,6 +2454,10 @@ extern "C" {
+     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
+             const struct ggml_tensor * a);
+ 
++    GGML_API void ggml_flash_attn_ext_set_hint(
++            struct ggml_tensor * a,
++            enum ggml_op_hint    hint);
++
+     GGML_API void ggml_flash_attn_ext_add_sinks(
+             struct ggml_tensor * a,
+             struct ggml_tensor * sinks);
+diff --git a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common.cuh
+index e67cc7fdf..4c001faf3 100644
+--- a/ggml/src/ggml-cuda/fattn-common.cuh
++++ b/ggml/src/ggml-cuda/fattn-common.cuh
+@@ -1087,6 +1087,11 @@ void launch_fattn(
+     const int gqa_ratio    = Q->ne[2] / K->ne[2];
+     const int ntiles_z_gqa = ((gqa_ratio + ncols2 - 1) / ncols2);
+     const int ntiles_dst   = ntiles_x * ntiles_z_gqa * K->ne[2] * Q->ne[3];
++    // Independent columns can share a launch without sharing their reduction.
++    // Keep the KV partition identical to a one-token launch for exact verification.
++    const bool single_column = !stream_k && ncols1 == 1 && ncols2 == 1 &&
++        ggml_get_op_params_i32(KQV, 4) == GGML_HINT_SINGLE_COLUMN;
++    const int ntiles_reduction = single_column ? ntiles_z_gqa * K->ne[2] * Q->ne[3] : ntiles_dst;
+ 
+     // Optional optimization where the mask is scanned to determine whether part of the calculation can be skipped.
+     // Only worth the overhead if there is at lease one FATTN_KQ_STRIDE x FATTN_KQ_STRIDE square to be skipped or
+@@ -1158,7 +1163,7 @@ void launch_fattn(
+         int nwaves_best = 0;
+         int efficiency_percent_best = 0;
+         for (int parallel_blocks_test = parallel_blocks; parallel_blocks_test <= ntiles_KV; ++parallel_blocks_test) {
+-            const int nblocks_total = ntiles_dst * parallel_blocks_test;
++            const int nblocks_total = ntiles_reduction * parallel_blocks_test;
+             const int nwaves = (nblocks_total + blocks_per_wave - 1) / blocks_per_wave;
+             const int efficiency_percent = 100 * nblocks_total / (nwaves*blocks_per_wave);
+ 
+diff --git a/ggml/src/ggml-cuda/fattn-vec.cuh b/ggml/src/ggml-cuda/fattn-vec.cuh
+index 69dd93686..3cd385b7e 100644
+--- a/ggml/src/ggml-cuda/fattn-vec.cuh
++++ b/ggml/src/ggml-cuda/fattn-vec.cuh
+@@ -551,7 +551,7 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
+     float logit_softcap;
+     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
+ 
+-    if (Q->ne[1] == 1) {
++    if (Q->ne[1] == 1 || ggml_get_op_params_i32(dst, 4) == GGML_HINT_SINGLE_COLUMN) {
+         constexpr int cols_per_block = 1;
+         if (logit_softcap == 0.0f) {
+             constexpr bool use_logit_softcap = false;
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index ab7a3b297..e1cd02c1a 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -569,6 +569,15 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+ 
+ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     ggml_cuda_set_device(ctx.device);
++    // Keep the same Q8 query quantization and reduction as single-token decode.
++    const auto * q = dst->src[0];
++    if (ggml_get_op_params_i32(dst, 4) == GGML_HINT_SINGLE_COLUMN &&
++            ggml_cuda_info().devices[ctx.device].cc == 860 && q->ne[1] > 1 && q->ne[1] <= 8 &&
++            q->ne[3] == 1 && dst->src[1]->type == GGML_TYPE_Q8_0 && dst->src[2]->type == GGML_TYPE_Q8_0 &&
++            q->ne[0] <= 256 && q->ne[0] % 64 == 0 && q->ne[0] != 192 && dst->src[3]) {
++        ggml_cuda_flash_attn_ext_vec(ctx, dst);
++        return;
++    }
+     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+         case BEST_FATTN_KERNEL_NONE:
+             GGML_ABORT("fatal error");
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index a6fc655c4..b065a2d00 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -1818,6 +1818,20 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+     GGML_TENSOR_BINARY_OP_LOCALS
+ 
+     const int32_t hint = ggml_get_op_params_i32(dst, 1);
++    if (hint == GGML_HINT_SINGLE_COLUMN && ggml_cuda_info().devices[ctx.device].cc == 860 &&
++            ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
++            src1->ne[1] > 1 && src1->ne[1] <= 8 && src1->ne[2] == 1 && src1->ne[3] == 1) {
++        // One through four columns use the same four-warp reduction as decode.
++        for (int64_t i = 0; i < src1->ne[1]; i += 4) {
++            ggml_tensor input = *src1;
++            ggml_tensor output = *dst;
++            input.ne[1] = output.ne[1] = std::min<int64_t>(4, src1->ne[1] - i);
++            input.data = (char *) src1->data + i * src1->nb[1];
++            output.data = (char *) dst->data + i * dst->nb[1];
++            ggml_cuda_mul_mat_vec_q(ctx, src0, &input, nullptr, &output);
++        }
++        return;
++    }
+     if (hint == GGML_HINT_SRC0_IS_HADAMARD && ggml_cuda_op_fwht(ctx, src1, dst)) {
+         return;
+     }
+@@ -5485,8 +5499,16 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+     GGML_UNUSED(reg);
+ }
+ 
++static bool ggml_backend_cuda_supports_single_column_arithmetic(ggml_backend_dev_t dev) {
++    const auto * ctx = static_cast<ggml_backend_cuda_device_context *>(dev->context);
++    return ggml_cuda_info().devices[ctx->device].cc == 860;
++}
++
+ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+     GGML_UNUSED(reg);
++    if (strcmp(name, "ggml_backend_supports_single_column_arithmetic") == 0) {
++        return (void *) ggml_backend_cuda_supports_single_column_arithmetic;
++    }
+     if (strcmp(name, "ggml_backend_comm_init") == 0) {
+         return (void *)ggml_backend_cuda_comm_init;
+     }
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index 3bd3e3fe5..54baf1654 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -5506,6 +5506,11 @@ enum ggml_prec ggml_flash_attn_ext_get_prec(
+     return (enum ggml_prec) prec_i32;
+ }
+ 
++void ggml_flash_attn_ext_set_hint(struct ggml_tensor * a, enum ggml_op_hint hint) {
++    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
++    ggml_set_op_params_i32(a, 4, (int32_t) hint);
++}
++
+ void ggml_flash_attn_ext_add_sinks(
+         struct ggml_tensor * a,
+         struct ggml_tensor * sinks) {
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 391ec1a9f..06b52bf1d 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -7,6 +7,7 @@
+ #include "llama-batch.h"
+ #include "llama-io.h"
+ #include "llama-memory.h"
++#include "llama-memory-hybrid.h"
+ #include "llama-mmap.h"
+ #include "llama-model.h"
+ #include "llama-ext.h"
+@@ -1187,6 +1188,10 @@ void llama_context::set_dflash_fused_injection(bool value) {
+     cparams.dflash_fused_injection = value;
+ }
+ 
++void llama_context::set_single_column_arithmetic(bool value) {
++    cparams.single_column_arithmetic = value;
++}
++
+ void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
+     LLAMA_LOG_DEBUG("%s: lid = %d, enable = %d\n", __func__, lid, enable);
+ 
+@@ -3876,6 +3881,37 @@ void llama_set_dflash_fused_injection(llama_context * ctx, bool value) {
+     ctx->set_dflash_fused_injection(value);
+ }
+ 
++void llama_set_single_column_arithmetic(llama_context * ctx, bool value) {
++    ctx->set_single_column_arithmetic(value);
++}
++
++int32_t llama_get_single_column_n_max(llama_context * ctx, llama_seq_id seq_id, int32_t n_max) {
++    auto * hybrid = dynamic_cast<llama_memory_hybrid *>(ctx->get_memory());
++    return hybrid ? hybrid->get_mem_attn()->get_single_column_n_max(seq_id, n_max) : 0;
++}
++
++bool llama_supports_single_column_arithmetic(llama_context * ctx) {
++    const auto & model = ctx->get_model();
++    const auto & params = ctx->get_cparams();
++    const auto * hybrid = dynamic_cast<llama_memory_hybrid *>(ctx->get_memory());
++    if (!hybrid || model.arch != LLM_ARCH_QWEN35 || model.type != LLM_TYPE_27B ||
++            model.ftype() != LLAMA_FTYPE_MOSTLY_IQ4_XS || model.n_devices() != 1 ||
++            model.n_gpu_layers() < model.hparams.n_layer() + 1 || params.n_seq_max != 1 ||
++            (model.split_mode() != LLAMA_SPLIT_MODE_LAYER && model.split_mode() != LLAMA_SPLIT_MODE_NONE) ||
++            model.has_tensor_overrides() || !model.loras.empty() ||
++            !params.causal_attn || !params.flash_attn || !params.offload_kqv || !params.op_offload ||
++            hybrid->get_mem_attn()->type_k() != GGML_TYPE_Q8_0 ||
++            hybrid->get_mem_attn()->type_v() != GGML_TYPE_Q8_0) {
++        return false;
++    }
++    auto * dev = model.dev_output();
++    auto * reg = ggml_backend_dev_backend_reg(dev);
++    using supports_t = bool (*)(ggml_backend_dev_t);
++    const auto supports = (supports_t) ggml_backend_reg_get_proc_address(reg,
++            "ggml_backend_supports_single_column_arithmetic");
++    return supports && supports(dev);
++}
++
+ void llama_set_embeddings_layer_inp(llama_context * ctx, uint32_t lid, bool value) {
+     ctx->set_embeddings_layer_inp(lid, value);
+ }
+diff --git a/src/llama-context.h b/src/llama-context.h
+index e78cbb250..2f344b903 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -115,6 +115,7 @@ struct llama_context {
+     void set_embeddings (bool value);
+     void set_embeddings_nextn(bool value, bool masked);
+     void set_dflash_fused_injection(bool value);
++    void set_single_column_arithmetic(bool value);
+     void set_embeddings_layer_inp(uint32_t lid, bool enable);
+     void set_nextn_layer_offset(int32_t offset);
+     void set_causal_attn(bool value);
+diff --git a/src/llama-cparams.h b/src/llama-cparams.h
+index f549ccf42..92e123e76 100644
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -36,6 +36,7 @@ struct llama_cparams {
+     bool embeddings_nextn;        // also extract the hidden state before the final output norm
+     bool embeddings_nextn_masked; // extract for only rows where batch.logits != 0
+     bool dflash_fused_injection;   // DFlash embedding batches contain raw target features
++    bool single_column_arithmetic = false;
+     bool causal_attn;
+     bool offload_kqv;
+     bool flash_attn;
+diff --git a/src/llama-ext.h b/src/llama-ext.h
+index 2731f5dd1..088e8edd4 100644
+--- a/src/llama-ext.h
++++ b/src/llama-ext.h
+@@ -99,6 +99,15 @@ LLAMA_API void llama_set_embeddings_nextn(struct llama_context * ctx, bool value
+ // must pass through the encoder before K/V cache injection.
+ LLAMA_API void llama_set_dflash_fused_injection(struct llama_context * ctx, bool value);
+ 
++LLAMA_API void llama_set_single_column_arithmetic(struct llama_context * ctx, bool value);
++LLAMA_API int32_t llama_get_single_column_n_max(struct llama_context * ctx, llama_seq_id seq_id, int32_t n_max);
++LLAMA_API bool llama_supports_single_column_arithmetic(struct llama_context * ctx);
++
++// Before creating any draft contexts, adapt a legacy NeoX DFlash model to the
++// temporal-only M-RoPE layout of its target. No weights or text positions change.
++LLAMA_API bool llama_model_dflash_prepare_mrope(struct llama_model * draft, const struct llama_model * target);
++LLAMA_API uint32_t llama_model_dflash_seed_window(const struct llama_model * draft);
++
+ // Select which appended NextN block the DECODER_MTP graph runs (offset past
+ // the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
+ // chain multiple trained NextN heads. Default 0 (first head).
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index c31c93f1a..21fc119a7 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -875,6 +875,7 @@ struct llm_graph_params {
+             cparams.embeddings_nextn        == other.cparams.embeddings_nextn        &&
+             cparams.embeddings_nextn_masked == other.cparams.embeddings_nextn_masked &&
+             cparams.dflash_fused_injection  == other.cparams.dflash_fused_injection  &&
++            cparams.single_column_arithmetic == other.cparams.single_column_arithmetic &&
+             cparams.causal_attn             == other.cparams.causal_attn             &&
+             arch  == other.arch  &&
+             gtype == other.gtype &&
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 65afbd8c3..9944e3251 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -1248,6 +1248,19 @@ const llama_kv_cells & llama_kv_cache::get_cells(llama_seq_id seq_id) const {
+     return v_cells[seq_to_stream[seq_id]];
+ }
+ 
++int32_t llama_kv_cache::get_single_column_n_max(llama_seq_id seq_id, int32_t n_max) const {
++    const uint32_t stream = seq_to_stream.at(seq_id);
++    const auto & cells = v_cells[stream];
++    const uint32_t used = cells.get_used();
++    // Only append-only caches have the same row placement for batched and serial decode.
++    if (other || n_swa || cells.used_max_p1() != used || v_heads[stream] > used) {
++        return 0;
++    }
++    const uint32_t padding = std::max(n_pad, 256u);
++    // Include the anchor token. Do not cross a padded attention extent in one batch.
++    return std::max(0, std::min(n_max, int32_t(padding - used % padding - 1)));
++}
++
+ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
+     uint32_t result = 0;
+ 
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index c4d8699de..db0d8e958 100644
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -167,6 +167,7 @@ public:
+     ggml_tensor * get_k_storage(int32_t il) const;
+ 
+     const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
++    int32_t get_single_column_n_max(llama_seq_id seq_id, int32_t n_max) const;
+ 
+     // state_read, plus the cells the restored tokens were placed in
+     // a cache that mirrors another one (the qwen4exp indexer) must not search for its own cells: two searches agree only by luck
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index e679b24e8..47e11528a 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2739,6 +2739,45 @@ int32_t llama_model_n_layer_nextn(const llama_model * model) {
+     return model->hparams.n_layer_nextn;
+ }
+ 
++bool llama_model_dflash_prepare_mrope(llama_model * draft, const llama_model * target) {
++    if (!draft || !target || draft->arch != LLM_ARCH_DFLASH || draft->hparams.dsv4_hc_mult > 0) {
++        return false;
++    }
++    const auto target_rope = llama_model_rope_type(target);
++    if (target_rope != LLAMA_ROPE_TYPE_MROPE && target_rope != LLAMA_ROPE_TYPE_IMROPE) {
++        return false;
++    }
++    if (llama_model_rope_type(draft) == LLAMA_ROPE_TYPE_MROPE) {
++        return true;
++    }
++    auto & hp = draft->hparams;
++    const uint32_t n_rot = hp.n_rot();
++    if (llama_model_rope_type(draft) != LLAMA_ROPE_TYPE_NEOX || n_rot == 0 || n_rot % 2 != 0) {
++        return false;
++    }
++    for (uint32_t il = 1; il < hp.n_layer(); ++il) {
++        if (hp.n_rot(il) != n_rot) {
++            return false;
++        }
++    }
++    // One temporal section is mathematically the original NeoX rotation. The
++    // four-row layout also permits the overlapping positions of image tokens.
++    hp.rope_sections = {int(n_rot / 2), 0, 0, 0};
++    hp.rope_type = LLAMA_ROPE_TYPE_MROPE;
++    LLAMA_LOG_INFO("%s: using temporal-only M-RoPE for the multimodal DFlash target\n", __func__);
++    return true;
++}
++
++uint32_t llama_model_dflash_seed_window(const llama_model * draft) {
++    if (!draft || draft->arch != LLM_ARCH_DFLASH || draft->hparams.dsv4_hc_mult > 0) {
++        return 0;
++    }
++    for (uint32_t il = 0; il < draft->hparams.n_layer(); ++il) {
++        if (!draft->hparams.is_swa(il)) { return 0; }
++    }
++    return draft->hparams.n_swa;
++}
++
+ int32_t llama_model_dflash_selector_top_k(const llama_model * model) {
+     return model->hparams.dflash_selector_top_k;
+ }
+diff --git a/src/models/dflash.cpp b/src/models/dflash.cpp
+index b45dbf178..a4e2fbf6b 100644
+--- a/src/models/dflash.cpp
++++ b/src/models/dflash.cpp
+@@ -593,6 +593,15 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
+     std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
+ 
+     auto build_rope = [&](ggml_tensor * cur, ggml_tensor * pos) {
++        if (rope_type == GGML_ROPE_TYPE_MROPE && sections[0] == int(n_rot / 2) &&
++                sections[1] == 0 && sections[2] == 0 && sections[3] == 0) {
++            // Temporal-only M-RoPE has the original NeoX rotation. Retain its
++            // kernels and fusion paths while the cache supports media positions.
++            auto * temporal = ggml_view_1d(ctx0, pos, ubatch.n_tokens, 0);
++            return ggml_rope_ext(ctx0, cur, temporal, nullptr,
++                    n_rot, GGML_ROPE_TYPE_NEOX, n_ctx_orig, freq_base, freq_scale,
++                    ext_factor, attn_factor, beta_fast, beta_slow);
++        }
+         return rope_type == GGML_ROPE_TYPE_MROPE
+             ? ggml_rope_multi(ctx0, cur, pos, nullptr,
+                     n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index 309dd4324..91053bbef 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -226,6 +226,16 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+     res->t_logits = cur;
+ 
+     ggml_build_forward_expand(gf, cur);
++    if (cparams.single_column_arithmetic && n_tokens > 1 && n_tokens <= 8) {
++        for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
++            auto * node = ggml_graph_node(gf, i);
++            if (node->op == GGML_OP_MUL_MAT && ggml_is_quantized(node->src[0]->type)) {
++                ggml_mul_mat_set_hint(node, GGML_HINT_SINGLE_COLUMN);
++            } else if (node->op == GGML_OP_FLASH_ATTN_EXT) {
++                ggml_flash_attn_ext_set_hint(node, GGML_HINT_SINGLE_COLUMN);
++            }
++        }
++    }
+ }
+ 
+ std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen35::graph::build_qkvz(
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 3d3507e34..2536f13b2 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -11,6 +11,7 @@
+ #include "common.h"
+ #include "fit.h"
+ #include "llama.h"
++#include "../../src/llama-ext.h"
+ #include "log.h"
+ #include "sampling.h"
+ #include "speculative.h"
+@@ -655,9 +656,9 @@ struct server_slot {
+     }
+ 
+     bool can_speculate() const {
+-        // Draft contexts assume consecutive text token positions. Multimodal batches can use
+-        // model-specific position layouts, such as M-RoPE, that cannot be mirrored safely.
+-        return spec && (!task || !task->tokens.has_media());
++        // Keep the safety fallback for draft implementations that cannot
++        // consume media embeddings or mirror their model-specific positions.
++        return spec && (!task || !task->tokens.has_media() || common_speculative_supports_media(spec));
+     }
+ 
+     void add_token(const completion_token_output & token) {
+@@ -680,6 +681,10 @@ struct server_slot {
+         // note: slot.prompt is not yet expanded with the `id` token sampled above
+         //       also, need to leave space for 1 extra token to allow context shifts
+         int n_draft_max = n_ctx - prompt.n_tokens() - 2;
++        n_draft_max = std::min(n_draft_max, task->params.speculative.draft.n_max);
++        if (task->tokens.has_media()) {
++            n_draft_max = llama_get_single_column_n_max(ctx_tgt, id, std::min(n_draft_max, 3));
++        }
+ 
+         if (n_remaining() > 0) {
+             n_draft_max = std::min(n_draft_max, n_remaining() - 1);
+@@ -3261,7 +3266,7 @@ private:
+                         common_speculative_get_draft_params(spec.get(), slot.id) = {
+                             /* .drafting = */ true,
+                             /* .n_max    = */ n_draft_max,
+-                            /* .n_past   = */ slot.prompt.n_tokens(),
++                            /* .n_past   = */ slot.prompt.tokens.pos_next(),
+                             /* .id_last  = */ slot.sampled,
+                             /* .prompt   = */ &slot.spec_prompt,
+                             /* .result   = */ &slot.spec_draft,
+@@ -3908,6 +3913,11 @@ private:
+             has_output |= batch.tokens[i].output;
+         }
+ 
++        llama_set_single_column_arithmetic(ctx_tgt, batch.slot_batched &&
++                batch.slot_batched->state == SLOT_STATE_GENERATING &&
++                batch.slot_batched->can_speculate() &&
++                batch.slot_batched->task->tokens.has_media());
++
+         // yield to the queue, so we can still handle metrics tasks while decoding
+         // note: the sync is done here too, so that the wait is also covered by the yield
+         int ret = 0;
+@@ -3917,6 +3927,7 @@ private:
+                 llama_synchronize(ctx_tgt);
+             }
+         });
++        llama_set_single_column_arithmetic(ctx_tgt, false);
+ 
+         if (ret != 0) {
+             {
+@@ -3974,7 +3985,19 @@ private:
+         // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
+         //       for now, always re-evaluate for simplicity
+         //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
+-        if (spec && batch.slot_batched->can_speculate()) {
++        bool seed_draft = spec && batch.slot_batched->can_speculate();
++        if (seed_draft && batch.slot_batched->task->tokens.has_media() &&
++                batch.slot_batched->state != SLOT_STATE_GENERATING && batch_view.pos) {
++            const auto window = llama_model_dflash_seed_window(model_dft);
++            const auto end_pos = batch.slot_batched->task->tokens.pos_next();
++            // DFlash injection is pointwise. Rows outside every draft layer's
++            // sliding window cannot contribute to the first proposal.
++            if (window > 0 && batch_view.pos[batch_view.n_tokens - 1] <
++                    end_pos - int64_t(window) - int64_t(llama_n_ubatch(ctx_dft))) {
++                seed_draft = false;
++            }
++        }
++        if (seed_draft) {
+             bool ok = true;
+             queue_tasks.yield_to_queue([&]() {
+                 ok = common_speculative_process(spec.get(), batch_view);
+diff --git a/tools/server/server-schema.cpp b/tools/server/server-schema.cpp
+index 64b925129..ee8d90eae 100644
+--- a/tools/server/server-schema.cpp
++++ b/tools/server/server-schema.cpp
+@@ -194,13 +194,12 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
+     // Speculative decoding params
+     //
+ 
+-    // TODO: to keep things simple, we disable speculative parameter adjustments for now
+-#if 0
+-    // TODO: for now, be able to adjust only the draft-model based speculative parameters
+     add((new field_num("speculative.n_max", params.speculative.draft.n_max))
+-        ->set_hard_limits(0, INT32_MAX)
++        ->set_hard_limits(0, params.speculative.draft.n_max)
+         ->set_desc("Maximum number of tokens to draft during speculative decoding"));
+ 
++    // Other speculative parameter adjustments are not supported per request.
++#if 0
+     add((new field_num("speculative.n_min", params.speculative.draft.n_min))
+         ->set_hard_limits(0, INT32_MAX)
+         ->set_desc("Minimum number of draft tokens to use for speculative decoding");
