@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import importlib
+import importlib.util
 import ipaddress
 import json
 import logging
@@ -37,7 +39,7 @@ import socket
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from urllib.parse import parse_qsl
 from urllib.parse import urlencode
 from urllib.parse import urljoin
@@ -48,12 +50,11 @@ from aiohttp import ClientSession
 from aiohttp import ClientTimeout
 
 
-# Optional Crawl4AI backend for JS-heavy pages
-try:
+# Discover the optional browser without importing its crawler, parsers, and
+# numerical dependencies on every router launch.
+HAS_CRAWL4AI = importlib.util.find_spec("crawl4ai") is not None
+if TYPE_CHECKING:
     from crawl4ai import AsyncWebCrawler
-    HAS_CRAWL4AI = True
-except ImportError:
-    HAS_CRAWL4AI = False
 
 LOG = logging.getLogger("marathon.web_search")
 
@@ -732,7 +733,13 @@ class WebFetchExecutor:
             return None
         if self._crawl4ai is not None:
             return self._crawl4ai
-        crawler = AsyncWebCrawler(verbose=False)
+        try:
+            module = await asyncio.to_thread(importlib.import_module, "crawl4ai")
+        except ImportError as error:
+            raise RuntimeError(
+                "web_browse could not load Crawl4AI; repair its installed dependencies"
+            ) from error
+        crawler = module.AsyncWebCrawler(verbose=False)
         await crawler.__aenter__()
         self._crawl4ai = crawler
         return crawler

@@ -872,6 +872,29 @@ class RuntimeTests(unittest.TestCase):
             os.getpid(),
         )
 
+    def test_empty_socket_listing_does_not_run_a_second_port_scan(self) -> None:
+        with (
+            mock.patch("marathon_app.runtime.shutil.which", return_value="tool"),
+            mock.patch("marathon_app.runtime.subprocess.run", return_value=
+                       subprocess.CompletedProcess([], 0, stdout="")) as run,
+        ):
+            self.assertIsNone(runtime_module._port_pid(39999))
+        run.assert_called_once()
+        self.assertIn("-Hltnp", run.call_args.args[0])
+
+    def test_inconclusive_socket_listing_keeps_port_ownership_fallback(self) -> None:
+        for status, output in ((1, ""), (0, "LISTEN 0 128 127.0.0.1:39999 *:*")):
+            with (
+                self.subTest(status=status, output=output),
+                mock.patch("marathon_app.runtime.shutil.which", return_value="tool"),
+                mock.patch("marathon_app.runtime.subprocess.run", side_effect=[
+                    subprocess.CompletedProcess([], status, stdout=output),
+                    subprocess.CompletedProcess([], 0, stdout="123\n"),
+                ]) as run,
+            ):
+                self.assertEqual(runtime_module._port_pid(39999), 123)
+                self.assertEqual(run.call_args_list[1].args[0][0], "lsof")
+
     def test_gpu_processes_include_physical_gpu_index(self) -> None:
         gpu_result = subprocess.CompletedProcess(
             args=[],

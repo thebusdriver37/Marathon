@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -71,6 +73,51 @@ def settings(*, retries: int = 1, max_results: int = 8) -> web_search.WebSearchS
 
 
 class WebSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
+    def test_browser_discovery_does_not_import_the_crawler(self) -> None:
+        subprocess.run([
+            sys.executable, "-c",
+            "import sys; import marathon_web_search as web; "
+            "web.web_browse_available(); assert 'crawl4ai' not in sys.modules",
+        ], env=dict(os.environ, PYTHONPATH=str(ROUTER_DIR)), check=True)
+
+    async def test_browser_loads_on_demand_and_reuses_and_closes_the_crawler(self) -> None:
+        executor = web_search.WebFetchExecutor(web_search.WebFetchSettings.from_env())
+        crawler = mock.MagicMock()
+        crawler.__aenter__ = mock.AsyncMock()
+        crawler.__aexit__ = mock.AsyncMock()
+        module = mock.Mock()
+        module.AsyncWebCrawler.return_value = crawler
+        with (
+            mock.patch.object(web_search, "HAS_CRAWL4AI", True),
+            mock.patch.dict(os.environ, {"MARATHON_WEB_BROWSE_ENABLE": "1"}),
+            mock.patch.object(web_search.importlib, "import_module", return_value=module) as load,
+        ):
+            self.assertTrue(web_search.web_browse_available())
+            load.assert_not_called()
+            self.assertIs(await executor._ensure_crawl4ai(), crawler)
+            self.assertIs(await executor._ensure_crawl4ai(), crawler)
+            load.assert_called_once_with("crawl4ai")
+            crawler.__aenter__.assert_awaited_once()
+            await executor.close()
+            crawler.__aexit__.assert_awaited_once()
+
+    async def test_missing_disabled_and_broken_browser_dependencies(self) -> None:
+        for installed, enabled in ((False, "1"), (True, "0"), (True, "1")):
+            executor = web_search.WebFetchExecutor(web_search.WebFetchSettings.from_env())
+            with (
+                self.subTest(installed=installed, enabled=enabled),
+                mock.patch.object(web_search, "HAS_CRAWL4AI", installed),
+                mock.patch.dict(os.environ, {"MARATHON_WEB_BROWSE_ENABLE": enabled}),
+                mock.patch.object(web_search.importlib, "import_module", side_effect=ImportError("dependency")) as load,
+            ):
+                if installed and enabled == "1":
+                    with self.assertRaisesRegex(RuntimeError, "could not load Crawl4AI"):
+                        await executor._ensure_crawl4ai()
+                else:
+                    self.assertFalse(web_search.web_browse_available())
+                    self.assertIsNone(await executor._ensure_crawl4ai())
+                    load.assert_not_called()
+
     def test_tool_schema_exposes_supported_time_ranges(self) -> None:
         parameters = web_search.web_search_function_tool()["parameters"]
 

@@ -6,8 +6,6 @@ import secrets
 import urllib.request
 from urllib.parse import urlsplit
 
-from aiohttp import web
-
 
 class _NoApiRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -30,6 +28,10 @@ def is_loopback(host: str) -> bool:
 
 
 def router_security_middleware():
+    # The launcher also uses the HTTP client helpers. Load the server framework
+    # only in the router process that actually installs this middleware.
+    from aiohttp import web
+
     token = os.environ.get("MARATHON_ROUTER_TOKEN", "")
     if not token:
         raise RuntimeError("MARATHON_ROUTER_TOKEN is required for the local router")

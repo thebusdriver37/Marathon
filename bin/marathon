@@ -143,12 +143,12 @@ case "$cmd" in
       smoke)
         exec python3 "$ROOT_DIR/scripts/evals/e2e_smoke.py" "$@"
         ;;
-      compaction)
+      compaction|startup)
         eval_python=python3
         if [[ -x "$ROOT_DIR/.marathon/venv/bin/python3" ]]; then
           eval_python="$ROOT_DIR/.marathon/venv/bin/python3"
         fi
-        exec "$eval_python" "$ROOT_DIR/scripts/evals/compaction.py" "$@"
+        exec "$eval_python" "$ROOT_DIR/scripts/evals/$subcmd.py" "$@"
         ;;
       coding)
         exec "$ROOT_DIR/scripts/evals/coding_gauntlet.sh" "$@"
@@ -161,6 +161,7 @@ Subcommands:
   coding          Run a temporary Codex-style coding gauntlet
   smoke           Run live terminal, cache, coding, resume, and cancellation tests
   compaction      Measure live compaction speed and context retention
+  startup         Measure terminal startup and the first reply
 USAGE
         ;;
       *)

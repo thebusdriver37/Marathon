@@ -83,6 +83,33 @@ For a long-context comparison, run the following with `MARATHON_COMPACTION_PREFI
 The larger output limit applies only to the evaluator's isolated process and lets it construct a long history in one tool read.
 It does not change the normal tool-output limit.
 
+Measure normal terminal startup and verify its first reply with:
+
+```bash
+./bin/marathon eval startup --run-gpu --repeats 3
+```
+
+This uses the installed frontend, normal worker selection, and existing session-home preparation.
+Readiness requires both the terminal's Ready title and its successful Responses connection probe, so the initial loading screen does not count as ready.
+Each run then requires an exact, unique reply from a real model turn.
+The evaluator saves terminal transcripts, runtime traces, milestone timings, and `results.json` in the printed evidence directory.
+It never unloads workers; the first sample uses the worker's existing state and subsequent samples can reuse it.
+Only unload a test-owned, unleased worker when measuring GPU-cold startup, and leave active workloads alone.
+
+The September 8 startup comparison used the Qwen 3.8 27B IQ4_XS DFlash2 worker on GPU 2 while other Marathon sessions remained active.
+Three warm launches averaged 2.88 seconds before and 1.62 seconds after, about 44% less waiting.
+One GPU-cold launch per version measured 12.68 and 11.78 seconds respectively; these did not flush the operating system's file cache.
+Model loading still dominates cold startup, and these samples do not establish performance on other machines or after a reboot.
+All measured launches passed their first-reply checks.
+Warm baseline evidence is in `/tmp/marathon-startup-s6w1vijq`, optimized warm evidence in `/tmp/marathon-startup-_fr3juz2`, and cold evidence in `/tmp/marathon-startup-9px45kr9` and `/tmp/marathon-startup-5drqbbwl`.
+These evidence paths are local, not portable repository fixtures.
+
+Startup now skips a redundant `lsof` scan after a successful empty `ss` listing and checks model/router readiness more frequently within the existing timeouts.
+The HTTP server framework is imported only when installing router middleware, and the router defers Crawl4AI imports until the first browser request.
+The first browser request pays that deferred import cost; ordinary coding sessions avoid it entirely.
+Regression coverage retains port-ownership fallback and checks optional browser discovery, disabled or broken dependencies, crawler reuse, and cleanup.
+The 316-test Python suite passed with one optional skip, and a real browser rendered a local JavaScript fixture after the deferred import.
+
 Keep first-run setup in the README and advanced configuration in [advanced usage](ADVANCED_USAGE.md).
 Document actual tested support separately from expected hardware compatibility.
 Preserve existing user selections and never change power caps or stop unrelated inference services during setup.

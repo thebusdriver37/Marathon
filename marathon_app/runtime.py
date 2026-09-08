@@ -283,7 +283,7 @@ def _props_context_window(payload: dict[str, object]) -> int | None:
 def _port_pid(port: int) -> int | None:
     if shutil.which("ss"):
         result = subprocess.run(
-            ["ss", "-ltnp", f"( sport = :{port} )"],
+            ["ss", "-Hltnp", f"( sport = :{port} )"],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -292,6 +292,10 @@ def _port_pid(port: int) -> int | None:
         match = re.search(r"pid=(\d+)", result.stdout)
         if match:
             return int(match.group(1))
+        # An empty, successful socket listing already proves the port is free.
+        # Keep lsof as a fallback for errors or listeners whose PID ss omits.
+        if result.returncode == 0 and not result.stdout.strip():
+            return None
     if shutil.which("lsof"):
         result = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
@@ -1469,7 +1473,7 @@ class Runtime:
                 pass
             if progress:
                 progress(self.latest_model_status())
-            time.sleep(1)
+            time.sleep(0.2)
         raise TimeoutError(f"model did not become ready within {self.config.health_timeout}s")
 
     def _wait_for_router(self, progress: Callable[[str], None] | None) -> None:
@@ -1484,7 +1488,7 @@ class Runtime:
                 pass
             if progress:
                 progress("Waiting for the local API router")
-            time.sleep(0.5)
+            time.sleep(0.1)
         raise TimeoutError("Marathon router did not become ready within 30 seconds")
 
     def latest_model_status(self) -> str:
