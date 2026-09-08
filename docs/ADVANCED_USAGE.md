@@ -244,12 +244,17 @@ The patched status line includes:
 
 - Live `Prefill`, `Thinking`, and `Answering` stages in the throughput position.
 - Stable completed-turn output tokens divided by active generation time.
-- Time to first generated output, including prompt processing.
+- Time to first activity, including prompt processing and queueing.
 - The active reasoning effort.
 - Context usage based on the backend's actual loaded window.
 
 Tool execution time is excluded from completed-turn generation throughput.
 The live status shows only the current generation stage so rapidly arriving stream chunks do not make the footer flicker.
+First activity means the first nonempty text or reasoning delta, or a model tool-start event observed by the frontend.
+It is not a backend-only first-token measurement.
+Router completion traces separately record total request time, queue wait, first streamed activity, backend time, and slot preparation time.
+Automatic local chat titles use the first user message without a separate inference request, keeping the conversation's prompt cache warm.
+Explicit title suggestions through `/rename` can still use inference.
 
 Use Codex's `/model` menu to change the active reasoning effort without reloading the GGUF or discarding the conversation.
 Supported values are defined per model family in the runtime catalog.

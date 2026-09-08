@@ -25,8 +25,23 @@ if [[ "$(git -C "$target_dir" rev-parse HEAD)" != "$base_ref" ]]; then
   echo "error: existing patch worktree has a different base: $target_dir" >&2
   exit 1
 fi
+managed_tree_file="$(git -C "$target_dir" rev-parse --absolute-git-dir)/marathon-patched-tree"
 if git -C "$target_dir" diff --quiet && [[ "$(git -C "$target_dir" write-tree)" == "$expected_tree" ]]; then
+  if [[ "${MARATHON_PATCH_UPDATE:-0}" == "1" ]]; then
+    printf '%s\n' "$expected_tree" >"$managed_tree_file"
+  fi
   echo "patches already applied: $target_dir"
+  exit 0
+fi
+if [[ "${MARATHON_PATCH_UPDATE:-0}" == "1" && -f "$managed_tree_file" ]] \
+  && git -C "$target_dir" diff --quiet \
+  && [[ "$(git -C "$target_dir" write-tree)" == "$(cat "$managed_tree_file")" ]] \
+  && [[ -z "$(git -C "$target_dir" ls-files --others --exclude-standard)" ]]; then
+  # Update only managed changes, retaining the source paths and mtimes of
+  # unchanged crates so Cargo can reuse their compiled artifacts.
+  git -C "$target_dir" read-tree -m -u "$(cat "$managed_tree_file")" "$expected_tree"
+  printf '%s\n' "$expected_tree" >"$managed_tree_file"
+  echo "updated managed patch tree: $target_dir"
   exit 0
 fi
 if ! git -C "$target_dir" diff HEAD --quiet || [[ -n "$(git -C "$target_dir" ls-files --others --exclude-standard)" ]]; then
@@ -35,4 +50,7 @@ if ! git -C "$target_dir" diff HEAD --quiet || [[ -n "$(git -C "$target_dir" ls-
   exit 1
 fi
 git -C "$target_dir" apply --index "$@"
+if [[ "${MARATHON_PATCH_UPDATE:-0}" == "1" ]]; then
+  printf '%s\n' "$expected_tree" >"$managed_tree_file"
+fi
 echo "patched source tree: $target_dir"

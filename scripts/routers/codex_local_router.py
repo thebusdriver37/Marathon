@@ -4785,6 +4785,23 @@ class RouterState:
         preset_response_id: str | None = None,
         event_sink: StreamEventSink | None = None,
     ) -> dict[str, Any]:
+        request_started = time.perf_counter()
+        first_activity_ms: float | None = None
+        original_sink = event_sink
+
+        async def timed_sink(event: dict[str, Any]) -> bool:
+            nonlocal first_activity_ms
+            item = event.get("item") or {}
+            if first_activity_ms is None and (
+                (event.get("type", "").endswith(".delta") and event.get("delta"))
+                or (event.get("type") == "response.output_item.done"
+                    and item.get("type") in {"function_call", "custom_tool_call", "web_search_call"})
+            ):
+                first_activity_ms = (time.perf_counter() - request_started) * 1000.0
+            return await original_sink(event) if original_sink is not None else True
+
+        if original_sink is not None:
+            event_sink = timed_sink
         raw_snapshot = payload
         request = dict(payload)
         request.pop("type", None)
@@ -5048,8 +5065,10 @@ class RouterState:
             forward_request.pop("_marathon_web_search_enabled", False)
         ) and self.web_search is not None
 
+        queue_started = time.perf_counter()
         async with self.backend_lock:
             slot_prepare_start = time.perf_counter()
+            queue_wait_ms = (slot_prepare_start - queue_started) * 1000.0
             switch_checkpoint_result = (
                 await self._checkpoint_before_conversation_switch_locked(
                     profile,
@@ -5318,6 +5337,9 @@ class RouterState:
                 "response_id": response_id,
                 "relation": relation,
                 "backend_ms": backend_ms,
+                "request_ms": (time.perf_counter() - request_started) * 1000.0,
+                "queue_wait_ms": queue_wait_ms,
+                "first_activity_ms": first_activity_ms,
                 "backend_timings": backend_response.get("timings"),
                 "response_metrics": backend_response.get("usage_metadata", {}).get("marathon"),
                 "completion_replayed": replayed_web_completion,

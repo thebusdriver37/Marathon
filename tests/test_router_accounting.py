@@ -155,6 +155,13 @@ class RouterAccountingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             app["state"] = state
             app.router.add_get("/v1/responses", router_module.handle_ws_responses)
             async with TestServer(app) as server:
+                await state.backend_lock.acquire()
+
+                async def release_busy_worker():
+                    await asyncio.sleep(0.05)
+                    state.backend_lock.release()
+
+                release_task = asyncio.create_task(release_busy_worker())
                 async with http.ws_connect(server.make_url("/v1/responses")) as ws:
                     await ws.send_json(
                         {
@@ -170,8 +177,15 @@ class RouterAccountingIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         if event["type"] == "response.completed":
                             response = event["response"]
                             break
+                await release_task
 
         self.assertEqual(len(calls), 2)
+        trace = next(call.args[1] for call in state.telemetry.emit.call_args_list
+                     if call.args[0] == "router.response.completed")
+        self.assertGreater(trace["queue_wait_ms"], 20)
+        self.assertGreaterEqual(trace["first_activity_ms"], trace["queue_wait_ms"])
+        self.assertGreaterEqual(trace["request_ms"], trace["first_activity_ms"])
+        self.assertGreater(trace["request_ms"], trace["backend_ms"])
         self.assertEqual(response["usage"]["output_tokens"], 125)
         self.assertEqual(response["usage"]["input_tokens"], 22_000)
         self.assertEqual(response["usage"]["total_tokens"], 22_125)

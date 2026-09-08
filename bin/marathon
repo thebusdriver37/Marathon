@@ -30,7 +30,7 @@ Commands:
   report [run]    Summarize a telemetry trace (default: latest run)
   compare A B     Compare two telemetry traces
   doctor          Check local setup, backend health, models, ports, GPU, and cache usage
-  eval coding     Run a supervised Codex-style coding gauntlet
+  eval <sub>      Run a coding gauntlet or live E2E smoke suite
   resume [ID]     Resume a Marathon session or open its session picker
   fork [ID]       Fork a Marathon session or open its session picker
   exec            Run headless Codex exec against the default local model
@@ -139,6 +139,9 @@ case "$cmd" in
       shift
     fi
     case "$subcmd" in
+      smoke)
+        exec python3 "$ROOT_DIR/scripts/evals/e2e_smoke.py" "$@"
+        ;;
       coding)
         exec "$ROOT_DIR/scripts/evals/coding_gauntlet.sh" "$@"
         ;;
@@ -148,6 +151,7 @@ Usage: marathon eval <subcommand>
 
 Subcommands:
   coding          Run a temporary Codex-style coding gauntlet
+  smoke           Run live terminal, cache, coding, resume, and cancellation tests
 USAGE
         ;;
       *)

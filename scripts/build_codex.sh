@@ -46,10 +46,26 @@ if [[ ! -f "$CODEX_DIR/codex-rs/Cargo.toml" ]]; then
   git -C "$ROOT_DIR" submodule update --init --depth 1 codex
 fi
 
+export MARATHON_PATCH_UPDATE=1
+# Serialize patch updates and compilation in the persistent build workspace.
+mkdir -p "$ROOT_DIR/.marathon"
+if [[ "${MARATHON_CODEX_BUILD_LOCK_OWNER:-}" != "$PPID" ]]; then
+  exec python3 - "$ROOT_DIR/.marathon/codex-build.lock" "$0" "$@" <<'PYLOCK'
+import fcntl
+import os
+import subprocess
+import sys
+
+with open(sys.argv[1], "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    environment = dict(os.environ, MARATHON_CODEX_BUILD_LOCK_OWNER=str(os.getpid()))
+    raise SystemExit(subprocess.call(["bash", *sys.argv[2:]], env=environment))
+PYLOCK
+fi
 source "$ROOT_DIR/scripts/apply_codex_patches.sh"
 BUILD_CODEX_DIR="$TARGET_CODEX_DIR"
 
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${MARATHON_CODEX_TARGET_DIR:-$ROOT_DIR/.marathon/codex-target}}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${MARATHON_CODEX_TARGET_DIR:-$ROOT_DIR/.marathon/codex-target-cache}}"
 
 cleanup() {
   [[ -z "$INSTALL_TMP" ]] || rm -f "$INSTALL_TMP"

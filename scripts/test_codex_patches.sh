@@ -63,6 +63,7 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-tui \
     status_line_context_tokens_renders_live_context_count
   just test -p codex-tui turn_throughput
+  just test -p codex-tui --lib thread_title
   just test -p codex-app-server --test all \
     -E 'test(turn_start_emits_raw_response_completed_with_upstream_usage) | test(thread_compact_start_triggers_compaction_and_returns_empty_response)'
   just test -p codex-tui \

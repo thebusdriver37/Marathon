@@ -1,0 +1,186 @@
+diff --git a/codex-rs/tui/src/app/thread_title.rs b/codex-rs/tui/src/app/thread_title.rs
+index 72abb5810b..afcf675840 100644
+--- a/codex-rs/tui/src/app/thread_title.rs
++++ b/codex-rs/tui/src/app/thread_title.rs
+@@ -39,6 +39,14 @@ impl App {
+         destination: ThreadTitleDestination,
+         prompt: String,
+     ) {
++        // A local runtime has one leased inference slot. Background naming
++        // evicts the conversation prefix and delays the next user turn.
++        // Keep the provisional title; explicit rename suggestions still work.
++        if self.chat_widget.config_ref().model_provider_id == "marathon-local"
++            && matches!(destination, ThreadTitleDestination::Automatic { .. })
++        {
++            return;
++        }
+         let request_handle = app_server.request_handle();
+         let model = if self.chat_widget.config_ref().model_provider_id == "openai"
+             && self.chat_widget.has_chatgpt_account()
+diff --git a/codex-rs/tui/src/app/thread_title_tests.rs b/codex-rs/tui/src/app/thread_title_tests.rs
+index 6044fd82a1..820340936a 100644
+--- a/codex-rs/tui/src/app/thread_title_tests.rs
++++ b/codex-rs/tui/src/app/thread_title_tests.rs
+@@ -126,7 +126,7 @@ async fn slash_rename_generates_editable_title_through_embedded_app_server()
+     )
+     .await;
+     let codex_home = tempdir()?;
+-    let provider_id = "thread-title-test";
++    let provider_id = "marathon-local";
+     std::fs::write(
+         codex_home.path().join("config.toml"),
+         format!(
+@@ -186,6 +186,21 @@ async fn slash_rename_generates_editable_title_through_embedded_app_server()
+         });
+     while event_rx.try_recv().is_ok() {}
+ 
++    // Automatic naming must not spawn an inference request on a local slot.
++    app.generate_thread_title(
++        &app_server,
++        thread_id,
++        crate::app_event::ThreadTitleDestination::Automatic {
++            expected_title: "Fix the login timeout".to_string(),
++        },
++        thread_title_prompt("Fix the login timeout"),
++    );
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_millis(100), event_rx.recv())
++            .await
++            .is_err()
++    );
++
+     app.chat_widget.apply_external_edit("/rename".to_string());
+     app.chat_widget
+         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index 09797a5c93..d74f9afefb 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -82,6 +82,15 @@ impl ChatWidget {
+                                 .set_generation_stage(GenerationStage::Answering);
+                             self.refresh_status_line();
+                         }
++                        ThreadItem::CommandExecution { .. }
++                        | ThreadItem::FileChange { .. }
++                        | ThreadItem::McpToolCall { .. }
++                        | ThreadItem::DynamicToolCall { .. }
++                        | ThreadItem::WebSearch { .. }
++                        | ThreadItem::CollabAgentToolCall { .. } => {
++                            self.turn_throughput.record_first_output(Instant::now());
++                            self.refresh_status_line();
++                        }
+                         _ => {}
+                     }
+                 }
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+index 8bcd98975e..85ea7c87c3 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+@@ -6,4 +6,4 @@ expression: normalized_backend_snapshot(terminal.backend())
+ "                                                                        "
+ "› Ask Codex to do anything                                              "
+ "                                                                        "
+-"  60.6 tok/s turn avg · first output 2.5s · total 202s                  "
++"  60.6 tok/s turn avg · first activity 2.5s · total 202s                "
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index 97d5aba5f4..940ecdbf96 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -427,7 +427,7 @@ impl ChatWidget {
+             |sample| format!("{:.1} tok/s {rate_label}", sample.tokens_per_second),
+         );
+         if let Some(latency) = self.turn_throughput.time_to_first_output() {
+-            label.push_str(&format!(" · first output {}", format_latency(latency)));
++            label.push_str(&format!(" · first activity {}", format_latency(latency)));
+         }
+         label.push_str(&format!(" · total {}", format_latency(elapsed)));
+         Some(label)
+diff --git a/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__status_and_layout__status_line_latest_decode.snap b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__status_and_layout__status_line_latest_decode.snap
+index 28c78da38e..2b9a8aedbd 100644
+--- a/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__status_and_layout__status_line_latest_decode.snap
++++ b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__status_and_layout__status_line_latest_decode.snap
+@@ -2,4 +2,4 @@
+ source: tui/src/chatwidget/tests/status_and_layout.rs
+ expression: "live_label.split(\" · total\").next().unwrap()"
+ ---
+-105.0 tok/s decode · first output 2.5s
++105.0 tok/s decode · first activity 2.5s
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 640cec03e3..40ef628ff6 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -3026,7 +3026,7 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+ 
+     assert_eq!(
+         status_line_text(&chat),
+-        Some("60.6 tok/s turn avg · first output 2.5s · total 202s".to_string())
++        Some("60.6 tok/s turn avg · first activity 2.5s · total 202s".to_string())
+     );
+ 
+     let width = 72;
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+index fb65ea923b..b5cbd3a417 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+@@ -50,16 +50,23 @@ impl TurnThroughput {
+ 
+     pub(super) fn record_output_delta(
+         &mut self,
+-        _delta: &str,
++        delta: &str,
+         generation_stage: GenerationStage,
+         now: Instant,
+     ) {
++        if delta.is_empty() {
++            return;
++        }
++        self.record_first_output(now);
++        self.generation_stage = Some(generation_stage);
++    }
++
++    pub(super) fn record_first_output(&mut self, now: Instant) {
+         if self.time_to_first_output.is_none()
+             && let Some(turn_started_at) = self.turn_started_at
+         {
+             self.time_to_first_output = Some(now.saturating_duration_since(turn_started_at));
+         }
+-        self.generation_stage = Some(generation_stage);
+     }
+ 
+     pub(super) fn complete_response(
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+index eb6c202ec6..65e789f471 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+@@ -197,3 +197,31 @@ fn latest_call_recovers_after_missing_timings_but_turn_average_does_not() {
+     throughput.finish_turn(Instant::now());
+     assert_eq!(throughput.sample(), None);
+ }
++
++#[test]
++fn tool_activity_precedes_later_text_and_empty_deltas_do_not_start_the_clock() {
++    let start = Instant::now();
++    let mut throughput = TurnThroughput::default();
++    throughput.start_turn(start);
++    throughput.record_output_delta(
++        "",
++        GenerationStage::Thinking,
++        start + Duration::from_secs(1),
++    );
++    assert_eq!(throughput.time_to_first_output(), None);
++    throughput.record_first_output(start + Duration::from_secs(5));
++    throughput.record_output_delta(
++        "Done",
++        GenerationStage::Answering,
++        start + Duration::from_secs(37),
++    );
++    throughput.finish_turn(start + Duration::from_secs(40));
++    assert_eq!(
++        throughput.time_to_first_output(),
++        Some(Duration::from_secs(5))
++    );
++    assert_eq!(
++        throughput.elapsed(start + Duration::from_secs(100)),
++        Some(Duration::from_secs(40))
++    );
++}
