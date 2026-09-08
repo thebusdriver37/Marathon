@@ -771,19 +771,18 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(selected, "third")
 
-    def test_noninteractive_launch_preserves_default_instance(self) -> None:
+    def test_noninteractive_launch_also_uses_a_free_instance(self) -> None:
         with (
             mock.patch.object(
                 runtime_module.sys,
                 "stdin",
                 mock.Mock(isatty=mock.Mock(return_value=False)),
             ),
-            mock.patch.object(runtime_module, "_runtime_lock_held") as held,
+            mock.patch.object(runtime_module, "_runtime_lock_held", side_effect=lambda name=None: name is None),
         ):
             selected = runtime_module.automatic_launch_instance()
 
-        self.assertIsNone(selected)
-        held.assert_not_called()
+        self.assertEqual(selected, "second")
 
     def test_pool_backend_leases_different_workers_without_gpu_pinning(self) -> None:
         model = fixture_model("qwen3.8-27b")
@@ -1409,6 +1408,12 @@ class CodexHomeTests(unittest.TestCase):
 
 
 class FrontendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Entry-point unit tests must never inspect or launch live user workers.
+        self.launch_selection = mock.patch.object(main_module, "automatic_launch_instance", return_value=None)
+        self.launch_selection.start()
+        self.addCleanup(self.launch_selection.stop)
+
     def test_resume_launcher_is_a_single_executable(self) -> None:
         with (
             mock.patch.dict(os.environ, {}, clear=True),
@@ -1424,7 +1429,7 @@ class FrontendTests(unittest.TestCase):
     def test_named_resume_keeps_a_configured_launcher_name(self) -> None:
         with mock.patch.dict(
             os.environ,
-            {"CODEX_CLI_NAME": "/opt/My Marathon/bin/marathon"},
+            {"MARATHON_CLI_NAME": "/opt/My Marathon/bin/marathon"},
             clear=True,
         ):
             command = _marathon_cli_name()
@@ -1433,6 +1438,13 @@ class FrontendTests(unittest.TestCase):
             command,
             "/opt/My Marathon/bin/marathon",
         )
+
+    def test_resume_does_not_inherit_stock_codex_identity(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {"CODEX_CLI_NAME": "codex"}, clear=True),
+            mock.patch("marathon_app.frontends.shutil.which", return_value="/usr/bin/marathon"),
+        ):
+            self.assertEqual(_marathon_cli_name(), "marathon")
 
     def test_config_overrides_keep_order_across_nested_commands(self) -> None:
         arguments = [
@@ -1581,18 +1593,19 @@ class FrontendTests(unittest.TestCase):
             result = main_module.main([])
 
         self.assertEqual(result, 0)
-        relaunch.assert_called_once_with("second", [])
+        relaunch.assert_called_once_with("second", [], main_module.marathon_codex_home())
         run.assert_not_called()
 
     def test_codex_child_uses_marathon_resume_command(self) -> None:
         model = fixture_model()
-        runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"))
+        runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"), "third")
         completed = subprocess.CompletedProcess([], 0)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stock_home = root / "stock-codex"
             marathon_home = root / "marathon-codex"
+            runtime.session_home = marathon_home
             stock_home.mkdir()
             with (
                 mock.patch.dict(

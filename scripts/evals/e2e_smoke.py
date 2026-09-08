@@ -148,7 +148,7 @@ def main():
         "    Path('heartbeat.txt').write_text(str(tick))\n    time.sleep(0.1)\n"
         "Path('late.txt').write_text('FINISHED')\n")
     instance = f"smoke-{os.getpid()}"
-    environment = dict(os.environ, TERM="xterm-256color", CODEX_CLI_NAME=str(LAUNCHER),
+    environment = dict(os.environ, TERM="xterm-256color", CODEX_CLI_NAME="codex", MARATHON_CLI_NAME=str(LAUNCHER),
                        MARATHON_CODEX_HOME=str(output / "codex-home"), MARATHON_RUNS_DIR=str(output / "runs"))
     sessions = output / "codex-home/instances" / instance / "sessions"
     terminals = []
@@ -182,6 +182,8 @@ def main():
         session = terminal.wait(lambda: next(iter(sessions.rglob("*.jsonl")), None))
         first = terminal.wait(lambda: completed(session) or None)[0]
         assert first["last_agent_message"].strip() == "READY", first
+        assert "OpenAI Codex" not in terminal.clean(), "Stock branding appeared in the Marathon header"
+        assert "Ask Marathon to do anything" in terminal.clean(), "Marathon prompt branding is missing"
         thread_id = next(e["payload"]["id"] for e in read_events(session) if e.get("type") == "session_meta")
         latencies = [first.get("time_to_first_token_ms")]
         for _ in range(3):
@@ -252,7 +254,7 @@ def main():
         match = re.search(r"To continue this session, run:\s*\r?\n\s*([^\r\n]+)", terminal.clean())
         assert match, terminal.clean()[-1500:]
         command = match.group(1).strip()
-        assert shlex.split(command) == [str(LAUNCHER), "--instance", instance, "resume", thread_id], command
+        assert shlex.split(command) == [str(LAUNCHER), "resume", thread_id], command
         resumed = Terminal(["bash", "-lc", command], project, environment, output / "resume.terminal.txt")
         terminals.append(resumed)
         resumed.wait(lambda: PHRASE in resumed.clean())

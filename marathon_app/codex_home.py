@@ -89,6 +89,30 @@ def _path_present(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
+def session_home_for_id(session_id: str) -> Path:
+    """Locate a saved UUID only inside Marathon's default and named homes."""
+    try:
+        canonical = str(uuid.UUID(session_id))
+    except ValueError as error:
+        raise ValueError("Use a session ID from Marathon's printed resume command.") from error
+    root = marathon_codex_home()
+    homes = [root]
+    instances = root / "instances"
+    if instances.is_dir():
+        homes.extend(path for path in instances.iterdir() if path.is_dir())
+    matches = []
+    for home in homes:
+        for category in ("sessions", "archived_sessions"):
+            if any((home / category).rglob(f"*-{canonical}.jsonl")):
+                matches.append(home)
+                break
+    if not matches:
+        raise ValueError(f"Marathon session {canonical} was not found.")
+    if len(matches) > 1:
+        raise ValueError(f"Session {canonical} exists in multiple Marathon homes; select one with --instance.")
+    return matches[0]
+
+
 def _share_path(source: Path, destination: Path) -> None:
     if not source.exists():
         return

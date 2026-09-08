@@ -13,11 +13,20 @@ The `marathon dashboard` command exposes model profiles, alternate frontends, wa
 `marathon exec PROMPT` uses the same supervised lifecycle for headless and CI work, including starting the remembered model and cleaning it up afterward.
 `marathon codex -- CODEX_ARGS` forwards Codex flags without bypassing supervision.
 
-## Named Instances
+## Automatic Workers and Named Instances
+
+Run `marathon` to start a conversation on a free worker, or `marathon resume <ID>` to continue a saved conversation on a free worker.
+No instance flag is needed for either operation.
+When all workers are occupied, Marathon reports `No free worker` and exits.
+This also applies to headless `marathon exec` and `marathon fork <ID>`.
+Printed resume commands contain only the Marathon launcher, `resume`, and the session ID.
+IDs from older named instances are located automatically without moving their session files.
+New automatic launches share Marathon's default conversation history, independently of their runtime worker.
+The default resume picker shows that shared history; older explicitly named histories remain available by ID or through their optional named picker.
 
 The default instance preserves Marathon's original paths and configured ports.
 A named instance uses the same model catalog and runtime profiles but owns independent mutable state.
-When the default instance is active, another plain interactive `marathon` launch automatically selects `second`, then `third`.
+Automatic launches allocate the internal default, second, or third runtime as needed, while the backend leases an available worker independently.
 Pass `--instance NAME` when you want a stable custom identity.
 
 Configure local GPU policy in `~/.config/marathon/catalog.toml`:
@@ -56,7 +65,8 @@ Instance identity applies to `dashboard`, `codex`, `exec`, `hermes`, `direct`, `
 For example, `marathon --instance gpu23 resume` sees only that instance's Codex sessions and starts only that instance's backend.
 
 Named writable data uses `instances/NAME/` below each normal root.
-This includes the runtime lock and session, logs, traces, generated model catalog, router state, slot prompt cache, remembered selection, and Marathon Codex home.
+This includes the runtime lock and session, logs, traces, generated model catalog, router state, slot prompt cache, and remembered selection.
+Explicit named launches also retain their separate Marathon conversation home.
 The default instance never moves, so existing installs and scripts retain their original behavior.
 
 ## Prompt Prefix Cache
@@ -294,6 +304,10 @@ Set `enabled = false` to retain an entry without showing it in the model menu.
 
 Marathon sessions remain in Marathon's isolated Codex session store and are tagged with the `marathon-local` provider.
 The resume picker also filters on that provider, and Marathon-branded sessions print `marathon resume <id>` when they exit.
+Marathon uses red startup and status headings, a Marathon input prompt, and its own terminal app name to distinguish the patched frontend from stock Codex.
+The default terminal title includes the app name, activity, and current directory; `/title` can customize it.
+Resume commands ignore inherited `CODEX_CLI_NAME` values from stock Codex.
+Set `MARATHON_CLI_NAME` only when a custom Marathon launcher path is needed; paths containing spaces are quoted automatically.
 The `marathon resume` and `marathon fork` commands start the remembered backend before opening Codex and stop it again afterward.
 
 Marathon bounds tool outputs and individual model responses to protect the context window from accidental unbounded output.

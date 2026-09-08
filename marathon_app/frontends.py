@@ -52,7 +52,8 @@ def _hermes_binary() -> str:
 
 
 def _marathon_cli_name() -> str:
-    configured = os.environ.get("CODEX_CLI_NAME")
+    # Do not inherit the stock Codex executable identity into Marathon hints.
+    configured = os.environ.get("MARATHON_CLI_NAME")
     if configured and configured.strip():
         command = configured.strip()
     elif shutil.which("marathon"):
@@ -132,6 +133,7 @@ def codex_command(
         "-m", runtime.model.alias,
         "-c", f"model_catalog_json={json.dumps(str(runtime.catalog_file))}",
         "-c", 'web_search="cached"',
+        "-c", 'tui.terminal_title=["app-name","status","current-dir"]',
     ]
     if shared_profile:
         command.extend(["--profile", shared_profile])
@@ -157,7 +159,13 @@ def hardened_codex_available() -> bool:
 
 def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
     instance = getattr(getattr(runtime, "instance", None), "name", None)
-    environment, codex_home, shared_profile = codex_environment(instance=instance)
+    session_home = getattr(runtime, "session_home", None)
+    if session_home is None:
+        environment, codex_home, shared_profile = codex_environment(instance=instance)
+    else:
+        environment, codex_home, shared_profile = codex_environment(
+            dict(os.environ, MARATHON_CODEX_HOME=str(session_home))
+        )
     command = codex_command(runtime, extra_args, shared_profile=shared_profile)
     require_hardened_codex(command[0])
     missing = missing_runtime_tools("codex")
@@ -165,7 +173,7 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
         raise RuntimeError("Missing " + ", ".join(missing) + "; see docs/SETUP.md")
     environment["MARATHON_ROUTER_TOKEN"] = runtime.router_token
     environment["CODEX_CLI_NAME"] = _marathon_cli_name()
-    environment["CODEX_CLI_INSTANCE"] = instance or ""
+    environment["CODEX_CLI_INSTANCE"] = ""
     before = snapshot_sessions(codex_home)
     started = time.monotonic()
     runtime.record(

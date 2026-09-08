@@ -457,15 +457,15 @@ def _runtime_lock_held(instance: str | None = None) -> bool:
 
 
 def automatic_launch_instance() -> str | None:
-    """Choose a free secondary identity for a plain interactive launch."""
+    """Choose an available runtime identity for an automatic launch."""
 
-    if not sys.stdin.isatty() or not _runtime_lock_held():
+    if not _runtime_lock_held():
         return None
     for name in AUTOMATIC_INSTANCE_NAMES:
         if not _runtime_lock_held(name):
             return name
     raise RuntimeError(
-        "Marathon's default, second, and third instances are already open"
+        "No free worker. All Marathon workers are busy; try again when one is free."
     )
 
 
@@ -473,6 +473,10 @@ def _set_parent_death_signal() -> None:
     if sys.platform.startswith("linux"):
         libc = ctypes.CDLL(None)
         libc.prctl(1, signal.SIGTERM)
+
+
+class RuntimeBusyError(RuntimeError):
+    """Another launch acquired this runtime identity first."""
 
 
 class Runtime:
@@ -509,6 +513,7 @@ class Runtime:
         self._pool_lock: TextIO | None = None
         self._pool_model: str | None = None
         self._cleaned = False
+        self.session_home: Path | None = None
         self._backend_watch_enabled = False
         self._backend_failure_reported = False
         self._old_handlers: dict[int, object] = {}
@@ -625,7 +630,7 @@ class Runtime:
                     f"Marathon instance '{self.instance.name}' is already open{detail}. "
                     f"Return to that terminal, or run '{stop_command}' if you want to close it."
                 )
-            raise RuntimeError(message) from error
+            raise RuntimeBusyError(message) from error
         self._owns_lock = True
         self._lock.seek(0)
         self._lock.truncate()
@@ -673,8 +678,8 @@ class Runtime:
             self._pool_model = model_id
             return
         raise RuntimeError(
-            f"All {len(backend.pool_models)} workers in backend pool "
-            f"'{backend.id}' are already assigned to running Marathon instances"
+            f"No free worker. All {len(backend.pool_models)} workers are already assigned "
+            "to running Marathon sessions; try again when one is free."
         )
 
     def _backend_api_key(self) -> str | None:

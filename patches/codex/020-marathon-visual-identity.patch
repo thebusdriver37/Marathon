@@ -1,0 +1,1587 @@
+diff --git a/codex-rs/tui/src/app/tests/key_chords.rs b/codex-rs/tui/src/app/tests/key_chords.rs
+index 62210a3476..22e21c0107 100644
+--- a/codex-rs/tui/src/app/tests/key_chords.rs
++++ b/codex-rs/tui/src/app/tests/key_chords.rs
+@@ -103,7 +103,7 @@ async fn completed_global_chord_reuses_the_existing_action_handler() -> Result<(
+         render_bottom_popup(&app.chat_widget, /*width*/ 80)
+             .replace(&test_path_display("/tmp/project"), "/tmp/project"),
+         @r"
+-        › Ask Codex to do anything
++        › Ask Marathon to do anything
+ 
+            ctrl + x … waiting for next key    esc cancel
+         "
+diff --git a/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__active_reconnect__reconnect_failed.snap b/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__active_reconnect__reconnect_failed.snap
+index 86c54bfc86..839756a041 100644
+--- a/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__active_reconnect__reconnect_failed.snap
++++ b/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__active_reconnect__reconnect_failed.snap
+@@ -5,6 +5,6 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
+ • Reconnect failed — check the endpoint, then relaunch (0s)
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+    ctrl+c quit
+diff --git a/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__backend_banner_fallback_tests__backend_banner_after_fallback.snap b/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__backend_banner_fallback_tests__backend_banner_after_fallback.snap
+index a39f4fd236..ff05a08dc2 100644
+--- a/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__backend_banner_fallback_tests__backend_banner_after_fallback.snap
++++ b/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__backend_banner_fallback_tests__backend_banner_after_fallback.snap
+@@ -1,7 +1,6 @@
+ ---
+ source: tui/src/app/tests/backend_banner_fallback_tests.rs
+-assertion_line: 76
+-expression: rendered
++expression: normalize_snapshot_paths(rendered)
+ ---
+   Selected model usage exhausted
+   Add credits to use this model again.
+@@ -10,6 +9,6 @@ expression: rendered
+ 
+   Press a number to choose · esc to dismiss · type to continue
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.2 medium · /tmp/project
+diff --git a/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__backend_banner_fallback_tests__backend_banner_fallback_unavailable.snap b/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__backend_banner_fallback_tests__backend_banner_fallback_unavailable.snap
+index b90f77cb51..95cb07c3a3 100644
+--- a/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__backend_banner_fallback_tests__backend_banner_fallback_unavailable.snap
++++ b/codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__backend_banner_fallback_tests__backend_banner_fallback_unavailable.snap
+@@ -1,8 +1,7 @@
+ ---
+ source: tui/src/app/tests/backend_banner_fallback_tests.rs
+-assertion_line: 234
+-expression: rendered
++expression: normalize_snapshot_paths(rendered)
+ ---
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.4 default · /tmp/project
+diff --git a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__title_setup__tests__terminal_title_setup_basic.snap b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__title_setup__tests__terminal_title_setup_basic.snap
+index be5cecebf1..4ed50574d3 100644
+--- a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__title_setup__tests__terminal_title_setup_basic.snap
++++ b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__title_setup__tests__terminal_title_setup_basic.snap
+@@ -12,7 +12,7 @@ expression: "render_lines(&view, 84)"
+   [x] activity           Spinner while working, action-required message while blo…  
+   [x] run-state          Compact session run-state text (Ready, Working, Thinking)  
+   [x] thread-title       Current thread title, or thread identifier when unnamed    
+-  [ ] app-name           Codex app name                                             
++  [ ] app-name           Marathon app name                                          
+   [ ] current-dir        Current working directory                                  
+   [ ] git-branch         Current Git branch (omitted when unavailable)              
+   [ ] context-remaining  Percentage of context window remaining (omitted when unk…  
+diff --git a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+index b0c1ccc1ba..df8353f508 100644
+--- a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
++++ b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+@@ -45,7 +45,7 @@ pub(crate) enum StatusSurfacePreviewItem {
+ impl StatusSurfacePreviewItem {
+     fn placeholder(self) -> &'static str {
+         match self {
+-            StatusSurfacePreviewItem::AppName => "codex",
++            StatusSurfacePreviewItem::AppName => "Marathon",
+             StatusSurfacePreviewItem::ProjectName => "my-project",
+             StatusSurfacePreviewItem::ProjectRoot => "my-project",
+             StatusSurfacePreviewItem::CurrentDir => "~/my-project/subdir",
+diff --git a/codex-rs/tui/src/bottom_pane/title_setup.rs b/codex-rs/tui/src/bottom_pane/title_setup.rs
+index 146d684791..ae2170e97d 100644
+--- a/codex-rs/tui/src/bottom_pane/title_setup.rs
++++ b/codex-rs/tui/src/bottom_pane/title_setup.rs
+@@ -95,7 +95,7 @@ pub(crate) enum TerminalTitleItem {
+ impl TerminalTitleItem {
+     pub(crate) fn description(self) -> &'static str {
+         match self {
+-            TerminalTitleItem::AppName => "Codex app name",
++            TerminalTitleItem::AppName => "Marathon app name",
+             TerminalTitleItem::Project => "Project name (falls back to current directory name)",
+             TerminalTitleItem::CurrentDir => "Current working directory",
+             TerminalTitleItem::Spinner => {
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index e58e1d1583..78159547ea 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -1998,7 +1998,7 @@ impl Drop for ChatWidget {
+     }
+ }
+ 
+-const PLACEHOLDER: &str = "Ask Codex to do anything";
++const PLACEHOLDER: &str = "Ask Marathon to do anything";
+ const SIDE_PLACEHOLDER: &str = "Ask a follow-up question";
+ 
+ // Extract the first bold (Markdown) element in the form **...** from `s`.
+diff --git a/codex-rs/tui/src/chatwidget/rendering_tests.rs b/codex-rs/tui/src/chatwidget/rendering_tests.rs
+index beac194da6..6bd708fbd6 100644
+--- a/codex-rs/tui/src/chatwidget/rendering_tests.rs
++++ b/codex-rs/tui/src/chatwidget/rendering_tests.rs
+@@ -169,7 +169,7 @@ async fn initial_session_header_starts_at_the_top_of_the_viewport() {
+ 
+     insta::assert_snapshot!(header.replace(&cwd, &normalized_cwd), @r"
+     ╭───────────────────────────────────────╮
+-    │ >_ OpenAI Codex (v<VERSION>)              │
++    │ >_ Marathon (v<VERSION>)                │
+     │                                       │
+     │ model:     loading   /model to change │
+     │ directory: /tmp/project               │
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_denied_renders_denied_request.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_denied_renders_denied_request.snap
+index 6bbd8a657c..9fcac7a6f6 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_denied_renders_denied_request.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_denied_renders_denied_request.snap
+@@ -15,6 +15,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+ • Working (0s • esc to interrupt)
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.6-sol default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_timed_out_renders_timed_out_request.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_timed_out_renders_timed_out_request.snap
+index 72c6586ad9..6b63d25fab 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_timed_out_renders_timed_out_request.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_guardian_review_timed_out_renders_timed_out_request.snap
+@@ -15,6 +15,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+ • Working (0s • esc to interrupt)
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.6-sol default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_mcp_startup_failure_renders_warning_history.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_mcp_startup_failure_renders_warning_history.snap
+index 7a74c0a052..c3f877ff01 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_mcp_startup_failure_renders_warning_history.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__app_server_mcp_startup_failure_renders_warning_history.snap
+@@ -9,6 +9,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+ ⚠ MCP startup incomplete (failed: alpha)
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.6-sol default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chatwidget_tall.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chatwidget_tall.snap
+index 603033a275..f1bd7313e3 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chatwidget_tall.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chatwidget_tall.snap
+@@ -23,6 +23,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+   ↳ Hello, world! 14
+   ↳ Hello, world! 15
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+-  gpt-5.6-sol default · /tmp/project
++  gpt-5.6-sol default · /tmp/project · Prefill
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__compact_queues_user_messages_snapshot.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__compact_queues_user_messages_snapshot.snap
+index 0ff879f3a5..e62cc53fda 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__compact_queues_user_messages_snapshot.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__compact_queues_user_messages_snapshot.snap
+@@ -17,6 +17,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+ • Messages to be submitted at end of turn
+   ↳ Steer submitted while /compact was running.
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+-  gpt-5.6-sol default · /tmp/project
++  gpt-5.6-sol default · /tmp/project · Prefill
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_hook_with_output_flushes_immediately_snapshot.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_hook_with_output_flushes_immediately_snapshot.snap
+index bb8be43b02..17cec742e9 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_hook_with_output_flushes_immediately_snapshot.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_hook_with_output_flushes_immediately_snapshot.snap
+@@ -8,7 +8,7 @@ activity:
+ "• Checking command                                                              "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+ history:
+@@ -18,7 +18,7 @@ completed
+ activity:
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+ history:
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_same_id_hook_output_survives_restart_snapshot.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_same_id_hook_output_survives_restart_snapshot.snap
+index f56015d661..43406e6dce 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_same_id_hook_output_survives_restart_snapshot.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_same_id_hook_output_survives_restart_snapshot.snap
+@@ -8,7 +8,7 @@ activity:
+ "• Checking stop condition                                                       "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+ history:
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_turn_clears_visible_running_hook.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_turn_clears_visible_running_hook.snap
+index 37e8d9eb86..5f126bef0b 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_turn_clears_visible_running_hook.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_turn_clears_visible_running_hook.snap
+@@ -7,12 +7,12 @@ before completion:
+ "• Working (0s • esc to interrupt) · Running hook                                "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+ after completion:
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · turn avg n/a · total 0.0s                "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__connector_scope_invalidation.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__connector_scope_invalidation.snap
+index b6ac615744..ea34630182 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__connector_scope_invalidation.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__connector_scope_invalidation.snap
+@@ -13,6 +13,6 @@ Before account change:
+   Press enter to confirm or esc to go back
+ 
+ After account change:
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.6-sol default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__esc_interrupt_goal_paused_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__esc_interrupt_goal_paused_footer.snap
+index fd9d023c36..95d696b7db 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__esc_interrupt_goal_paused_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__esc_interrupt_goal_paused_footer.snap
+@@ -6,6 +6,6 @@ expression: snapshot
+ "• Working (0s • esc to interrupt)                                               "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                Goal paused (/goal resume)  "
++"  gpt-5.6-sol default · /tmp/project · Prefill      Goal paused (/goal resume)  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_exec_is_hidden_from_history.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_exec_is_hidden_from_history.snap
+index 651376f853..f60efb00b8 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_exec_is_hidden_from_history.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_exec_is_hidden_from_history.snap
+@@ -10,6 +10,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+ 
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.6-sol default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_request_permissions_clears_status_without_history.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_request_permissions_clears_status_without_history.snap
+index 417c1164ea..27e594ddc5 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_request_permissions_clears_status_without_history.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_approved_request_permissions_clears_status_without_history.snap
+@@ -10,6 +10,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+ • Working (0s • esc to interrupt)
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.6-sol default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_denied_exec_renders_warning_and_denied_request.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_denied_exec_renders_warning_and_denied_request.snap
+index b77d2ca174..e2646c4836 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_denied_exec_renders_warning_and_denied_request.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_denied_exec_renders_warning_and_denied_request.snap
+@@ -19,6 +19,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+ • Working (0s • esc to interrupt)
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.6-sol default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_goal_continuation_drops_stale_reviews.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_goal_continuation_drops_stale_reviews.snap
+index 5e2806fb3d..df64205de1 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_goal_continuation_drops_stale_reviews.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_goal_continuation_drops_stale_reviews.snap
+@@ -6,6 +6,6 @@ expression: normalize_snapshot_paths(rendered)
+   └ rm -rf '/tmp/current-review'
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+-  gpt-5.6-sol default · /tmp/project
++  gpt-5.6-sol default · /tmp/project · Prefill
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_parallel_reviews_render_aggregate_status.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_parallel_reviews_render_aggregate_status.snap
+index 71c92e26b1..d09655f8a2 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_parallel_reviews_render_aggregate_status.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_parallel_reviews_render_aggregate_status.snap
+@@ -7,6 +7,6 @@ expression: normalize_snapshot_paths(rendered)
+     • rm -rf '/tmp/guardian target 2'
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+-  gpt-5.6-sol default · /tmp/project
++  gpt-5.6-sol default · /tmp/project · Prefill
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_timed_out_exec_renders_warning_and_timed_out_request.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_timed_out_exec_renders_warning_and_timed_out_request.snap
+index 748a3f85ff..ae1ff69e09 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_timed_out_exec_renders_warning_and_timed_out_request.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_timed_out_exec_renders_warning_and_timed_out_request.snap
+@@ -19,6 +19,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+ • Working (0s • esc to interrupt)
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.6-sol default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_write_stdin_review_status.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_write_stdin_review_status.snap
+index e805f92b49..dd0b93f85f 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_write_stdin_review_status.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_write_stdin_review_status.snap
+@@ -6,6 +6,6 @@ expression: "normalize_snapshot_paths(render_bottom_popup(&chat, 80))"
+   └ send input to terminal 42: "confirm\n"
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+-  gpt-5.6-sol default · /tmp/project
++  gpt-5.6-sol default · /tmp/project · Prefill
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hidden_shell_paste_queued_preview.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hidden_shell_paste_queued_preview.snap
+index 6a631ff51c..314d30d2c0 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hidden_shell_paste_queued_preview.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hidden_shell_paste_queued_preview.snap
+@@ -1,13 +1,13 @@
+ ---
+ source: tui/src/chatwidget/tests/composer_submission.rs
+-expression: normalize_snapshot_paths(render_bottom_popup(&chat, 80))
++expression: "normalize_snapshot_paths(render_bottom_popup(&chat, 80))"
+ ---
+ • Working (0s • esc to interrupt)
+ 
+ • Queued follow-up inputs
+   ↳ [Pasted Content 1006 chars]
+-    ⌥ + ↑ edit last queued message
++    shift + ← edit last queued message
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+-  gpt-5.6-sol default · /tmp/project
++  gpt-5.6-sol default · /tmp/project · Prefill
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hook_runs_while_exec_active_snapshot.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hook_runs_while_exec_active_snapshot.snap
+index 01050a7906..e5a93c374c 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hook_runs_while_exec_active_snapshot.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hook_runs_while_exec_active_snapshot.snap
+@@ -12,7 +12,7 @@ exec and hook running:
+ "• Working (0s • esc to interrupt) · checking output policy                      "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+ history after exec:
+@@ -24,7 +24,7 @@ hook running after exec:
+ "• Working (0s • esc to interrupt) · checking output policy                      "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+ quiet hook completed:
+@@ -32,6 +32,6 @@ quiet hook completed:
+ "• Working (0s • esc to interrupt)                                               "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__image_generation_begin_restores_working_status.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__image_generation_begin_restores_working_status.snap
+index 65070af637..c1c9968464 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__image_generation_begin_restores_working_status.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__image_generation_begin_restores_working_status.snap
+@@ -6,6 +6,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ "• Working (0s • esc to interrupt)                                               "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__interrupted_turn_clears_visible_running_hook.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__interrupted_turn_clears_visible_running_hook.snap
+index 80069ba40c..0bbe7c5b22 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__interrupted_turn_clears_visible_running_hook.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__interrupted_turn_clears_visible_running_hook.snap
+@@ -7,12 +7,12 @@ before interrupt:
+ "• Working (0s • esc to interrupt) · checking command policy                     "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+ after interrupt:
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · turn avg n/a · total 0.0s                "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__long_running_hook_below_background_activity_row.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__long_running_hook_below_background_activity_row.snap
+index c35eeb638b..d60cd89279 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__long_running_hook_below_background_activity_row.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__long_running_hook_below_background_activity_row.snap
+@@ -8,15 +8,15 @@ expression: "format!(\"80 columns:\\n{}\\n120 columns:\\n{}\", hook_status_frame
+ "  └ checking command policy for deployment commands, production credentials, an…"
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+ 120 columns:
+ "                                                                                                                        "
+ "• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close                        "
+ "  └ checking command policy for deployment commands, production credentials, and paths containing 日本語 before continu…" Hidden by multi-width symbols: [(99, " "), (101, " "), (103, " ")]
+ "                                                                                                                        "
+ "                                                                                                                        "
+-"› Ask Codex to do anything                                                                                              "
++"› Ask Marathon to do anything                                                                                           "
+ "                                                                                                                        "
+-"  gpt-5.6-sol default · /tmp/project                                                                                    "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                                                          "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__mcp_startup_header_booting.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__mcp_startup_header_booting.snap
+index 014c13cd11..17a28fcb57 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__mcp_startup_header_booting.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__mcp_startup_header_booting.snap
+@@ -6,6 +6,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ "• Booting MCP server: alpha (0s • esc to interrupt)                             "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__mixed_running_hooks_share_background_activity_row.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__mixed_running_hooks_share_background_activity_row.snap
+index 047611adf9..fa2f967776 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__mixed_running_hooks_share_background_activity_row.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__mixed_running_hooks_share_background_activity_row.snap
+@@ -8,14 +8,14 @@ expression: "format!(\"80 columns:\\n{}\\n120 columns:\\n{}\", hook_status_frame
+ "  └ Running hooks                                                               "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+ 120 columns:
+ "                                                                                                                        "
+ "• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close · Running hooks        "
+ "                                                                                                                        "
+ "                                                                                                                        "
+-"› Ask Codex to do anything                                                                                              "
++"› Ask Marathon to do anything                                                                                           "
+ "                                                                                                                        "
+-"  gpt-5.6-sol default · /tmp/project                                                                                    "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                                                          "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__overlapping_hook_live_cell_snapshot.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__overlapping_hook_live_cell_snapshot.snap
+index d7cf088ac6..20aa177121 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__overlapping_hook_live_cell_snapshot.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__overlapping_hook_live_cell_snapshot.snap
+@@ -8,9 +8,9 @@ activity:
+ "• Thinking (0s • esc to interrupt) · checking command policy                    "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+ history:
+ <empty>
+ 
+@@ -20,9 +20,9 @@ activity:
+ "• Thinking (0s • esc to interrupt) · Running hooks                              "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+ history:
+ <empty>
+ 
+@@ -32,9 +32,9 @@ activity:
+ "• Thinking (0s • esc to interrupt) · checking output policy                     "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+ history:
+ <empty>
+ 
+@@ -44,8 +44,8 @@ activity:
+ "• Thinking (0s • esc to interrupt)                                              "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+ history:
+ <empty>
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__pending_token_activity_refresh_renders_above_composer_snapshot.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__pending_token_activity_refresh_renders_above_composer_snapshot.snap
+index 3197796d1f..8a6581669d 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__pending_token_activity_refresh_renders_above_composer_snapshot.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__pending_token_activity_refresh_renders_above_composer_snapshot.snap
+@@ -9,6 +9,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+    Loading...
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   gpt-5.6-sol default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__preamble_keeps_working_status.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__preamble_keeps_working_status.snap
+index 65070af637..c1c9968464 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__preamble_keeps_working_status.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__preamble_keeps_working_status.snap
+@@ -6,6 +6,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ "• Working (0s • esc to interrupt)                                               "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__reasoning_delta_restores_recreated_status_indicator.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__reasoning_delta_restores_recreated_status_indicator.snap
+index 9201be6555..2de71b55ef 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__reasoning_delta_restores_recreated_status_indicator.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__reasoning_delta_restores_recreated_status_indicator.snap
+@@ -6,6 +6,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ "• Checking files (0s • esc to interrupt) · 1 background terminal running · /ps …"
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__renamed_thread_footer_title.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__renamed_thread_footer_title.snap
+index 536edffead..895facf656 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__renamed_thread_footer_title.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__renamed_thread_footer_title.snap
+@@ -4,6 +4,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.2 high · Roadmap cleanup                                                "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__review_queues_user_messages_snapshot.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__review_queues_user_messages_snapshot.snap
+index 691523b8d0..891cf33fce 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__review_queues_user_messages_snapshot.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__review_queues_user_messages_snapshot.snap
+@@ -17,6 +17,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+ • Messages to be submitted at end of turn
+   ↳ Steer submitted while /review was running.
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+-  gpt-5.6-sol default · /tmp/project
++  gpt-5.6-sol default · /tmp/project · Prefill
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__running_hooks_share_background_activity_row.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__running_hooks_share_background_activity_row.snap
+index 18cab0743d..ab261d6303 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__running_hooks_share_background_activity_row.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__running_hooks_share_background_activity_row.snap
+@@ -8,15 +8,15 @@ expression: "format!(\"80 columns:\\n{}\\n120 columns:\\n{}\", hook_status_frame
+ "  └ checking command policy                                                     "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+ 120 columns:
+ "                                                                                                                        "
+ "• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close                        "
+ "  └ checking command policy                                                                                             "
+ "                                                                                                                        "
+ "                                                                                                                        "
+-"› Ask Codex to do anything                                                                                              "
++"› Ask Marathon to do anything                                                                                           "
+ "                                                                                                                        "
+-"  gpt-5.6-sol default · /tmp/project                                                                                    "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                                                          "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__session_end_hook_activity.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__session_end_hook_activity.snap
+index 144e7bf8ae..53d3d51b11 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__session_end_hook_activity.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__session_end_hook_activity.snap
+@@ -5,7 +5,7 @@ expression: "format!(\"before reveal:\\n{hidden}\\nrunning:\\n{running}\\ncomple
+ before reveal:
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+ running:
+@@ -13,12 +13,12 @@ running:
+ "• Saving session summary                                                        "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+ completed:
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__session_end_hook_activity_without_message.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__session_end_hook_activity_without_message.snap
+index b32dad2b4a..53a3a087cb 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__session_end_hook_activity_without_message.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__session_end_hook_activity_without_message.snap
+@@ -5,7 +5,7 @@ expression: "format!(\"before reveal:\\n{hidden}\\nrunning:\\n{running}\\ncomple
+ before reveal:
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+ running:
+@@ -13,12 +13,12 @@ running:
+ "• Running hook                                                                  "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+ completed:
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · /tmp/project                                            "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__side_context_label_shows_hidden_side.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__side_context_label_shows_hidden_side.snap
+index 64931540dd..8dbfa8be89 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__side_context_label_shows_hidden_side.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__side_context_label_shows_hidden_side.snap
+@@ -4,6 +4,6 @@ expression: terminal.backend()
+ ---
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol                                                ctrl + / for side  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_final_answer_hides_working_status.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_final_answer_hides_working_status.snap
+index dfa6b7a09b..d7301cbd31 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_final_answer_hides_working_status.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_final_answer_hides_working_status.snap
+@@ -9,6 +9,6 @@ expression: normalize_snapshot_paths(terminal.backend().vt100().screen().content
+ • 1
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+-  gpt-5 default · /tmp/project
++  gpt-5 default · /tmp/project · Prefill
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__slash_side_requests_forked_side_question_while_task_running.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__slash_side_requests_forked_side_question_while_task_running.snap
+index 507e8bf10f..223b162acc 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__slash_side_requests_forked_side_question_while_task_running.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__slash_side_requests_forked_side_question_while_task_running.snap
+@@ -6,6 +6,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ "• Working (0s • esc to interrupt)                                               "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default                                         Side starting...  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_estimated_thread_cost_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_estimated_thread_cost_footer.snap
+index d6e5058aec..bade851faa 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_estimated_thread_cost_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_estimated_thread_cost_footer.snap
+@@ -4,6 +4,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.6-sol default · 5.2 credits · ~$0.21                                    "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_fast_mode_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_fast_mode_footer.snap
+index 5848dac563..28a21fe05a 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_fast_mode_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_fast_mode_footer.snap
+@@ -4,6 +4,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.2 high                                                                  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_active_token_budget_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_active_token_budget_footer.snap
+index bbf2f9dea7..737113c1ac 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_active_token_budget_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_active_token_budget_footer.snap
+@@ -4,6 +4,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.4                                            Pursuing goal (40K / 50K)  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_complete_elapsed_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_complete_elapsed_footer.snap
+index 97253d2ec9..5664d6804b 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_complete_elapsed_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_goal_complete_elapsed_footer.snap
+@@ -4,6 +4,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.4                                           Goal achieved (2d 23h 42m)  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_context_remaining_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_context_remaining_footer.snap
+index 6200fdf108..6d01c6dd25 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_context_remaining_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_context_remaining_footer.snap
+@@ -4,6 +4,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.4 xhigh fast · Context 100% left · /tmp/project                         "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_fast_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_fast_footer.snap
+index 2ac794d2f0..f117b705f9 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_fast_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_fast_footer.snap
+@@ -4,6 +4,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.4 xhigh fast · Context 0% used · /tmp/project                           "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_plan_mode_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_plan_mode_footer.snap
+index c9d0e2e6c8..b2f42b8569 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_plan_mode_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_plan_mode_footer.snap
+@@ -4,6 +4,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+ "  gpt-5.2 medium                                Plan mode (shift+tab to cycle)  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+index 85ea7c87c3..f05877e48d 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+@@ -4,6 +4,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                        "
+ "                                                                        "
+-"› Ask Codex to do anything                                              "
++"› Ask Marathon to do anything                                           "
+ "                                                                        "
+ "  60.6 tok/s turn avg · first activity 2.5s · total 202s                "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_widget_active.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_widget_active.snap
+index d87052b5e0..a718dc0da5 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_widget_active.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_widget_active.snap
+@@ -6,6 +6,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ "• Analyzing (0s • esc to interrupt)                                             "
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Thinking                                 "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_hardcoded_only.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_hardcoded_only.snap
+index 8ff4227504..a01a978ac4 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_hardcoded_only.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_hardcoded_only.snap
+@@ -10,7 +10,7 @@ expression: terminal_title_popup_snapshot(&mut chat)
+ › [x] thread-title   Current thread title, or thread identifier when unnamed
+   [x] git-branch     Current Git branch (omitted when unavailable)
+   [x] task-progress  Latest task progress from update_plan (omitted until available)
+-  [ ] app-name       Codex app name
++  [ ] app-name       Marathon app name
+   [ ] project-name   Project name (falls back to current directory name)
+   [ ] current-dir    Current working directory
+   [ ] activity       Spinner while working, action-required message while blocked.
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_live_only.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_live_only.snap
+index 8c149b8cc9..99e5aafde4 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_live_only.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_live_only.snap
+@@ -11,7 +11,7 @@ expression: terminal_title_popup_snapshot(&mut chat)
+   [x] thread-title   Current thread title, or thread identifier when unnamed
+   [x] git-branch     Current Git branch (omitted when unavailable)
+   [x] task-progress  Latest task progress from update_plan (omitted until available)
+-  [ ] app-name       Codex app name
++  [ ] app-name       Marathon app name
+   [ ] current-dir    Current working directory
+   [ ] activity       Spinner while working, action-required message while blocked.
+   [ ] run-state      Compact session run-state text (Ready, Working, Thinking)
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_mixed.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_mixed.snap
+index b04e07bd9b..4a67bcc0bb 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_mixed.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_mixed.snap
+@@ -10,7 +10,7 @@ expression: terminal_title_popup_snapshot(&mut chat)
+ › [x] project-name   Project name (falls back to current directory name)
+   [x] thread-title   Current thread title, or thread identifier when unnamed
+   [x] task-progress  Latest task progress from update_plan (omitted until available)
+-  [ ] app-name       Codex app name
++  [ ] app-name       Marathon app name
+   [ ] current-dir    Current working directory
+   [ ] activity       Spinner while working, action-required message while blocked.
+   [ ] run-state      Compact session run-state text (Ready, Working, Thinking)
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_rate_limits.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_rate_limits.snap
+index c821ddce93..16f75c85be 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_rate_limits.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_rate_limits.snap
+@@ -9,7 +9,7 @@ expression: terminal_title_popup_snapshot(&mut chat)
+   >
+ › [x] monthly-limit  Remaining usage on the monthly usage limit (omitted when unavailable)
+   [x] weekly-limit   Remaining usage on the weekly usage limit (omitted when unavailable)
+-  [ ] app-name       Codex app name
++  [ ] app-name       Marathon app name
+   [ ] project-name   Project name (falls back to current directory name)
+   [ ] current-dir    Current working directory
+   [ ] activity       Spinner while working, action-required message while blocked.
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_thread_usage.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_thread_usage.snap
+index fe2b4d94c3..14c3ff1ddc 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_thread_usage.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__terminal_title_setup_popup_thread_usage.snap
+@@ -9,7 +9,7 @@ expression: terminal_title_popup_snapshot(&mut chat)
+   >
+ › [x] thread-credits         Estimated current-thread credits (Enterprise workspaces only; omitte…
+   [x] estimated-thread-cost  Estimated current-thread cost (Enterprise workspaces only; omitted w…
+-  [ ] app-name               Codex app name
++  [ ] app-name               Marathon app name
+   [ ] project-name           Project name (falls back to current directory name)
+   [ ] current-dir            Current working directory
+   [ ] activity               Spinner while working, action-required message while blocked.
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_begin_restores_working_status.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_begin_restores_working_status.snap
+index d21f0481f4..21ee24b92a 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_begin_restores_working_status.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_begin_restores_working_status.snap
+@@ -6,6 +6,6 @@ expression: normalized_backend_snapshot(terminal.backend())
+ "• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view…"
+ "                                                                                "
+ "                                                                                "
+-"› Ask Codex to do anything                                                      "
++"› Ask Marathon to do anything                                                   "
+ "                                                                                "
+-"  gpt-5.6-sol default · /tmp/project                                            "
++"  gpt-5.6-sol default · /tmp/project · Prefill                                  "
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_wait_status_renders_command_in_single_details_row.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_wait_status_renders_command_in_single_details_row.snap
+index e76f552444..49aac9d317 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_wait_status_renders_command_in_single_details_row.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_wait_status_renders_command_in_single_details_row.snap
+@@ -6,6 +6,6 @@ expression: normalize_snapshot_paths(rendered)
+   └ cargo test -p codex-core -- --exact…
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+-  gpt-5.6-sol default · /tmp/project
++  gpt-5.6-sol default · /tmp/project · Prefill
+diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+index 7bdc50c8c1..f01ae05166 100644
+--- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
++++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+@@ -852,7 +852,7 @@ impl ChatWidget {
+         now: Instant,
+     ) -> Option<String> {
+         match item {
+-            TerminalTitleItem::AppName => Some("codex".to_string()),
++            TerminalTitleItem::AppName => Some("Marathon".to_string()),
+             TerminalTitleItem::Project => self.terminal_title_project_name(),
+             TerminalTitleItem::CurrentDir => Some(Self::truncate_terminal_title_part(
+                 format_directory_display(self.status_line_cwd(), /*max_width*/ None),
+diff --git a/codex-rs/tui/src/chatwidget/tests/slash_commands.rs b/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
+index de6eb5f405..7f3df40ba1 100644
+--- a/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
++++ b/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
+@@ -1704,7 +1704,7 @@ async fn pending_token_activity_refresh_keeps_composer_visible_in_short_viewport
+             .vt100()
+             .screen()
+             .contents()
+-            .contains("Ask Codex to do anything")
++            .contains("Ask Marathon to do anything")
+     );
+ }
+ 
+diff --git a/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_information_dismissible.snap b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_information_dismissible.snap
+index dd73e1cfe1..d00c96a9ae 100644
+--- a/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_information_dismissible.snap
++++ b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_information_dismissible.snap
+@@ -1,7 +1,6 @@
+ ---
+ source: tui/src/chatwidget/tests/backend_banners_tests.rs
+-assertion_line: 66
+-expression: rendered
++expression: normalize_snapshot_paths(rendered)
+ ---
+   Selected model usage exhausted
+   Ask your owner for credits or switch to another model.
+@@ -9,6 +8,6 @@ expression: rendered
+   esc to dismiss · type to continue
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   test-model-a default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_information_only.snap b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_information_only.snap
+index af451575ef..f60b67f1fc 100644
+--- a/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_information_only.snap
++++ b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_information_only.snap
+@@ -1,12 +1,11 @@
+ ---
+ source: tui/src/chatwidget/tests/backend_banners_tests.rs
+-assertion_line: 62
+-expression: rendered
++expression: normalize_snapshot_paths(rendered)
+ ---
+   Selected model usage exhausted
+   Ask your owner for credits or switch to another model.
+ 
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   test-model-a default · /tmp/project
+diff --git a/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_notification.snap b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_notification.snap
+index 7f16786846..7673ec5028 100644
+--- a/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_notification.snap
++++ b/codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__backend_banners_tests__backend_banner_notification.snap
+@@ -1,7 +1,6 @@
+ ---
+ source: tui/src/chatwidget/tests/backend_banners_tests.rs
+-assertion_line: 50
+-expression: "render_bottom_popup(&chat, 70)"
++expression: "normalize_snapshot_paths(render_bottom_popup(&chat, 70))"
+ ---
+   Selected model usage exhausted
+   Ask your owner for credits or switch to another model.
+@@ -10,6 +9,6 @@ expression: "render_bottom_popup(&chat, 70)"
+ 
+   Press a number to choose
+ 
+-› Ask Codex to do anything
++› Ask Marathon to do anything
+ 
+   test-model-a default · /tmp/project
+diff --git a/codex-rs/tui/src/history_cell/session.rs b/codex-rs/tui/src/history_cell/session.rs
+index 03df0141f7..b7f50ccce1 100644
+--- a/codex-rs/tui/src/history_cell/session.rs
++++ b/codex-rs/tui/src/history_cell/session.rs
+@@ -317,10 +317,10 @@ impl HistoryCell for SessionHeaderHistoryCell {
+ 
+         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
+ 
+-        // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
++        // Title line rendered inside the box: ">_ Marathon (vX)"
+         let title_spans: Vec<Span<'static>> = vec![
+             Span::from(">_ ").dim(),
+-            Span::from("OpenAI Codex").bold(),
++            Span::from("Marathon").red().bold(),
+             Span::from(" ").dim(),
+             Span::from(format!("(v{})", self.version)).dim(),
+         ];
+@@ -391,7 +391,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
+ 
+     fn raw_lines(&self) -> Vec<Line<'static>> {
+         let mut lines = vec![
+-            Line::from(format!("OpenAI Codex (v{})", self.version)),
++            Line::from(format!("Marathon (v{})", self.version)),
+             Line::from(format!(
+                 "model: {}{}",
+                 self.model,
+diff --git a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_clamps_to_narrow_width.snap b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_clamps_to_narrow_width.snap
+index 2baf486e51..1dac89a842 100644
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_clamps_to_narrow_width.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_clamps_to_narrow_width.snap
+@@ -3,7 +3,7 @@ source: tui/src/history_cell/tests.rs
+ expression: "render_lines(&lines).join(\"\\n\")"
+ ---
+ ╭──────────────────────────────────────────╮
+-│ >_ OpenAI Codex (vtest)                  │
++│ >_ Marathon (vtest)                      │
+ │                                          │
+ │ model:       gpt-5.6-sol xhigh   fast  … │
+ │ directory:   project                     │
+diff --git a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_directory.snap b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_directory.snap
+index 51d36524d8..6b190f3391 100644
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_directory.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_directory.snap
+@@ -6,7 +6,7 @@ Buffer {
+     area: Rect { x: 0, y: 0, width: 42, height: 6 },
+     content: [
+         "╭────────────────────────────────────────╮",
+-        "│ >_ OpenAI Codex (vtest)                │",
++        "│ >_ Marathon (vtest)                    │",
+         "│                                        │",
+         "│ model:     gpt-5   /model to change    │",
+         "│ directory: …ﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟ-project │", // hidden by multi-width symbols: [(15, " "), (17, " "), (19, " "), (21, " "), (23, " "), (25, " "), (27, " "), (29, " "), (31, " ")]
+@@ -14,8 +14,8 @@ Buffer {
+     ],
+     styles: [
+         x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+-        x: 5, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+-        x: 17, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
++        x: 5, y: 1, fg: Red, bg: Reset, underline: Reset, modifier: BOLD,
++        x: 13, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+         x: 13, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+         x: 18, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+         x: 21, y: 3, fg: Cyan, bg: Reset, underline: Reset, modifier: NONE,
+diff --git a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_sound_marks.snap b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_sound_marks.snap
+index 0fb17271fa..da691ea934 100644
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_sound_marks.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_sound_marks.snap
+@@ -6,7 +6,7 @@ Buffer {
+     area: Rect { x: 0, y: 0, width: 80, height: 6 },
+     content: [
+         "╭───────────────────────────────────────────╮                                   ",
+-        "│ >_ OpenAI Codex (vtest)                   │                                   ",
++        "│ >_ Marathon (vtest)                       │                                   ",
+         "│                                           │                                   ",
+         "│ model:     gpt-5-ｶﾞ-ﾊﾟ   /model to change │                                   ", // hidden by multi-width symbols: [(20, " "), (23, " ")]
+         "│ directory: project                        │                                   ",
+@@ -16,8 +16,8 @@ Buffer {
+         x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+         x: 45, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+         x: 0, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+-        x: 5, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+-        x: 17, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
++        x: 5, y: 1, fg: Red, bg: Reset, underline: Reset, modifier: BOLD,
++        x: 13, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+         x: 45, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+         x: 0, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+         x: 45, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+diff --git a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_indicates_yolo_mode.snap b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_indicates_yolo_mode.snap
+index 04f64584f6..0745a8a9fd 100644
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_indicates_yolo_mode.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_indicates_yolo_mode.snap
+@@ -1,9 +1,9 @@
+ ---
+-source: tui/src/history_cell.rs
++source: tui/src/history_cell/tests.rs
+ expression: rendered
+ ---
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (vtest)               │
++│ >_ Marathon (vtest)                   │
+ │                                       │
+ │ model:       gpt-5   /model to change │
+ │ directory:   /tmp/project             │
+diff --git a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_info_availability_nux_tooltip_snapshot.snap b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_info_availability_nux_tooltip_snapshot.snap
+index ad0fc4be1c..b0e50dc0ca 100644
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_info_availability_nux_tooltip_snapshot.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_info_availability_nux_tooltip_snapshot.snap
+@@ -1,9 +1,9 @@
+ ---
+-source: tui/src/history_cell.rs
++source: tui/src/history_cell/tests.rs
+ expression: rendered
+ ---
+ ╭─────────────────────────────────────╮
+-│ >_ OpenAI Codex (v0.0.0)            │
++│ >_ Marathon (v0.153.4)              │
+ │                                     │
+ │ model:     gpt-5   /model to change │
+ │ directory: /tmp/project             │
+diff --git a/codex-rs/tui/src/onboarding/welcome.rs b/codex-rs/tui/src/onboarding/welcome.rs
+index 880e58750f..d1b0dd170c 100644
+--- a/codex-rs/tui/src/onboarding/welcome.rs
++++ b/codex-rs/tui/src/onboarding/welcome.rs
+@@ -94,8 +94,8 @@ impl WidgetRef for &WelcomeWidget {
+         lines.push(Line::from(vec![
+             "  ".into(),
+             "Welcome to ".into(),
+-            "Codex".bold(),
+-            ", OpenAI's command-line coding agent".into(),
++            "Marathon".red().bold(),
++            ", your local coding agent".into(),
+         ]));
+ 
+         Paragraph::new(lines)
+diff --git a/codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_after_long_transcript_fresh_header_only.snap b/codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_after_long_transcript_fresh_header_only.snap
+index 98d6015064..b9f3921fa6 100644
+--- a/codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_after_long_transcript_fresh_header_only.snap
++++ b/codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_after_long_transcript_fresh_header_only.snap
+@@ -1,9 +1,9 @@
+ ---
+-source: tui/src/app.rs
++source: tui/src/app/tests.rs
+ expression: rendered
+ ---
+ ╭─────────────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)                │
++│ >_ Marathon (v<VERSION>)                    │
+ │                                             │
+ │ model:     gpt-test high   /model to change │
+ │ directory: /tmp/project                     │
+diff --git a/codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_header_fast_status_fast_capable_models.snap b/codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_header_fast_status_fast_capable_models.snap
+index 08afd027ac..dc61860247 100644
+--- a/codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_header_fast_status_fast_capable_models.snap
++++ b/codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_header_fast_status_fast_capable_models.snap
+@@ -1,9 +1,9 @@
+ ---
+-source: tui/src/app.rs
++source: tui/src/app/tests.rs
+ expression: rendered
+ ---
+ ╭────────────────────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)                       │
++│ >_ Marathon (v<VERSION>)                           │
+ │                                                    │
+ │ model:     gpt-5.4 xhigh   fast   /model to change │
+ │ directory: /tmp/project                            │
+diff --git a/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_fresh_session_transitions.snap b/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_fresh_session_transitions.snap
+index 32f6de9153..3eafa417dd 100644
+--- a/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_fresh_session_transitions.snap
++++ b/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_fresh_session_transitions.snap
+@@ -5,7 +5,7 @@ expression: "snapshots.join(\"\\n---\\n\")"
+ resume lookup fallback:
+ before:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -17,7 +17,7 @@ before:
+ 
+ after:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -31,7 +31,7 @@ after:
+ fork lookup fallback:
+ before:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -43,7 +43,7 @@ before:
+ 
+ after:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -59,7 +59,7 @@ before:
+ hidden while picker owns input
+ after:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -75,7 +75,7 @@ before:
+ hidden while picker owns input
+ after:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+diff --git a/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_full_frames.snap b/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_full_frames.snap
+index 9195af7637..66a26d9035 100644
+--- a/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_full_frames.snap
++++ b/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_full_frames.snap
+@@ -4,7 +4,7 @@ expression: "snapshots.join(\"\\n---\\n\")"
+ ---
+ empty (48 columns):
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -17,7 +17,7 @@ empty (48 columns):
+ ---
+ resuming (48 columns):
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -30,7 +30,7 @@ resuming (48 columns):
+ ---
+ forking (48 columns):
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -43,7 +43,7 @@ forking (48 columns):
+ ---
+ multiline (48 columns):
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -57,7 +57,7 @@ multiline (48 columns):
+ ---
+ narrow (18 columns):
+ ╭────────────────╮
+-│ >_ OpenAI Cod… │
++│ >_ Marathon (… │
+ │                │
+ │ model:     lo… │
+ │ directory: …ng │
+diff --git a/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_onboarding_transition.snap b/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_onboarding_transition.snap
+index 6284b0715e..999676530b 100644
+--- a/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_onboarding_transition.snap
++++ b/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_onboarding_transition.snap
+@@ -6,7 +6,7 @@ before onboarding: hidden (0x0 viewport)
+ ---
+ after onboarding:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ Marathon (v<VERSION>)                │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+diff --git a/codex-rs/tui/src/status/card.rs b/codex-rs/tui/src/status/card.rs
+index 93f959c8db..878601f9f3 100644
+--- a/codex-rs/tui/src/status/card.rs
++++ b/codex-rs/tui/src/status/card.rs
+@@ -727,7 +727,7 @@ impl HistoryCell for StatusHistoryCell {
+         let mut lines: Vec<Line<'static>> = Vec::new();
+         lines.push(Line::from(vec![
+             Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
+-            Span::from("OpenAI Codex").bold(),
++            Span::from("Marathon").red().bold(),
+             Span::from(" ").dim(),
+             Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
+         ]));
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap
+index ca9600f645..bb723cdb2b 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap
+index 7171ab0586..39722fb897 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_enterprise_monthly_credit_limit.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_enterprise_monthly_credit_limit.snap
+index 765ad8d3a7..5b2e903ad0 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_enterprise_monthly_credit_limit.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_enterprise_monthly_credit_limit.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                         │
++│  >_ Marathon (v0.153.4)                                                           │
+ │                                                                                   │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date                     │
+ │ information on rate limits and credits                                            │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_forked_from.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_forked_from.snap
+index 152575179e..39696641f6 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_forked_from.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_forked_from.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_monthly_limit.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_monthly_limit.snap
+index 7a4f58a823..f418661a93 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_monthly_limit.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_monthly_limit.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap
+index 77e3fa3851..a0408d7323 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                 │
++│  >_ Marathon (v0.153.4)                                                   │
+ │                                                                           │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date             │
+ │ information on rate limits and credits                                    │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_active_user_defined_profile.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_active_user_defined_profile.snap
+index 4604b26f7e..c756eb7014 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_active_user_defined_profile.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_active_user_defined_profile.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                             │
++│  >_ Marathon (v0.153.4)                                               │
+ │                                                                       │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date         │
+ │ information on rate limits and credits                                │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_auto_review_permissions.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_auto_review_permissions.snap
+index c739d55075..7c00ea2bc3 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_auto_review_permissions.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_auto_review_permissions.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                             │
++│  >_ Marathon (v0.153.4)                                               │
+ │                                                                       │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date         │
+ │ information on rate limits and credits                                │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_chatgpt_plan_without_email.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_chatgpt_plan_without_email.snap
+index 0aba51f99a..4a4ac9c055 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_chatgpt_plan_without_email.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_chatgpt_plan_without_email.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭──────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                │
++│  >_ Marathon (v0.153.4)                                                  │
+ │                                                                          │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date            │
+ │ information on rate limits and credits                                   │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_missing_limits_message.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_missing_limits_message.snap
+index 533be27976..f73da3a0ee 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_missing_limits_message.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_missing_limits_message.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_refreshing_limits_notice.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_refreshing_limits_notice.snap
+index 631982bcf9..6c80d8a7c9 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_refreshing_limits_notice.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_refreshing_limits_notice.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap
+index b86e468b8b..e44ebdfbab 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_unavailable_limits_message.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_unavailable_limits_message.snap
+index d46a483e4b..34c44539d6 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_unavailable_limits_message.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_unavailable_limits_message.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_treats_refreshing_empty_limits_as_unavailable.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_treats_refreshing_empty_limits_as_unavailable.snap
+index d46a483e4b..34c44539d6 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_treats_refreshing_empty_limits_as_unavailable.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_treats_refreshing_empty_limits_as_unavailable.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_halfwidth_kana_in_narrow_terminal.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_halfwidth_kana_in_narrow_terminal.snap
+index 17442d7076..4797812670 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_halfwidth_kana_in_narrow_terminal.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_halfwidth_kana_in_narrow_terminal.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)              │
++│  >_ Marathon (v0.153.4)                │
+ │                                        │
+ │ Visit                                  │
+ │ https://chatgpt.com/codex/settings/usa │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap
+index d695d95b80..b18638abfb 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                          │
++│  >_ Marathon (v0.153.4)                                            │
+ │                                                                    │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date      │
+ │ information on rate limits and credits                             │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_default_reasoning_when_config_empty.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_default_reasoning_when_config_empty.snap
+index 9683beed97..47eb8fb6c6 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_default_reasoning_when_config_empty.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_default_reasoning_when_config_empty.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ Marathon (v0.153.4)                                                     │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_generic_limit_labels_for_unsupported_windows.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_generic_limit_labels_for_unsupported_windows.snap
+index 6b6fad683b..c07b38bfc6 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_generic_limit_labels_for_unsupported_windows.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_generic_limit_labels_for_unsupported_windows.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                    │
++│  >_ Marathon (v0.153.4)                                                      │
+ │                                                                              │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date                │
+ │ information on rate limits and credits                                       │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_wraps_enterprise_monthly_credit_details_in_narrow_terminal.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_wraps_enterprise_monthly_credit_details_in_narrow_terminal.snap
+index cf6fa2c2ec..1b54e53aca 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_wraps_enterprise_monthly_credit_details_in_narrow_terminal.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_wraps_enterprise_monthly_credit_details_in_narrow_terminal.snap
+@@ -5,7 +5,7 @@ expression: sanitized
+ /status
+ 
+ ╭────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                  │
++│  >_ Marathon (v0.153.4)                    │
+ │                                            │
+ │ Visit                                      │
+ │ https://chatgpt.com/codex/settings/usage   │
+diff --git a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__transcript_overlay_status_rate_limit_refresh.snap b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__transcript_overlay_status_rate_limit_refresh.snap
+index e2f12c8436..6382e44586 100644
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__transcript_overlay_status_rate_limit_refresh.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__transcript_overlay_status_rate_limit_refresh.snap
+@@ -7,7 +7,7 @@ before:
+ /status
+ 
+ ╭──────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                │
++│  >_ Marathon (v0.153.4)                                                  │
+ │                                                                          │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date            │
+ │ information on rate limits and credits                                   │
+@@ -39,7 +39,7 @@ after:
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                 │
++│  >_ Marathon (v0.153.4)                                                   │
+ │                                                                           │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date             │
+ │ information on rate limits and credits                                    │

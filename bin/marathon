@@ -14,10 +14,11 @@ usage() {
 Usage: marathon [--instance NAME] [command] [args...]
 
 Named instances:
+  Optional. Plain marathon and marathon resume ID automatically use a free worker.
   --instance NAME  Use independent ports, runtime state, logs, cache, and selection
 
 Commands:
-  codex           Start the remembered model and open Codex (default)
+  codex           Start Marathon on a free worker (default)
   dashboard       Open advanced model, profile, frontend, and tuning controls
   setup           Find, add, or download a GGUF model
   hermes          Start Marathon and open Hermes Agent

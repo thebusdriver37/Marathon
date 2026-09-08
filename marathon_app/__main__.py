@@ -16,9 +16,10 @@ from rich.table import Table
 
 from . import __version__
 from .catalog import discover_models, format_size
+from .codex_home import marathon_codex_home, session_home_for_id
 from .instance import normalize_instance_name, resolve_instance
 from .model_library import register_model_root
-from .runtime import automatic_launch_instance, request_stop, runtime_paths
+from .runtime import RuntimeBusyError, automatic_launch_instance, request_stop, runtime_paths
 from .router_security import open_api_request
 from .telemetry import resolve_run, summarize_run
 from .remote import run_remote_host_command
@@ -314,12 +315,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _relaunch_as_instance(name: str, argv: list[str] | None) -> NoReturn:
+def _relaunch_as_instance(name: str, argv: list[str] | None, session_home: Path) -> NoReturn:
     """Replace this process with an explicitly identified named instance."""
 
     original_arguments = list(sys.argv[1:] if argv is None else argv)
     executable = sys.executable
-    os.execv(
+    os.execve(
         executable,
         [
             executable,
@@ -329,28 +330,54 @@ def _relaunch_as_instance(name: str, argv: list[str] | None) -> NoReturn:
             name,
             *original_arguments,
         ],
+        dict(os.environ, _MARATHON_SESSION_HOME=str(session_home)),
     )
     raise RuntimeError("failed to relaunch Marathon")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    inherited_home = os.environ.pop("_MARATHON_SESSION_HOME", None)
+    session_home = Path(inherited_home) if inherited_home else None
+    original_arguments = sys.argv[1:] if argv is None else argv
+    explicit_instance = any(
+        value == "--instance" or value.startswith("--instance=")
+        for value in original_arguments
+    )
     try:
         instance = resolve_instance(args.instance).name
     except ValueError as error:
         Console().print(f"[bold red]Invalid instance configuration:[/bold red] {error}")
         return 2
-    if args.instance is None and args.command == "codex":
+    if not explicit_instance and args.command in {"codex", "exec", "resume", "fork"}:
         try:
+            if args.command in {"resume", "fork"} and args.targets and not args.targets[0].startswith("-"):
+                session_home = session_home_for_id(args.targets[0])
             automatic = automatic_launch_instance()
-        except RuntimeError as error:
+        except (RuntimeError, ValueError) as error:
             Console().print(f"[bold red]Marathon could not start:[/bold red] {error}")
             return 2
         if automatic is not None:
-            Console().print(
-                f"[dim]Default Marathon is active. Starting instance '{automatic}'.[/dim]"
-            )
-            return _relaunch_as_instance(automatic, argv)
+            return _relaunch_as_instance(automatic, argv, session_home or marathon_codex_home())
+
+    def launch_codex(arguments: list[str]) -> int:
+        try:
+            if session_home is not None:
+                return run_codex_default(arguments, instance, session_home=session_home)
+            return run_codex_default(arguments) if instance is None else run_codex_default(arguments, instance)
+        except RuntimeBusyError as error:
+            if explicit_instance and inherited_home is None:
+                Console().print(f"[bold red]{error}[/bold red]")
+                return 2
+            # Another simultaneous launch won the lock after our initial probe.
+            # Retry selection after cleanup, retaining the conversation's home.
+            try:
+                automatic = automatic_launch_instance()
+            except RuntimeError as exhausted:
+                Console().print(f"[bold red]{exhausted}[/bold red]")
+                return 2
+            original = list(original_arguments[2:] if inherited_home else original_arguments)
+            return _relaunch_as_instance(automatic or "default", original, session_home or marathon_codex_home())
     if args.command == "models":
         return _models(args.targets)
     if args.command == "status":
@@ -387,24 +414,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_setup_dashboard(instance)
     if args.command in {"resume", "fork"}:
         codex_args = [args.command, *args.targets]
-        return (
-            run_codex_default(codex_args)
-            if instance is None
-            else run_codex_default(codex_args, instance)
-        )
+        return launch_codex(codex_args)
     if args.command == "exec":
         codex_args = ["exec", *args.targets]
-        return (
-            run_codex_default(codex_args)
-            if instance is None
-            else run_codex_default(codex_args, instance)
-        )
+        return launch_codex(codex_args)
     if args.command == "codex":
-        return (
-            run_codex_default(args.targets)
-            if instance is None
-            else run_codex_default(args.targets, instance)
-        )
+        return launch_codex(args.targets)
     frontend = args.command if args.command in {"hermes", "direct"} else None
     return (
         run_dashboard(frontend)

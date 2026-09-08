@@ -47,12 +47,12 @@ from .remote import (
     load_remote_selection,
     save_remote_selection,
 )
-from .runtime import Runtime, load_selection, save_selection
+from .runtime import Runtime, RuntimeBusyError, load_selection, save_selection
 from .runtime_setup import download_bundle, eligible_gpus, missing_build_tools, missing_runtime_tools, model_bundle
 
 
 FRONTEND_NAMES = {
-    "codex": "Codex",
+    "codex": "Marathon",
     "hermes": "Hermes Agent",
     "direct": "Direct Chat",
 }
@@ -577,13 +577,13 @@ def _ensure_local_tools(
         return True
     if not selection.install_confirmed and not _confirm_install(
         console,
-        "Marathon Codex",
+        "Marathon frontend",
         "Build the pinned terminal agent with Marathon's local-model patches.",
     ):
         return False
     return _run_install_command(
         console,
-        "Building Marathon Codex",
+        "Building Marathon frontend",
         [str(ROOT_DIR / "bin" / "marathon"), "build-codex"],
     )
 
@@ -748,10 +748,10 @@ def _run_dyno_flow(console: Console, selection: Selection) -> Selection | None:
 def _home_items(
     selection: Selection, *, warm: bool, allow_tune: bool = True
 ) -> list[MenuItem]:
-    suffix = "Model is already loaded." if warm else "Load the model and open Codex."
+    suffix = "Model is already loaded." if warm else "Load the model and open Marathon."
     items: list[MenuItem] = []
     if selection.profile.supports("codex"):
-        items.append(MenuItem("Start Codex" if not warm else "Open Codex", suffix, "codex", "default"))
+        items.append(MenuItem("Start Marathon" if not warm else "Open Marathon", suffix, "codex", "default"))
     if selection.profile.supports("hermes"):
         items.append(
             MenuItem(
@@ -1047,6 +1047,8 @@ def run_dashboard(
 def run_codex_default(
     codex_args: list[str] | None = None,
     instance: str | None = None,
+    *,
+    session_home: Path | None = None,
 ) -> int:
     """Start the remembered model and Codex without an intermediate menu."""
 
@@ -1065,11 +1067,14 @@ def run_codex_default(
         return 2
     save_selection(selection.model, selection.profile, "codex", instance)
     runtime = Runtime(selection.model, selection.profile, instance)
+    runtime.session_home = session_home
     result = 0
     try:
-        with console.status("[bold magenta]Preparing local Codex...[/bold magenta]", spinner="dots") as status:
+        with console.status("[bold red]Preparing Marathon...[/bold red]", spinner="dots") as status:
             runtime.start(lambda message: status.update(f"[magenta]{message}[/magenta]"))
         result = _launch_frontend(console, runtime, "codex", codex_args)
+    except RuntimeBusyError:
+        raise
     except KeyboardInterrupt:
         runtime.record("runtime.interrupted", {}, level="error")
         result = 130
@@ -1099,7 +1104,7 @@ def run_setup_dashboard(instance: str | None = None) -> int:
             f"[bold green]Marathon is ready[/bold green]\n"
             f"{selection.model.display_name}\n"
             f"{selection.profile.display_name} · {selection.profile.context:,} requested tokens\n\n"
-            "Run [bold]marathon[/bold] from the project you want Codex to edit.",
+            "Run [bold]marathon[/bold] from the project you want Marathon to edit.",
             border_style="green",
         )
     )
