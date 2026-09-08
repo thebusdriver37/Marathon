@@ -508,6 +508,38 @@ context = 32768
             },
         )
 
+    def test_compaction_effort_override_is_scoped_and_validated(self) -> None:
+        profile = replace(
+            fixture_profile(), default_reasoning_level="xhigh",
+            supported_reasoning_levels=(("none", "Direct"), ("low", "Fast"), ("xhigh", "Deep")),
+        )
+        for override in (None, "none", "low", "unsupported"):
+            for kind in ("compaction", "turn", None):
+                for transport in ("ws", "http"):
+                    with self.subTest(override=override, kind=kind, transport=transport):
+                        request = {"input": [], "reasoning": {"effort": "xhigh"},
+                                   "chat_template_kwargs": {"preserve_reasoning": True}}
+                        kwargs = {}
+                        if transport == "ws":
+                            request["client_metadata"] = {
+                                "x-codex-turn-metadata": json.dumps({"request_kind": kind})}
+                        else:
+                            kwargs["request_kind"] = kind
+                        with mock.patch.dict(router_module.os.environ, {}, clear=False):
+                            router_module.os.environ.pop("MARATHON_COMPACTION_REASONING_EFFORT", None)
+                            if override is not None:
+                                router_module.os.environ["MARATHON_COMPACTION_REASONING_EFFORT"] = override
+                            if kind == "compaction" and override == "unsupported":
+                                with self.assertRaisesRegex(ValueError, "not supported"):
+                                    router_module.normalize_responses_request(request, profile, **kwargs)
+                                continue
+                            normalized = router_module.normalize_responses_request(request, profile, **kwargs)
+                        expected = override if kind == "compaction" and override is not None else "xhigh"
+                        template = normalized["chat_template_kwargs"]
+                        self.assertTrue(template["preserve_reasoning"])
+                        self.assertEqual(template["enable_thinking"], expected != "none")
+                        self.assertEqual(template.get("reasoning_effort"), None if expected == "none" else expected)
+
     def test_local_reasoning_survives_session_resume_for_slot_reuse(self) -> None:
         state = object.__new__(router_module.RouterState)
         backend_item = {
@@ -3451,6 +3483,43 @@ context = 32768
             mock.ANY,
             level="warning",
         )
+
+    def test_compaction_rejects_tool_markup_instead_of_installing_it_as_summary(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        state._request_json = mock.AsyncMock(return_value={
+            "output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "<tool_call>\n<function=exec_command>\n</function>\n</tool_call>"}]}],
+            "usage": {"input_tokens": 10000, "output_tokens": 58},
+        })
+        with self.assertRaisesRegex(RuntimeError, "tool-call markup instead of a context summary"):
+            asyncio.run(state._run_responses_loop(
+                profile=fixture_profile(), forward_request={
+                    "input": [], "tools": [], "client_metadata": {
+                        "x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}},
+                web_search_enabled=False))
+
+    def test_compaction_rejects_acknowledgement_instead_of_summary(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        state._request_json = mock.AsyncMock(return_value={
+            "output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "READY"}]}],
+            "usage": {"input_tokens": 11908, "output_tokens": 83},
+        })
+        with self.assertRaisesRegex(RuntimeError, "acknowledgement instead of a context summary"):
+            asyncio.run(state._run_responses_loop(
+                profile=fixture_profile(), forward_request={
+                    "input": [], "tools": [], "client_metadata": {
+                        "x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}},
+                web_search_enabled=False))
+
+    def test_compaction_validation_allows_summaries_without_spaces(self) -> None:
+        self.assertIsNone(router_module._compaction_summary_error([
+            {"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "已完成数据库迁移，下一步验证副本延迟。"}]}]))
 
     def test_stalled_compaction_recovers_with_final_message(self) -> None:
         profile = fixture_profile(65_536)

@@ -301,6 +301,7 @@ class ResponseSnapshot:
     prompt_cache_key: str
     created_at: float
     scaffold_fingerprint: str = ""
+    tool_scaffold: dict[str, Any] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -1115,6 +1116,22 @@ def _stalled_final_response_recovery_message(
     }
 
 
+def _compaction_summary_error(items: list[dict[str, Any]]) -> str | None:
+    for item in reversed(items):
+        if not _is_assistant_message_item(item) or item.get("phase") == "commentary":
+            continue
+        text = _assistant_message_text(item).strip()
+        if text.startswith("<tool_call>"):
+            # Without tools, Qwen can emit its tool protocol as plain text.
+            return "compaction returned tool-call markup instead of a context summary"
+        # Match bare acknowledgements, not word counts: valid summaries in some
+        # languages do not contain spaces.
+        if text.strip("`*_ \n\t.!").casefold() in {"ready", "ok", "okay", "done"}:
+            return "compaction returned an acknowledgement instead of a context summary"
+        return None
+    return None
+
+
 def _tool_protocol_recovery_message(reason: str) -> dict[str, Any]:
     return {
         "type": "message",
@@ -1924,7 +1941,7 @@ def _restore_local_reasoning_item(item: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _apply_reasoning_effort(
-    data: dict[str, Any], profile: ModelProfile | None
+    data: dict[str, Any], profile: ModelProfile | None, *, request_kind: str | None = None
 ) -> None:
     if profile is None or not profile.supported_reasoning_levels:
         return
@@ -1935,6 +1952,12 @@ def _apply_reasoning_effort(
     if reasoning is not None and not isinstance(reasoning, dict):
         raise ValueError("reasoning must be an object")
     effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    # Compaction is a summary task, and need not inherit a costly coding effort.
+    # Keep the existing behavior unless the operator explicitly selects an override.
+    if (request_kind or _codex_request_kind(data)) == "compaction":
+        compaction_effort = os.environ.get("MARATHON_COMPACTION_REASONING_EFFORT")
+        if compaction_effort is not None:
+            effort = compaction_effort
     if effort is None:
         effort = profile.default_reasoning_level
     if not isinstance(effort, str) or effort not in supported:
@@ -1960,12 +1983,15 @@ def _apply_reasoning_effort(
 
 
 def normalize_responses_request(
-    data: dict[str, Any], profile: ModelProfile | None = None
+    data: dict[str, Any],
+    profile: ModelProfile | None = None,
+    *,
+    request_kind: str | None = None,
 ) -> dict[str, Any]:
     original_instructions = data.get("instructions")
     instruction_base = original_instructions if isinstance(original_instructions, str) else ""
     data["_marathon_instruction_base_hash"] = _sha256_text(instruction_base)
-    _apply_reasoning_effort(data, profile)
+    _apply_reasoning_effort(data, profile, request_kind=request_kind)
     tools = data.get("tools")
     web_search_requested = request_has_web_search_tool(tools) if isinstance(tools, list) else False
     if isinstance(tools, list):
@@ -2355,6 +2381,36 @@ class RouterState:
             items.extend(part.input_items)
             items.extend(part.output_items)
         return items
+
+    def _compaction_tool_scaffold(
+        self, profile: ModelProfile, request: dict[str, Any]
+    ) -> ResponseSnapshot | None:
+        """Reuse only this conversation's live tool descriptions, never its tools."""
+        if (
+            not _env_bool("MARATHON_COMPACTION_PREFIX_CACHE", True)
+            or not profile.supports_slots
+            or _codex_request_kind(request) != "compaction"
+            or request.get("tools")
+            or request.get("previous_response_id")
+            or request.get("generate") is False
+            or not request.get("prompt_cache_key")
+        ):
+            return None
+        source = self.lineage.get(self.live_slot_by_model.get(profile.slug))
+        if (
+            source is None
+            or source.profile_slug != profile.slug
+            or source.prompt_cache_key != request["prompt_cache_key"]
+            or source.instructions_text != request.get("instructions", "")
+            or not source.tool_scaffold
+            or not source.tool_scaffold.get("tools")
+        ):
+            return None
+        for key in ("tools", "parallel_tool_calls"):
+            if key in source.tool_scaffold:
+                request[key] = copy.deepcopy(source.tool_scaffold[key])
+        request["tool_choice"] = "none"
+        return source
 
     def _store_response_snapshot(self, snapshot: ResponseSnapshot) -> None:
         if not isinstance(self.lineage, OrderedDict):
@@ -2871,6 +2927,12 @@ class RouterState:
                     continue
 
                 item = event.get("item")
+                if _codex_request_kind(request) == "compaction" and (
+                    _starts_followup_work(item)
+                    or event_type.startswith("response.function_call_arguments.")
+                    or event_type.startswith("response.custom_tool_call_input.")
+                ):
+                    raise RuntimeError("tools are disabled during compaction")
                 item_id = ""
                 if isinstance(item, dict):
                     item_id = str(item.get("id") or "")
@@ -4557,6 +4619,7 @@ class RouterState:
                 if (
                     tool_protocol_recoveries >= max_tool_protocol_recoveries
                     or not request.get("tools")
+                    or _codex_request_kind(request) == "compaction"
                 ):
                     raise
                 tool_protocol_recoveries += 1
@@ -4594,6 +4657,12 @@ class RouterState:
                 item for item in iter_items if not _is_droppable_commentary_message(item)
             ]
             pending_calls = collect_managed_calls(iter_items)
+            if _codex_request_kind(request) == "compaction":
+                if any(_starts_followup_work(item) for item in iter_items):
+                    raise RuntimeError("tools are disabled during compaction")
+                summary_error = _compaction_summary_error(iter_items)
+                if summary_error:
+                    raise RuntimeError(summary_error)
 
             cumulative_items.extend(iter_items)
 
@@ -4605,7 +4674,7 @@ class RouterState:
             )
             if not has_actionable_output and stalled_recoveries < max_stalled_recoveries:
                 stalled_recoveries += 1
-                tools_available = bool(request.get("tools"))
+                tools_available = bool(request.get("tools")) and _codex_request_kind(request) != "compaction"
                 usage = response.get("usage")
                 output_tokens = (
                     usage.get("output_tokens") if isinstance(usage, dict) else None
@@ -4637,7 +4706,10 @@ class RouterState:
                 if tools_available:
                     request["tool_choice"] = "required"
                 else:
-                    request.pop("tool_choice", None)
+                    if request.get("tools"):
+                        request["tool_choice"] = "none"
+                    else:
+                        request.pop("tool_choice", None)
                     template_kwargs = request.get("chat_template_kwargs")
                     template_kwargs = (
                         copy.deepcopy(template_kwargs)
@@ -4847,6 +4919,7 @@ class RouterState:
             request["temperature"] = profile.temperature
         request = normalize_responses_request(request, profile)
         request["model"] = profile.alias
+        compaction_source = self._compaction_tool_scaffold(profile, request)
 
         base_instructions_hash = str(
             request.pop("_marathon_instruction_base_hash", "") or ""
@@ -5125,6 +5198,16 @@ class RouterState:
                     "reason": "backend replays full lineage and manages its own prefix cache",
                 }
                 self._clear_live_slot(profile.slug)
+            elif (
+                compaction_source is not None
+                and self.live_slot_by_model.get(profile.slug) == compaction_source.response_id
+                and self.live_prompt_cache_key_by_model.get(profile.slug) == prompt_cache_key
+            ):
+                slot_prepare_mode = "reuse-live-compaction-prefix"
+                restore_result = {
+                    "status": "skipped",
+                    "reason": "same conversation; backend prefix-matches the compaction request",
+                }
             elif live_reconnect_root:
                 slot_prepare_mode = "reuse-live-reconnect-root"
                 restore_result = {
@@ -5309,6 +5392,11 @@ class RouterState:
                     prompt_cache_key=prompt_cache_key,
                     created_at=time.time(),
                     scaffold_fingerprint=scaffold_fingerprint,
+                    tool_scaffold={
+                        key: copy.deepcopy(forward_request[key])
+                        for key in ("tools", "parallel_tool_calls")
+                        if key in forward_request
+                    },
                 )
             )
             self.last_response_by_model[profile.slug] = response_id
@@ -5559,7 +5647,7 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
             data["temperature"] = profile.temperature
         if path == "/v1/responses":
             try:
-                data = normalize_responses_request(data, profile)
+                data = normalize_responses_request(data, profile, request_kind=request_kind)
             except ValueError as exc:
                 state.telemetry.emit(
                     "router.http.rejected",

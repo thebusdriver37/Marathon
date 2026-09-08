@@ -47,6 +47,42 @@ Use `--output-dir /path/to/new-directory` to choose the evidence location.
 The suite closes its sessions; inference workers follow their normal idle policy.
 This suite is separate from the normal Python checks and needs no additional Python packages.
 
+Measure compaction separately with the installed frontend and real inference:
+
+```bash
+./bin/marathon eval compaction --run-gpu --repeats 2
+```
+
+This compares `none`, `low`, and `medium` compaction reasoning while keeping coding reasoning at `medium`.
+It checks that facts from tool output survive both the summary and subsequent recall, including repeated compaction.
+`--auto-compact-token-limit` additionally requires automatic compaction during setup and checks every automatic summary for retained facts.
+The source fixture is moved out of the test workspace before recall, and tool use during recall fails the check.
+Router timings, summaries, terminal transcripts, and `results.json` remain in the printed evidence directory.
+The small synthetic fixture measures a specific workload, not a universal optimum or near-limit context accuracy.
+Use `--help` for sample counts and evidence options.
+
+`MARATHON_COMPACTION_REASONING_EFFORT=low marathon` overrides reasoning only for compaction requests on models that advertise reasoning levels.
+Omitting the variable preserves the normal inherited effort; unsupported values are rejected.
+The setting takes effect when a new router process starts.
+Do not assume `none` is safe merely because its summaries are faster; validate subsequent task continuation and repeated compaction.
+
+Local Responses websocket compaction now reuses the active conversation's tool definitions as prompt text and sets `tool_choice=none`.
+The router also rejects tool events during compaction, including managed web tools and recovery attempts.
+This retains the reusable prompt prefix while the backend still matches the full input token by token.
+Reuse requires the same model, conversation key, and instructions; the router rechecks the live slot after waiting for the backend lock.
+Missing or replaced cache state uses the normal fallback path.
+The change takes effect when the router next starts; `MARATHON_COMPACTION_PREFIX_CACHE=0 marathon` disables it for rollback or comparison.
+
+For a long-context comparison, run the following with `MARATHON_COMPACTION_PREFIX_CACHE=0` and then `=1`:
+
+```bash
+./bin/marathon eval compaction --run-gpu --efforts medium --cycles 1 \
+  --filler-lines 6000 --tool-output-max-chars 700000
+```
+
+The larger output limit applies only to the evaluator's isolated process and lets it construct a long history in one tool read.
+It does not change the normal tool-output limit.
+
 Keep first-run setup in the README and advanced configuration in [advanced usage](ADVANCED_USAGE.md).
 Document actual tested support separately from expected hardware compatibility.
 Preserve existing user selections and never change power caps or stop unrelated inference services during setup.
