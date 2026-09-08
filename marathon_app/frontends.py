@@ -51,7 +51,7 @@ def _hermes_binary() -> str:
     return os.environ.get("MARATHON_HERMES_BIN") or "hermes"
 
 
-def _marathon_cli_name(instance: str | None = None) -> str:
+def _marathon_cli_name() -> str:
     configured = os.environ.get("CODEX_CLI_NAME")
     if configured and configured.strip():
         command = configured.strip()
@@ -59,7 +59,38 @@ def _marathon_cli_name(instance: str | None = None) -> str:
         command = "marathon"
     else:
         command = str(Path(__file__).resolve().parents[1] / "bin" / "marathon")
-    return f"{command} --instance {instance}" if instance else command
+    return command
+
+
+def _collect_codex_config_overrides(arguments: list[str]) -> tuple[list[str], list[str]]:
+    """Keep global config flags in one scope so clap does not replace the root list.
+
+    Preserve their order and leave everything after `--` as literal arguments.
+    Both separated and attached short/long option forms are accepted by Codex.
+    """
+
+    overrides: list[str] = []
+    remaining: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            remaining.extend(arguments[index:])
+            break
+        if argument in {"-c", "--config"}:
+            if index + 1 == len(arguments):
+                raise ValueError(f"{argument} requires a key=value argument")
+            overrides.extend(["-c", arguments[index + 1]])
+            index += 2
+            continue
+        if argument.startswith("--config="):
+            overrides.extend(["-c", argument.split("=", 1)[1]])
+        elif argument.startswith("-c") and len(argument) > 2:
+            overrides.extend(["-c", argument[2:].removeprefix("=")])
+        else:
+            remaining.append(argument)
+        index += 1
+    return overrides, remaining
 
 
 def _codex_features(binary: str) -> set[str]:
@@ -108,7 +139,9 @@ def codex_command(
         command.extend(
             ["-c", f"tui.status_line={json.dumps(MARATHON_STATUS_LINE)}"]
         )
-    command.extend(extra_args or [])
+    overrides, arguments = _collect_codex_config_overrides(extra_args or [])
+    command.extend(overrides)
+    command.extend(arguments)
     return command
 
 
@@ -131,7 +164,8 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
     if missing:
         raise RuntimeError("Missing " + ", ".join(missing) + "; see docs/SETUP.md")
     environment["MARATHON_ROUTER_TOKEN"] = runtime.router_token
-    environment["CODEX_CLI_NAME"] = _marathon_cli_name(instance)
+    environment["CODEX_CLI_NAME"] = _marathon_cli_name()
+    environment["CODEX_CLI_INSTANCE"] = instance or ""
     before = snapshot_sessions(codex_home)
     started = time.monotonic()
     runtime.record(

@@ -1,0 +1,69 @@
+diff --git a/codex-rs/utils/cli/src/resume_command.rs b/codex-rs/utils/cli/src/resume_command.rs
+index c98497ca77..5446f0fc5e 100644
+--- a/codex-rs/utils/cli/src/resume_command.rs
++++ b/codex-rs/utils/cli/src/resume_command.rs
+@@ -5,6 +5,7 @@ use codex_shell_command::parse_command::shlex_join;
+ use std::env;
+ 
+ pub const CODEX_CLI_NAME_ENV_VAR: &str = "CODEX_CLI_NAME";
++pub const CODEX_CLI_INSTANCE_ENV_VAR: &str = "CODEX_CLI_INSTANCE";
+ 
+ pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+     let resume_target = thread_name
+@@ -36,7 +37,14 @@ pub fn cli_command_for_action(action: &str) -> String {
+         })
+         .unwrap_or_else(|| "codex".to_string());
+ 
+-    shlex_join(&[cli_name, action.to_string()])
++    let mut arguments = vec![cli_name];
++    if let Ok(instance) = env::var(CODEX_CLI_INSTANCE_ENV_VAR)
++        && !instance.is_empty()
++    {
++        arguments.extend(["--instance".to_string(), instance]);
++    }
++    arguments.push(action.to_string());
++    shlex_join(&arguments)
+ }
+ 
+ pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
+@@ -185,4 +193,40 @@ mod tests {
+             "'/tmp/My Marathon/bin/marathon' resume"
+         );
+     }
++
++    #[test]
++    #[serial]
++    fn named_instance_resume_keeps_executable_and_arguments_separate() {
++        let _name = EnvVarGuard::set(CODEX_CLI_NAME_ENV_VAR, OsStr::new("marathon"));
++        let _instance = EnvVarGuard::set(CODEX_CLI_INSTANCE_ENV_VAR, OsStr::new("gpu23"));
++        assert_eq!(
++            resume_command(Some("my session"), /*thread_id*/ None),
++            Some("marathon --instance gpu23 resume 'my session'".to_string())
++        );
++    }
++
++    #[test]
++    #[serial]
++    fn named_instance_quotes_paths_and_shell_metacharacters_individually() {
++        let _name = EnvVarGuard::set(
++            CODEX_CLI_NAME_ENV_VAR,
++            OsStr::new("/tmp/My Marathon/bin/marathon"),
++        );
++        let _instance = EnvVarGuard::set(
++            CODEX_CLI_INSTANCE_ENV_VAR,
++            OsStr::new("test; echo unexpected"),
++        );
++        assert_eq!(
++            cli_command_for_action("resume"),
++            "'/tmp/My Marathon/bin/marathon' --instance 'test; echo unexpected' resume"
++        );
++    }
++
++    #[test]
++    #[serial]
++    fn empty_instance_keeps_default_resume_command() {
++        let _name = EnvVarGuard::set(CODEX_CLI_NAME_ENV_VAR, OsStr::new("marathon"));
++        let _instance = EnvVarGuard::set(CODEX_CLI_INSTANCE_ENV_VAR, OsStr::new(""));
++        assert_eq!(cli_command_for_action("resume"), "marathon resume");
++    }
+ }

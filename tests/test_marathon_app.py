@@ -22,6 +22,7 @@ from marathon_app.codex_home import (
 )
 from marathon_app.frontends import (
     _codex_binary,
+    _collect_codex_config_overrides,
     _marathon_cli_name,
     _stream_chat,
     codex_command,
@@ -1408,7 +1409,7 @@ class CodexHomeTests(unittest.TestCase):
 
 
 class FrontendTests(unittest.TestCase):
-    def test_named_codex_sessions_print_instance_aware_resume_command(self) -> None:
+    def test_resume_launcher_is_a_single_executable(self) -> None:
         with (
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch(
@@ -1416,22 +1417,56 @@ class FrontendTests(unittest.TestCase):
                 return_value="/usr/bin/marathon",
             ),
         ):
-            command = _marathon_cli_name("gpu23")
+            command = _marathon_cli_name()
 
-        self.assertEqual(command, "marathon --instance gpu23")
+        self.assertEqual(command, "marathon")
 
     def test_named_resume_keeps_a_configured_launcher_name(self) -> None:
         with mock.patch.dict(
             os.environ,
-            {"CODEX_CLI_NAME": "/opt/marathon/bin/marathon"},
+            {"CODEX_CLI_NAME": "/opt/My Marathon/bin/marathon"},
             clear=True,
         ):
-            command = _marathon_cli_name("gpu23")
+            command = _marathon_cli_name()
 
         self.assertEqual(
             command,
-            "/opt/marathon/bin/marathon --instance gpu23",
+            "/opt/My Marathon/bin/marathon",
         )
+
+    def test_config_overrides_keep_order_across_nested_commands(self) -> None:
+        arguments = [
+            "exec", "--json", "-c", 'model_reasoning_effort="low"',
+            "resume", "--last", '--config=model_reasoning_effort="medium"',
+            '-cweb_search="disabled"', '-c=temperature=0', "check the project",
+        ]
+        self.assertEqual(
+            _collect_codex_config_overrides(arguments),
+            (["-c", 'model_reasoning_effort="low"',
+              "-c", 'model_reasoning_effort="medium"',
+              "-c", 'web_search="disabled"', "-c", "temperature=0"],
+             ["exec", "--json", "resume", "--last", "check the project"]),
+        )
+
+    def test_config_collector_preserves_literal_prompt_and_option_values(self) -> None:
+        arguments = ["exec", "-o", "answer.txt", "--", "--config=literal prompt"]
+        self.assertEqual(_collect_codex_config_overrides(arguments), ([], arguments))
+        self.assertEqual(
+            _collect_codex_config_overrides(["exec", "Explain -c and --config=x"]),
+            ([], ["exec", "Explain -c and --config=x"]),
+        )
+        with self.assertRaisesRegex(ValueError, "requires a key=value"):
+            _collect_codex_config_overrides(["exec", "--config"])
+
+    def test_user_config_overrides_follow_defaults_in_the_same_cli_scope(self) -> None:
+        model = fixture_model()
+        runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"))
+        command = codex_command(
+            runtime, ["exec", "--config", 'web_search="disabled"', "hello"]
+        )
+        self.assertLess(command.index('web_search="cached"'), command.index('web_search="disabled"'))
+        self.assertLess(command.index('web_search="disabled"'), command.index("exec"))
+        self.assertEqual(command[command.index("exec"):], ["exec", "hello"])
 
     def test_patched_codex_is_preferred_when_installed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1591,6 +1626,7 @@ class FrontendTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(run.call_args.kwargs["env"]["CODEX_CLI_NAME"], "marathon")
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_CLI_INSTANCE"], "")
         self.assertEqual(
             run.call_args.kwargs["env"]["CODEX_HOME"],
             str(marathon_home.resolve()),
