@@ -29,6 +29,7 @@ from .catalog import (
     Profile,
     ReasoningLevel,
     discover_models,
+    default_profile_id,
     find_model,
     find_profile,
     profiles_for_model,
@@ -139,7 +140,7 @@ def remote_catalog_payload(instance: str | None = None) -> dict[str, object]:
                     "id": model.family.id,
                     "display_name": model.family.display_name,
                     "backend": model.family.backend,
-                    "default_profile": model.family.default_profile,
+                    "default_profile": default_profile_id(model),
                     "default_reasoning_level": model.family.default_reasoning_level,
                     "reasoning_levels": [
                         asdict(level) for level in model.family.reasoning_levels
@@ -323,7 +324,7 @@ def load_remote_selection(
         return {}
     return {
         key: str(value[key])
-        for key in ("model", "profile", "frontend")
+        for key in ("model", "profile", "frontend", "profile_policy")
         if value.get(key)
     }
 
@@ -348,6 +349,7 @@ def save_remote_selection(
         "model": model.id,
         "profile": profile.id,
         "frontend": frontend,
+        "profile_policy": "explicit",
     }
     selection_file.parent.mkdir(parents=True, exist_ok=True)
     temporary = selection_file.with_suffix(".tmp")

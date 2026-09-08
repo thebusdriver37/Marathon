@@ -1,4 +1,4 @@
-# Exact assets and eligibility for optional tested presets.
+# Exact assets and eligibility for hardware-specific recommended presets.
 # Other models and hardware continue to use the general setup flow.
 [qwen38-iq4-xs]
 profile = "qwen38-iq4-xs-196k"

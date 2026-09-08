@@ -194,7 +194,7 @@ def load_selection(instance: str | None = None) -> dict[str, str]:
         value = json.loads(selection_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return {key: str(value[key]) for key in ("model", "profile", "frontend") if value.get(key)}
+    return {key: str(value[key]) for key in ("model", "profile", "frontend", "profile_policy") if value.get(key)}
 
 
 def save_selection(
@@ -208,7 +208,8 @@ def save_selection(
     temporary = selection_file.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(
-            {"schema": 1, "model": model.id, "profile": profile.id, "frontend": frontend},
+            {"schema": 1, "model": model.id, "profile": profile.id, "frontend": frontend,
+             "profile_policy": "explicit"},
             indent=2,
         ) + "\n",
         encoding="utf-8",

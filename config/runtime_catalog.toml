@@ -215,7 +215,7 @@ frontends = ["codex", "direct"]
 [[families.profiles]]
 id = "qwen38-iq4-xs-196k"
 display_name = "Tuned IQ4_XS 196K (3090 / Ti)"
-description = "Optional exact-model bundle with DFlash2 and CPU vision. Selects one eligible free card; never changes power limits."
+description = "Default for the complete IQ4_XS bundle on an eligible RTX 3090 / Ti. Uses DFlash2 and CPU vision on one free card; never changes power limits."
 backend = "qwen38"
 bundle = "qwen38-iq4-xs"
 context = 196000
@@ -229,7 +229,7 @@ cache_v = "q8_0"
 flash_attention = "on"
 extra_args = ["--fit", "off", "--cont-batching", "--kv-unified", "--cache-ram", "0", "--ctx-checkpoints", "64", "--checkpoint-min-step", "4096", "--threads", "18", "--threads-batch", "24", "--poll", "100", "--backend-sampling", "--no-mmproj-offload", "--spec-type", "draft-dflash", "--spec-draft-model", "{model_dir}/Qwen3.8-27B-DFlash2-Q4_K_M.gguf", "--spec-draft-ngl", "all", "--spec-draft-n-max", "6", "--spec-draft-n-min", "0", "--cache-type-k-draft", "q4_0", "--cache-type-v-draft", "q4_0", "--load-mode", "mmap+mlock", "--reasoning", "off", "--reasoning-preserve", "--slots"]
 tool_thinking_budget = 2048
-confidence = "source-packaged; release benchmark pending"
+confidence = "recommended for matching bundle and eligible RTX 3090 / Ti"
 frontends = ["codex", "direct"]
 
 [[families.profiles]]

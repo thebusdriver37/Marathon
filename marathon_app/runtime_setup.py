@@ -111,10 +111,8 @@ def eligible_gpus(bundle_id: str) -> tuple[AvailableGpu, ...]:
     return tuple(sorted(found, key=lambda gpu: (-gpu.free_mib, gpu.index)))
 
 
-def prepare_bundle_profile(model: Model, profile: Profile) -> Profile:
-    """Validate the complete bundle and select one free, explicitly supported GPU."""
-    if not profile.bundle:
-        return profile
+def validate_bundle_files(model: Model, profile: Profile) -> None:
+    """Check installed bundle assets without probing or reserving GPUs."""
     bundle = model_bundle(profile.bundle)
     if not bundle_matches_model(profile.bundle, model.path):
         raise ValueError("This profile requires the exact model from its setup bundle")
@@ -127,6 +125,14 @@ def prepare_bundle_profile(model: Model, profile: Profile) -> Profile:
             or model.multimodal_projector.resolve() != path.resolve()
         ):
             raise ValueError("The tuned profile requires its matching vision projector")
+
+
+def prepare_bundle_profile(model: Model, profile: Profile) -> Profile:
+    """Validate the complete bundle and select one free, explicitly supported GPU."""
+    if not profile.bundle:
+        return profile
+    validate_bundle_files(model, profile)
+    bundle = model_bundle(profile.bundle)
     candidates = eligible_gpus(profile.bundle)
     if profile.gpus:
         if len(profile.gpus) != 1:

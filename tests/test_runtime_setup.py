@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,7 @@ from unittest import mock
 
 from rich.console import Console
 
-from marathon_app import catalog, runtime_setup, ui
+from marathon_app import catalog, remote, runtime, runtime_setup, ui
 
 
 class RuntimeSetupTests(unittest.TestCase):
@@ -39,6 +40,92 @@ class RuntimeSetupTests(unittest.TestCase):
             self.assertIn(family["backend"], names)
             for profile in family["profiles"]:
                 self.assertIn(profile.get("backend", family["backend"]), names)
+
+    def bundle_fixture(self, root):
+        bundle = {**self.bundle, "files": [{**a, "size_bytes": 3} for a in self.bundle["files"]]}
+        for asset in bundle["files"]:
+            (root / asset["filename"]).write_bytes(b"abc")
+        projector = root / next(a["filename"] for a in bundle["files"] if a["role"] == "projector")
+        return bundle, catalog.Model("test", "Test", root / self.target["filename"], 3,
+                                     self.family, "IQ4_XS", projector)
+
+    def test_complete_bundle_defaults_and_legacy_selection_migration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            bundle, model = self.bundle_fixture(Path(folder))
+            with (
+                mock.patch.object(runtime_setup, "model_bundle", return_value=bundle),
+                mock.patch.object(runtime_setup, "eligible_gpus", return_value=(self.gpu,)),
+            ):
+                self.assertEqual(catalog.find_profile(model, None).id, self.profile.id)
+                for remembered in ({}, {"model": model.id, "profile": "auto"}):
+                    self.assertEqual(ui._initial_selection([model], remembered).profile.id, self.profile.id)
+                self.assertEqual(catalog.find_profile(model, "auto").id, "auto")
+                for profile in ("native-256k", self.profile.id):
+                    self.assertEqual(ui._initial_selection([model], {"profile": profile}).profile.id, profile)
+                custom = replace(model, family=replace(self.family, default_profile="native-256k"))
+                self.assertEqual(catalog.find_profile(custom, None).id, "native-256k")
+                self.assertEqual(ui._initial_selection([custom], {"profile": "auto"}).profile.id, "auto")
+
+    def test_incomplete_bundle_and_ineligible_hardware_keep_auto(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            bundle, model = self.bundle_fixture(root)
+            with (
+                mock.patch.object(runtime_setup, "model_bundle", return_value=bundle),
+                mock.patch.object(runtime_setup, "eligible_gpus", return_value=()) as detect,
+            ):
+                self.assertEqual(catalog.find_profile(model, None).id, "auto")
+                detect.return_value = (self.gpu,)
+                for asset in bundle["files"]:
+                    with self.subTest(role=asset["role"]):
+                        path = root / asset["filename"]
+                        path.write_bytes(b"incomplete")
+                        self.assertEqual(catalog.find_profile(model, None).id, "auto")
+                        self.assertEqual(ui._initial_selection([model], {"profile": "auto"}).profile.id, "auto")
+                        path.write_bytes(b"abc")
+                self.assertEqual(catalog.find_profile(replace(model, multimodal_projector=None), None).id, "auto")
+
+    def test_startup_persists_migration_and_subsequent_explicit_auto(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            bundle, model = self.bundle_fixture(root)
+            selection_file = root / "selection.json"
+            selection_file.write_text(json.dumps({"model": model.id, "profile": "auto", "frontend": "codex"}))
+            with (
+                mock.patch.object(runtime_setup, "model_bundle", return_value=bundle),
+                mock.patch.object(runtime_setup, "eligible_gpus", return_value=(self.gpu,)),
+                mock.patch.object(ui, "discover_models", return_value=[model]),
+                mock.patch.object(ui, "_ensure_local_tools", return_value=True),
+                mock.patch.object(ui, "Runtime") as worker,
+                mock.patch.object(ui, "_launch_frontend", return_value=0),
+                mock.patch.object(runtime, "ensure_dirs"),
+                mock.patch.object(runtime, "runtime_paths", return_value=types.SimpleNamespace(selection_file=selection_file)),
+            ):
+                self.assertEqual(ui.run_codex_default(instance="test"), 0)
+                self.assertEqual(worker.call_args.args[1].id, self.profile.id)
+                self.assertEqual(runtime.load_selection("test")["profile"], self.profile.id)
+                runtime.save_selection(model, catalog.find_profile(model, "auto"), "codex", "test")
+                self.assertEqual(ui.run_codex_default(instance="test"), 0)
+                self.assertEqual(worker.call_args.args[1].id, "auto")
+
+    def test_remote_catalog_uses_host_default_and_remembers_explicit_auto(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            bundle, model = self.bundle_fixture(root)
+            with (
+                mock.patch.object(runtime_setup, "model_bundle", return_value=bundle),
+                mock.patch.object(runtime_setup, "eligible_gpus", return_value=(self.gpu,)) as detect,
+                mock.patch.object(remote, "discover_models", return_value=[model]),
+                mock.patch.object(remote, "_require_loopback_bindings"),
+                mock.patch.object(remote, "REMOTE_SELECTION_FILE", root / "remote.json"),
+            ):
+                models = remote._models_from_payload(remote.remote_catalog_payload())
+                detect.return_value = ()  # Client hardware must not override the host.
+                self.assertEqual(ui._initial_selection(models, {"profile": "auto"}).profile.id, self.profile.id)
+                auto = catalog.find_profile(models[0], "auto")
+                remote.save_remote_selection("gpu-host", models[0], auto, "codex")
+                remembered = remote.load_remote_selection("gpu-host")
+                self.assertEqual(ui._initial_selection(models, remembered).profile.id, "auto")
 
     def test_gpu_selection_rejects_other_cards_busy_cards_and_visibility_exclusions(self):
         output = "\n".join([

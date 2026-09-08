@@ -249,7 +249,7 @@ for ((index = 1; index < ${#model_lines[@]}; index++)); do
 done
 
 backend_inventory="$(PYTHONPATH="$ROOT_DIR" "$ROOT_DIR/.marathon/venv/bin/python3" - <<'PY' 2>/dev/null || true
-from marathon_app.catalog import backend_environment, backends, discover_models, find_profile
+from marathon_app.catalog import backend_environment, backends, discover_models, find_profile, find_selected_profile
 from marathon_app.runtime import load_selection
 
 configured = backends()
@@ -257,9 +257,9 @@ remembered = load_selection()
 seen_backends = set()
 seen_files = set()
 for model in discover_models():
-    requested = remembered.get("profile") if remembered.get("model") == model.id else None
+    selected = remembered if remembered.get("model") == model.id else {}
     try:
-        profile = find_profile(model, requested)
+        profile = find_selected_profile(model, selected)
     except ValueError:
         profile = find_profile(model, None)
     backend_id = profile.backend or model.family.backend

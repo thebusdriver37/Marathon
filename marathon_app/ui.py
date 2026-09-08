@@ -27,8 +27,10 @@ from .catalog import (
     backend_for,
     backends,
     discover_models,
+    default_profile_id,
     find_model,
     find_profile,
+    find_selected_profile,
     format_size,
     profiles_for_model,
     settings,
@@ -612,6 +614,7 @@ def _choose_model_profile(
         model = models[chosen_model]
         model_index = chosen_model
         profiles = list(profiles_for_model(model))
+        preferred_profile = default_profile_id(model)
         profile_index = next(
             (
                 index
@@ -619,7 +622,7 @@ def _choose_model_profile(
                 if model.id == selection.model.id and profile.id == selection.profile.id
             ),
             next(
-                (index for index, profile in enumerate(profiles) if profile.id == model.family.default_profile),
+                (index for index, profile in enumerate(profiles) if profile.id == preferred_profile),
                 0,
             ),
         )
@@ -706,7 +709,7 @@ def _show_dyno_results(console: Console, summary) -> None:
 def _run_dyno_flow(console: Console, selection: Selection) -> Selection | None:
     # Tune from the shipped family default, not from a previous local winner or
     # a deliberately constrained quick-chat profile.
-    baseline = find_profile(selection.model, selection.model.family.default_profile)
+    baseline = find_profile(selection.model, None)
     chosen = _arrow_menu(
         console,
         "What should Dyno optimize?",
@@ -865,7 +868,7 @@ def _initial_selection(
         model = preferred[0] if preferred else models[0]
     frontend = remembered.get("frontend", "codex")
     try:
-        profile = find_profile(model, remembered.get("profile"), frontend)
+        profile = find_selected_profile(model, remembered, frontend)
     except ValueError:
         frontend = "codex"
         profile = find_profile(model, None, frontend)

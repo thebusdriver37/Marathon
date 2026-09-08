@@ -814,8 +814,36 @@ def find_model(query: str, models: list[Model] | None = None) -> Model:
     return matches[0]
 
 
+def default_profile_id(model: Model) -> str:
+    """Prefer the complete tuned bundle on eligible hardware, respecting local defaults."""
+    if model.family.default_profile != "auto":
+        return model.family.default_profile
+    from .runtime_setup import eligible_gpus, validate_bundle_files
+
+    for profile in profiles_for_model(model):
+        if not profile.bundle:
+            continue
+        try:
+            validate_bundle_files(model, profile)
+        except (OSError, ValueError):
+            continue
+        if eligible_gpus(profile.bundle):
+            return profile.id
+    return model.family.default_profile
+
+
+def find_selected_profile(model: Model, remembered: dict[str, str], frontend: str | None = None) -> Profile:
+    """Migrate legacy Automatic selections; newly saved choices remain explicit."""
+    requested = remembered.get("profile")
+    if requested == "auto" and remembered.get("profile_policy") != "explicit":
+        preferred = default_profile_id(model)
+        if preferred == "qwen38-iq4-xs-196k":
+            requested = preferred
+    return find_profile(model, requested, frontend)
+
+
 def find_profile(model: Model, profile_id: str | None, frontend: str | None = None) -> Profile:
-    profile_id = profile_id or model.family.default_profile
+    profile_id = profile_id or default_profile_id(model)
     available = profiles_for_model(model)
     for profile in available:
         if profile.id == profile_id:

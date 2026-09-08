@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .catalog import discover_models, format_size
+from .catalog import default_profile_id, discover_models, format_size
 from .codex_home import marathon_codex_home, session_home_for_id
 from .instance import normalize_instance_name, resolve_instance
 from .model_library import register_model_root
@@ -51,7 +51,7 @@ def _models(targets: list[str]) -> int:
     table.add_column("Default profile")
     table.add_column("Path", style="dim")
     for model in models:
-        table.add_row(model.display_name, format_size(model.size_bytes), model.family.default_profile, str(model.path))
+        table.add_row(model.display_name, format_size(model.size_bytes), default_profile_id(model), str(model.path))
     console.print(table)
     return 0 if models else 1
 
