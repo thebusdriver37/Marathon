@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import tempfile
 import unittest
 import uuid
 
@@ -15,6 +17,7 @@ from marathon_app.swarm_tools import agent_identity, identify_agent, flatten_req
 class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.calls = []
+        self.echo_backend = False
         self.events = []
         self.servers = []
         self.active = 0
@@ -55,6 +58,18 @@ class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
                         raise
                     finally:
                         self.active -= 1
+                if websocket and self.echo_backend:
+                    number = len(self.calls)
+                    call = {'type': 'function_call', 'name': 'exec_command',
+                            'id': f'fc_{number}', 'call_id': f'call_{number}',
+                            'arguments': '{"cmd":"echo go"}'}
+                    await websocket.send_json({'type': 'response.created', 'response': {'id': f'resp_{number}'}})
+                    await websocket.send_json({'type': 'response.output_item.done', 'output_index': 0, 'item': call})
+                    await websocket.send_json({'type': 'response.completed', 'response': {
+                        'id': f'resp_{number}', 'status': 'completed', 'output': [call],
+                        'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}})
+                    await websocket.close()
+                    return websocket
                 if websocket:
                     await websocket.send_json({'type': 'response.completed', 'response': {'worker': index}})
                     await websocket.close()
@@ -207,3 +222,100 @@ class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(instructions, 'Original instructions')
             else:
                 self.assertIn('Current agent identity: /root/worker', instructions)
+
+    async def test_echo_recovery_lists_helpers_once_then_restores_normal_choice(self):
+        from test_echo_recovery import loop
+        thread = str(uuid.uuid4())
+        original = {'input': [*loop(), {'role': 'user', 'content': 'Continue with helpers'}],
+                    'tool_choice': 'auto',
+                    'tools': [{'type': 'function', 'name': 'exec_command', 'parameters': {'type': 'object'}},
+                              {'type': 'namespace', 'name': 'collaboration', 'tools': [
+                        {'type': 'function', 'name': 'list_agents', 'parameters': {'type': 'object'}}]}]}
+        response = await self.client.post('/v1/responses', headers=self.headers(thread), json=original)
+        await self.response_payload(response)
+        sent = json.loads(self.calls[-1][3])
+        self.assertEqual(sent['tool_choice'], 'required')
+        self.assertEqual([tool['name'] for tool in sent['tools']], ['collaboration__list_agents'])
+        self.assertNotIn('echo-0', json.dumps(sent['input']))
+        original['input'].extend([
+            {'type': 'function_call', 'namespace': 'collaboration', 'name': 'list_agents',
+             'call_id': 'inventory', 'arguments': '{}'},
+            {'type': 'function_call_output', 'call_id': 'inventory', 'output': 'helpers are idle'},
+        ])
+        response = await self.client.post('/v1/responses', headers=self.headers(thread), json=original)
+        await self.response_payload(response)
+        sent = json.loads(self.calls[-1][3])
+        self.assertEqual(sent['tool_choice'], 'auto')
+        self.assertEqual([tool['name'] for tool in sent['tools']], ['exec_command', 'collaboration__list_agents'])
+
+    async def test_compaction_and_tools_disabled_requests_do_not_start_echo_recovery(self):
+        from test_echo_recovery import loop
+        for path, extra in (('/v1/responses/compact', {'tools': [{'type': 'function', 'name': 'exec_command'}]}),
+                            ('/v1/responses', {'tools': [{'type': 'function', 'name': 'exec_command'}],
+                                               'tool_choice': 'none'})):
+            original = {'input': loop(), **extra}
+            response = await self.client.post(path, headers=self.headers(), json=original)
+            self.assertEqual(response.status, 200)
+            await self.response_payload(response)
+            self.assertEqual(len(json.loads(self.calls[-1][3])['input']), len(original['input']))
+        self.assertFalse(any(event[0].startswith('swarm.echo_') for event in self.events))
+        response = await self.client.post('/v1/responses', headers={
+            **self.headers(), 'x-codex-turn-metadata': '{"request_kind":"compaction"}'},
+            json={'input': loop()})
+        self.assertEqual(response.status, 200)
+        await self.response_payload(response)
+        self.assertEqual(len(json.loads(self.calls[-1][3])['input']), len(loop()))
+
+    async def test_lead_uses_followup_but_helpers_can_still_send_messages(self):
+        for identity in ('/root', '/root/helper'):
+            thread = str(uuid.uuid4())
+            self.gateway.agent_paths[thread] = identity
+            response = await self.client.post('/v1/responses', headers=self.headers(thread), json={
+                'tools': [{'type': 'namespace', 'name': 'collaboration', 'tools': [
+                    {'type': 'function', 'name': name, 'parameters': {'type': 'object'}}
+                    for name in ('followup_task', 'send_message')]}]})
+            await self.response_payload(response)
+            names = [tool['name'] for tool in json.loads(self.calls[-1][3])['tools']]
+            self.assertIn('collaboration__followup_task', names)
+            self.assertEqual('collaboration__send_message' in names, identity != '/root')
+
+    async def test_new_echo_loop_stops_before_another_backend_request(self):
+        from test_echo_recovery import loop
+        response = await self.client.post('/v1/responses', headers=self.headers(), json={
+            'input': [{'role': 'user', 'content': 'Use helpers'}, *loop()],
+            'tools': [{'type': 'function', 'name': 'exec_command'}],
+        })
+        self.assertEqual(response.status, 400)
+        self.assertIn('Marathon stopped this turn', await response.text())
+        self.assertEqual(self.calls, [])
+
+    async def test_non_object_request_is_rejected_before_history_inspection(self):
+        response = await self.client.post('/v1/responses', headers=self.headers(), json=[])
+        self.assertEqual(response.status, 400)
+        self.assertIn('JSON objects', await response.text())
+        self.assertEqual(self.calls, [])
+
+    @unittest.skipUnless(os.environ.get('MARATHON_TEST_CODEX_BIN'), 'Requires installed Codex frontend')
+    async def test_real_frontend_exits_a_repeating_shell_loop(self):
+        from marathon_app.echo_recovery import ECHO_LIMIT
+        self.echo_backend = True
+        with tempfile.TemporaryDirectory(prefix='marathon-echo-guard-') as directory:
+            provider = ('model_providers.marathon-local={name="Loop test",wire_api="responses",'
+                        f'base_url="{self.client.make_url("/v1")}",env_key="MARATHON_ROUTER_TOKEN",'
+                        'requires_openai_auth=false,supports_websockets=false}')
+            process = await asyncio.create_subprocess_exec(
+                os.environ['MARATHON_TEST_CODEX_BIN'], '-c', provider,
+                '-c', 'model_provider="marathon-local"', '-c', 'sandbox_mode="workspace-write"',
+                'exec', '--skip-git-repo-check', 'Run the test commands.',
+                cwd=directory, env=dict(os.environ, CODEX_HOME=directory, CODEX_SQLITE_HOME=directory,
+                                       MARATHON_LOCAL_ONLY='1', MARATHON_ROUTER_TOKEN='gateway-secret'),
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+                self.assertNotEqual(process.returncode, 0)
+                self.assertIn(b'Marathon stopped this turn', stdout + stderr)
+                self.assertEqual(len(self.calls), ECHO_LIMIT)
+            finally:
+                if process.returncode is None:
+                    process.terminate()
+                    await process.wait()

@@ -44,9 +44,17 @@ Ordinary `marathon resume` and `marathon exec resume` recognize a saved swarm an
 To override the number of GPU workers for this launch, use `marathon swarm --workers 1 resume SESSION_UUID` with the same `MARATHON_CODEX_HOME`.
 Resume requires an explicit lead UUID; the swarm picker and `--last` are not supported.
 The lead can reuse its saved helpers with `followup_task`; `list_agents` may show only currently running agents until an idle helper is resumed.
+The lead is offered `followup_task` for helper communication, which starts an idle helper or delivers a message to a running one.
+The redundant `send_message` option is hidden from the lead because it does not start idle helpers; helpers retain it for progress messages to the lead.
 New runs persist their agent and worker counts, while older runs recover worker count from their event log and use the original three-agent default.
 The normal router translates saved local collaboration messages during both inference and compaction.
 The saved rollout is not rewritten by that translation.
+
+Swarm requests omit long runs of literal echo-only commands and their associated reasoning from the model's view of old history, while preserving the saved rollout and useful commands.
+For a recovered lead, the first inference request exposes only the read-only helper-list tool; subsequent requests restore the normal tools.
+This breaks the observed pattern of announcing helper calls while merely printing shell markers.
+If an agent produces eight consecutive echo-only commands in a turn, Marathon stops that turn with an explanatory error instead of allowing the loop to continue indefinitely.
+Send a new message to retry after that error.
 
 ## Validation
 
@@ -55,6 +63,7 @@ The saved rollout is not rewritten by that translation.
 MARATHON_TEST_CODEX_BIN=~/.local/share/marathon/bin/codex .marathon/venv/bin/python -m unittest discover -s tests -p test_process_isolation.py -v
 .marathon/venv/bin/python scripts/evals/swarm.py --run-gpu --workers 1 --check-resume
 .marathon/venv/bin/python scripts/evals/swarm.py --run-gpu --workers 3
+.marathon/venv/bin/python scripts/evals/swarm_recovery.py --run-gpu --source-home /path/to/swarm/codex-home --session LEAD_UUID
 ```
 
 The coding evaluation assigns two modules to helpers and an integration module to the lead.
@@ -74,6 +83,10 @@ Recovery validation reproduced the llama.cpp `Cannot determine type of 'item'` e
 With shared history normalization, that same copy compacted successfully and answered the diagnostic prompt, while the original rollout remained byte-for-byte unchanged.
 The real Codex recovery test checks rejection of a second live writer, forcibly kills its disposable launcher, then successfully resumes the conversation without removing lock files.
 The optional resume evaluation shuts down a fresh team, resumes through the ordinary headless command, and verifies that the same three thread IDs run again without changing the completed files.
+The recovery evaluation copies a real three-agent history and its SQLite state into a private temporary directory, asks both saved helpers for a diagnostic reply, and checks their identities, the absence of new shell calls, and that the original history is unchanged.
+Its transcript and results remain in the printed evidence directory for inspection.
+The echo recovery change passed a real-history replay with both original helpers replying and zero new shell commands, plus a fresh three-GPU coding trial in 38.69 seconds with all three independent tests passing.
+A separate replay still showed a helper continuing its old task despite receiving the new brief correctly; the echo guard does not guarantee that the model follows every instruction.
 The process-isolation test verifies a separate PID namespace before running the original broad `pkill` pattern and checks that a matching host sentinel survives.
 The post-fix three-agent coding evaluation passed on one worker in 98.15 seconds, including independent verification of all three coding tests.
 

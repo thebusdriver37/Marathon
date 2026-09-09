@@ -154,7 +154,8 @@ def run_swarm(arguments, *, session_home=None):
     guidance = (
         f'You lead a local team with {args.agents - 1} helper agents. '
         'Use the native multi-agent tools to delegate independent tasks when useful. '
-        f'Spawn at most {args.agents - 1} helpers in this session, and reuse them with messages. '
+        f'Spawn at most {args.agents - 1} helpers in this session. '
+        'Contact helpers with followup_task: it starts idle helpers and delivers messages to running ones. '
         'Helpers must not spawn more agents. Keep all agents on the inherited model. '
         'Give helpers disjoint file ownership or separate git worktrees before parallel edits. '
         'Do useful work while helpers run, then inspect their results and run integration tests. '

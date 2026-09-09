@@ -8,6 +8,7 @@ import threading
 import uuid
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
+from .echo_recovery import ECHO_LIMIT, recover_echo_history
 from .swarm_tools import agent_identity, identify_agent, flatten_request, restore_calls, translated_sse
 
 
@@ -20,6 +21,7 @@ class SwarmGateway:
         self.bindings = {}
         self.tool_names = {}
         self.agent_paths = dict(agent_paths or {})
+        self.echo_recovered = set()
         self.stop = threading.Event()
         self.ready = queue.Queue()
         self.thread = None
@@ -63,8 +65,47 @@ class SwarmGateway:
         if body:
             try:
                 original = json.loads(body)
+                if not isinstance(original, dict):
+                    raise ValueError('Swarm requests must be JSON objects.')
+                omitted, echo_streak = 0, 0
+                metadata = json.loads(request.headers.get('x-codex-turn-metadata') or '{}')
+                compaction = isinstance(metadata, dict) and metadata.get('request_kind') == 'compaction'
+                # Compaction and tools-disabled requests must remain summaries,
+                # without the recovery instruction to contact helpers.
+                if (request.path == '/v1/responses' and not compaction
+                        and original.get('tool_choice') != 'none'):
+                    original, omitted, echo_streak = recover_echo_history(original)
+                if request.path == '/v1/responses' and echo_streak >= ECHO_LIMIT:
+                    self.record('swarm.echo_loop_stopped', {'thread': thread_id, 'calls': echo_streak})
+                    raise web.HTTPBadRequest(text=(
+                        'Marathon stopped this turn after repeated echo-only commands. '
+                        'No helper calls were made by those commands. Send a new message to retry; '
+                        'the repeated markers will be omitted from model context.'
+                    ))
+                if omitted:
+                    self.record('swarm.echo_history_filtered', {'thread': thread_id, 'calls': omitted})
                 identity = self.agent_paths.setdefault(thread_id, agent_identity(original))
                 payload = identify_agent(flatten_request(original, names), identity)
+                if identity == '/root' and isinstance(payload.get('tools'), list):
+                    # followup_task delivers to running helpers and also starts
+                    # idle ones. Keep one way to contact helpers from the lead;
+                    # send_message can silently leave an idle helper asleep.
+                    payload['tools'] = [tool for tool in payload['tools']
+                                        if tool.get('name') != 'collaboration__send_message']
+                if (omitted and identity == '/root' and request.path == '/v1/responses'
+                        and payload.get('tool_choice') in (None, 'auto')
+                        and thread_id not in self.echo_recovered
+                        and any(tool.get('name') == 'collaboration__list_agents'
+                                for tool in payload.get('tools', []))):
+                    # Restrict this one recovery step to the read-only inventory.
+                    # The local router can relax a named choice to "required"
+                    # during protocol recovery, so a named choice alone is not
+                    # sufficient to keep it from falling back to echo commands.
+                    payload['tools'] = [tool for tool in payload['tools']
+                                        if tool.get('name') == 'collaboration__list_agents']
+                    payload['tool_choice'] = 'required'
+                    self.echo_recovered.add(thread_id)
+                    self.record('swarm.echo_recovery_inventory', {'thread': thread_id})
             except (ValueError, KeyError, TypeError) as error:
                 raise web.HTTPBadRequest(text=str(error))
             # Codex can reuse the parent's cache key in children. Marathon
