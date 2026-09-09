@@ -20,6 +20,7 @@ Named instances:
 Commands:
   codex           Start Marathon on a free worker (default)
   dashboard       Open advanced model, profile, frontend, and tuning controls
+  swarm           Experimental native Codex team across leased GPU workers
   setup           Find, add, or download a GGUF model
   hermes          Start Marathon and open Hermes Agent
   direct          Start Marathon and open clean direct chat
@@ -105,7 +106,7 @@ if [[ $# -gt 0 ]]; then
 fi
 
 case "$cmd" in
-  dashboard|codex|exec|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare|resume|fork|help|--help|-h|--version|-V)
+  dashboard|swarm|codex|exec|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare|resume|fork|help|--help|-h|--version|-V)
     ;;
   *)
     if [[ ${#instance_args[@]} -gt 0 ]]; then
@@ -128,7 +129,7 @@ case "$cmd" in
   dashboard)
     run_app "${instance_args[@]}" dashboard "$@"
     ;;
-  codex|exec|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare|resume|fork)
+  swarm|codex|exec|hermes|direct|remote|remote-host|tune|setup|models|status|stop|report|compare|resume|fork)
     run_app "${instance_args[@]}" "$cmd" "$@"
     ;;
   doctor)

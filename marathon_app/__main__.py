@@ -293,6 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         choices=(
             "dashboard",
+            "swarm",
             "codex",
             "exec",
             "hermes",
@@ -403,6 +404,13 @@ def main(argv: list[str] | None = None) -> int:
         return _compare(args.targets, instance)
     if args.command == "remote-host":
         return run_remote_host_command(args.targets, instance)
+    if args.command == "swarm":
+        from .swarm import run_swarm
+        try:
+            return run_swarm(args.targets)
+        except (RuntimeError, ValueError) as error:
+            Console().print(f"[bold red]Swarm could not start:[/bold red] {error}")
+            return 2
     if args.command == "remote":
         if len(args.targets) != 1:
             Console().print("[bold red]Usage:[/bold red] marathon remote <ssh-host>")

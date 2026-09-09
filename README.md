@@ -31,6 +31,8 @@ See [setup help](docs/SETUP.md) if a prerequisite is missing.
 
 ## Models and hardware
 
+This experimental branch also includes a [local Codex swarm](docs/SWARM.md) using multiple Marathon GPU workers.
+
 Qwen 3.8 27B is the suggested starting point.
 You can also select another GGUF or Hugging Face repository.
 The general Automatic profile fits context and GPU placement to available memory.
