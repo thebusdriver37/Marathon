@@ -9,7 +9,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from marathon_app.swarm_gateway import SwarmGateway
-from marathon_app.swarm_tools import flatten_request, restore_calls, translated_sse
+from marathon_app.swarm_tools import agent_identity, identify_agent, flatten_request, restore_calls, translated_sse
 
 
 class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
@@ -182,3 +182,11 @@ class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
             ],
         }]})
         self.assertEqual(original['input'][0]['type'], 'agent_message')
+        identity = agent_identity(original)
+        self.assertEqual(identity, '/root/helper')
+        identified = identify_agent(flatten_request(original, {}), identity)
+        self.assertIn('Current agent identity: /root/helper', identified['instructions'])
+        self.assertIn('final answer is automatically delivered', identified['instructions'])
+        self.assertEqual(agent_identity({'input': []}), '/root')
+        self.assertEqual(identify_agent({'instructions': 'Lead the team'}, '/root'),
+                         {'instructions': 'Lead the team'})

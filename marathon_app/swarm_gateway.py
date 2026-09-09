@@ -8,7 +8,7 @@ import threading
 import uuid
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
-from .swarm_tools import flatten_request, restore_calls, translated_sse
+from .swarm_tools import agent_identity, identify_agent, flatten_request, restore_calls, translated_sse
 
 
 class SwarmGateway:
@@ -19,6 +19,7 @@ class SwarmGateway:
         self.max_agents = max_agents or len(workers)
         self.bindings = {}
         self.tool_names = {}
+        self.agent_paths = {}
         self.stop = threading.Event()
         self.ready = queue.Queue()
         self.thread = None
@@ -61,7 +62,9 @@ class SwarmGateway:
         payload = {}
         if body:
             try:
-                payload = flatten_request(json.loads(body), names)
+                original = json.loads(body)
+                identity = self.agent_paths.setdefault(thread_id, agent_identity(original))
+                payload = identify_agent(flatten_request(original, names), identity)
             except (ValueError, KeyError, TypeError) as error:
                 raise web.HTTPBadRequest(text=str(error))
             # Codex can reuse the parent's cache key in children. Marathon

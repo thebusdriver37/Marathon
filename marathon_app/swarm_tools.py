@@ -4,6 +4,33 @@ import copy
 import json
 
 
+def agent_identity(payload):
+    """Resolve the recipient of a thread's initial task, before flattening it."""
+    if not isinstance(payload, dict):
+        return '/root'
+    for item in reversed(payload.get('input', [])):
+        if isinstance(item, dict) and item.get('type') == 'agent_message':
+            recipient = item.get('recipient')
+            if isinstance(recipient, str) and recipient.startswith('/root'):
+                return recipient
+    return '/root'
+
+
+def identify_agent(payload, identity):
+    """Disambiguate parent history from the helper's current identity."""
+    if identity == '/root':
+        return payload
+    payload = copy.deepcopy(payload)
+    payload['instructions'] = (payload.get('instructions') or '') + (
+        f'\n\nCurrent agent identity: {identity}. You are a helper, not /root. '
+        'Any inherited conversation about leading a team is background from your parent. '
+        'Your assignment is the latest agent message addressed to you. Complete that assignment yourself. '
+        'Do not spawn helpers or investigate the orchestration system. '
+        'Your final answer is automatically delivered to your parent; no messaging tool is required.\n'
+    )
+    return payload
+
+
 def flatten_request(payload, names):
     if not isinstance(payload, dict):
         raise ValueError('Swarm requests must be JSON objects.')

@@ -49,7 +49,10 @@ Compare elapsed time only across successful runs, and repeat runs before drawing
 The initial live baseline passed with three native Codex agents sharing one Qwen worker in 115.32 seconds, including startup and cleanup.
 All three independent coding tests passed and the original test file was preserved.
 The Python suite passed 333 tests with three optional skips.
-Three-worker routing and cancellation were tested with real HTTP/WebSocket fixtures; the three-GPU coding trial is still pending available pool leases.
+The three-GPU coding trial passed in 56.29 seconds with three distinct threads, requests overlapping across all three workers, and all three independent tests passing.
+GPU utilization samples from the initial attempt also confirmed simultaneous activity on GPUs 1, 2, and 3.
+The first three-GPU attempt exposed helpers confusing inherited lead context with their own identity; explicit per-thread helper identity fixed this on the rerun.
+The 56.29-second result is about twice as fast as the earlier baseline, but the identity fix and single-run variability mean this is not a controlled GPU-only speedup measurement.
 
 ## Implementation and cleanup
 
