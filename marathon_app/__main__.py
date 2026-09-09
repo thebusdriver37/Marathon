@@ -350,6 +350,31 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         Console().print(f"[bold red]Invalid instance configuration:[/bold red] {error}")
         return 2
+    resume_arguments = None
+    if args.command == "resume" and args.targets and not args.targets[0].startswith("-"):
+        resume_arguments = ["resume", *args.targets]
+    elif (args.command == "exec" and args.targets[:1] == ["resume"]
+          and len(args.targets) > 1 and not args.targets[1].startswith("-")):
+        resume_arguments = ["exec", *args.targets]
+    resuming = args.command == "resume" or (args.command == "exec" and args.targets[:1] == ["resume"])
+    if resuming and resume_arguments is None and not explicit_instance:
+        from .swarm_session import saved_swarm
+        try:
+            if saved_swarm(session_home or marathon_codex_home()) is not None:
+                raise ValueError("Swarm resume requires the complete lead session UUID; --last and the picker are not supported.")
+        except (RuntimeError, ValueError) as error:
+            Console().print(f"[bold red]Marathon could not resume:[/bold red] {error}")
+            return 2
+    if resume_arguments is not None and not explicit_instance:
+        try:
+            from .swarm_session import resume_id, saved_swarm
+            session_home = session_home or session_home_for_id(resume_id(resume_arguments))
+            if saved_swarm(session_home) is not None:
+                from .swarm import run_swarm
+                return run_swarm(resume_arguments, session_home=session_home)
+        except (RuntimeError, ValueError) as error:
+            Console().print(f"[bold red]Marathon could not resume:[/bold red] {error}")
+            return 2
     if not explicit_instance and args.command in {"codex", "exec", "resume", "fork"}:
         try:
             if args.command in {"resume", "fork"} and args.targets and not args.targets[0].startswith("-"):

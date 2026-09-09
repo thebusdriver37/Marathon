@@ -12,14 +12,14 @@ from .swarm_tools import agent_identity, identify_agent, flatten_request, restor
 
 
 class SwarmGateway:
-    def __init__(self, workers, token, record, *, max_agents=None):
+    def __init__(self, workers, token, record, *, max_agents=None, agent_paths=None):
         self.workers = workers
         self.token = token
         self.record = record
         self.max_agents = max_agents or len(workers)
         self.bindings = {}
         self.tool_names = {}
-        self.agent_paths = {}
+        self.agent_paths = dict(agent_paths or {})
         self.stop = threading.Event()
         self.ready = queue.Queue()
         self.thread = None

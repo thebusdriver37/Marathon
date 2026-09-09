@@ -16,6 +16,8 @@ import uuid
 
 from .catalog import backend_for, discover_models
 from .frontends import run_codex
+from .codex_home import session_home_for_id
+from .swarm_session import resume_id, saved_swarm, saved_agent_paths
 from .runtime import Runtime, load_selection
 from .swarm_gateway import SwarmGateway
 
@@ -108,16 +110,26 @@ class SwarmFrontend:
             signal.signal(signal.SIGINT, previous)
 
 
-def run_swarm(arguments):
+def run_swarm(arguments, *, session_home=None):
     parser = argparse.ArgumentParser(prog='marathon swarm', description=__doc__)
-    parser.add_argument('--agents', type=int, choices=(2, 3), default=3)
+    parser.add_argument('--agents', type=int, choices=(2, 3))
     parser.add_argument('--workers', type=int, choices=(1, 2, 3),
                         help='GPU workers; defaults to one per agent. Use 1 for a serial baseline.')
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('codex_args', nargs=argparse.REMAINDER,
                         help='Optional Codex arguments, for example: exec "task"')
     args = parser.parse_args(arguments)
-    worker_count = args.workers or args.agents
+    session_id = resume_id(args.codex_args)
+    saved = None
+    agent_paths = {}
+    if session_id:
+        session_home = session_home or session_home_for_id(session_id)
+        saved = saved_swarm(session_home)
+        if saved is None:
+            raise ValueError('This conversation was not created by marathon swarm.')
+        agent_paths = saved_agent_paths(session_home, session_id)
+    args.agents = args.agents or (saved['agents'] if saved else 3)
+    worker_count = args.workers or (saved['workers'] if saved else args.agents)
     if worker_count > args.agents:
         parser.error('--workers cannot exceed --agents')
     from .ui import _initial_selection
@@ -132,8 +144,13 @@ def run_swarm(arguments):
     run_id = uuid.uuid4().hex[:10]
     output = (args.output_dir or Path('.marathon/swarms') / run_id).resolve()
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
+    settings = {'version': 1, 'agents': args.agents, 'workers': worker_count}
+    (output / 'swarm.json').write_text(json.dumps(settings) + '\n')
     print(f'Experimental swarm evidence: {output}', flush=True)
     frontend = SwarmFrontend(selection.model, selection.profile, output)
+    if session_home is not None:
+        frontend.session_home = Path(session_home)
+        print(f'Resuming swarm with {args.agents} agents across {worker_count} workers.', flush=True)
     guidance = (
         f'You lead a local team with {args.agents - 1} helper agents. '
         'Use the native multi-agent tools to delegate independent tasks when useful. '
@@ -141,13 +158,24 @@ def run_swarm(arguments):
         'Helpers must not spawn more agents. Keep all agents on the inherited model. '
         'Give helpers disjoint file ownership or separate git worktrees before parallel edits. '
         'Do useful work while helpers run, then inspect their results and run integration tests. '
-        'You own the final result. Do not commit or merge helper changes without checking them.'
+        'You own the final result. Do not commit or merge helper changes without checking them. '
+        'After resuming, use list_agents and reuse the saved helpers with followup_task. '
+        'Spawn only if a helper slot is actually empty. '
+        'Shell commands cannot spawn native helpers; use the collaboration tools directly.'
     )
+    if session_id:
+        helpers = sorted(path for path in agent_paths.values() if path != '/root')
+        guidance += (
+            f' Saved helper identities: {json.dumps(helpers)}. '
+            'These helpers may be idle and absent from list_agents; try followup_task '
+            'with their saved identities before attempting to spawn replacements.'
+        )
     with leased_workers(selection.model, selection.profile, worker_count, run_id) as workers:
         frontend.catalog_file = output / 'model-catalog.json'
         shutil.copyfile(workers[0]['catalog_file'], frontend.catalog_file)
         frontend.record('swarm.started', {'instances': [worker['instance'] for worker in workers]})
-        with SwarmGateway(workers, frontend.router_token, frontend.record, max_agents=args.agents) as gateway:
+        with SwarmGateway(workers, frontend.router_token, frontend.record, max_agents=args.agents,
+                          agent_paths=agent_paths) as gateway:
             frontend.router_url = gateway.url
             overrides = [
                 '-c', 'features.multi_agent=true',

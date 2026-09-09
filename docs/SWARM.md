@@ -32,16 +32,20 @@ marathon swarm --workers 1 exec "Your task"
 
 `--agents 2` selects a lead and one helper instead.
 Worker count defaults to agent count.
-Each command starts a new team with an isolated Codex home.
+A new swarm starts with an isolated Codex home; resume retains that home and its native Codex agent graph.
 Reuse the helpers through messages and follow-up tasks; the gateway does not recycle thread assignments during a session.
-Reconnecting an entire saved team is not implemented.
-You can resume the lead conversation as a single agent using its saved home and the complete session ID:
+Resume the saved team using its home and the complete lead session ID:
 
 ```bash
 MARATHON_CODEX_HOME=/absolute/path/to/run/codex-home marathon resume SESSION_UUID
 ```
 
-The normal router translates saved local collaboration messages during both inference and compaction, including when collaboration tools are no longer enabled.
+Ordinary `marathon resume` and `marathon exec resume` recognize a saved swarm and restore its gateway, worker count, and collaboration tools automatically.
+To override the number of GPU workers for this launch, use `marathon swarm --workers 1 resume SESSION_UUID` with the same `MARATHON_CODEX_HOME`.
+Resume requires an explicit lead UUID; the swarm picker and `--last` are not supported.
+The lead can reuse its saved helpers with `followup_task`; `list_agents` may show only currently running agents until an idle helper is resumed.
+New runs persist their agent and worker counts, while older runs recover worker count from their event log and use the original three-agent default.
+The normal router translates saved local collaboration messages during both inference and compaction.
 The saved rollout is not rewritten by that translation.
 
 ## Validation
@@ -49,7 +53,7 @@ The saved rollout is not rewritten by that translation.
 ```bash
 .marathon/venv/bin/python -m unittest discover -s tests -p test_swarm.py -v
 MARATHON_TEST_CODEX_BIN=~/.local/share/marathon/bin/codex .marathon/venv/bin/python -m unittest discover -s tests -p test_process_isolation.py -v
-.marathon/venv/bin/python scripts/evals/swarm.py --run-gpu --workers 1
+.marathon/venv/bin/python scripts/evals/swarm.py --run-gpu --workers 1 --check-resume
 .marathon/venv/bin/python scripts/evals/swarm.py --run-gpu --workers 3
 ```
 
@@ -69,6 +73,7 @@ The 56.29-second result is about twice as fast as the earlier baseline, but the 
 Recovery validation reproduced the llama.cpp `Cannot determine type of 'item'` error by resuming a copy of an interrupted real swarm rollout.
 With shared history normalization, that same copy compacted successfully and answered the diagnostic prompt, while the original rollout remained byte-for-byte unchanged.
 The real Codex recovery test checks rejection of a second live writer, forcibly kills its disposable launcher, then successfully resumes the conversation without removing lock files.
+The optional resume evaluation shuts down a fresh team, resumes through the ordinary headless command, and verifies that the same three thread IDs run again without changing the completed files.
 The process-isolation test verifies a separate PID namespace before running the original broad `pkill` pattern and checks that a matching host sentinel survives.
 The post-fix three-agent coding evaluation passed on one worker in 98.15 seconds, including independent verification of all three coding tests.
 

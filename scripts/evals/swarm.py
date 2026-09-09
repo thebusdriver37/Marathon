@@ -42,6 +42,8 @@ class TaskTests(unittest.TestCase):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run-gpu', action='store_true')
+    parser.add_argument('--check-resume', action='store_true',
+                        help='Restart through ordinary resume and verify reuse of both saved helpers.')
     parser.add_argument('--workers', type=int, choices=(1, 2, 3), default=3)
     parser.add_argument('--output-dir', type=Path)
     args = parser.parse_args()
@@ -98,6 +100,46 @@ def main():
                'peak_workers_with_requests': peak_workers, 'elapsed_seconds': round(elapsed, 2),
                'frontend_exit': frontend_exit, 'tests_exit': checked.returncode,
                'original_tests_preserved': unchanged, 'evidence': str(output)}
+    if args.check_resume and passed:
+        session_home = output / 'run/codex-home'
+        metadata = []
+        for path in (session_home / 'sessions').rglob('*.jsonl'):
+            with path.open() as handle:
+                metadata.append(json.loads(handle.readline())['payload'])
+        lead = next(item['id'] for item in metadata if isinstance(item.get('source'), str))
+        helpers = [item['agent_path'] for item in metadata if item.get('parent_thread_id') == lead]
+        prompt = (
+            f'Resume check: reuse both existing helpers {helpers!r} via followup_task. '
+            'Ask each to re-read the file they implemented and report VERIFIED. '
+            'Do not spawn replacement agents. Wait for both replies, then run python3 -m unittest -v. '
+            'Do not modify files, run echo commands, use network, or commit.'
+        )
+        before_files = {path.name: path.read_bytes() for path in workspace.glob('*.py')}
+        with (output / 'resume.log').open('w') as log:
+            resumed = subprocess.Popen([
+                str(ROOT / 'bin/marathon'), 'exec', 'resume', lead, prompt,
+            ], cwd=workspace, env=dict(os.environ, MARATHON_CODEX_HOME=str(session_home)),
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                resume_exit = resumed.wait(timeout=600)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                os.killpg(resumed.pid, signal.SIGINT)
+                try:
+                    resumed.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(resumed.pid, signal.SIGTERM)
+                    resumed.wait(timeout=150)
+                raise
+        resume_events = [json.loads(line)
+                         for path in (workspace / '.marathon/swarms').glob('*/events.jsonl')
+                         for line in path.read_text().splitlines()]
+        resumed_bindings = [event['data'] for event in resume_events if event['event'] == 'swarm.bound']
+        same_threads = {b['thread'] for b in resumed_bindings} == {b['thread'] for b in bindings}
+        same_files = before_files == {path.name: path.read_bytes() for path in workspace.glob('*.py')}
+        resumed_workers = len({b['worker'] for b in resumed_bindings})
+        passed = (resume_exit == 0 and same_threads and same_files and resumed_workers == args.workers)
+        summary.update(passed=passed, resume_exit=resume_exit, same_threads_after_resume=same_threads,
+                       resume_preserved_files=same_files, resumed_workers=resumed_workers)
     (output / 'results.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(json.dumps(summary, indent=2))
     return 0 if passed else 1

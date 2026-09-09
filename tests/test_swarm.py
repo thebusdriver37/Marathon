@@ -190,3 +190,20 @@ class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent_identity({'input': []}), '/root')
         self.assertEqual(identify_agent({'instructions': 'Lead the team'}, '/root'),
                          {'instructions': 'Lead the team'})
+
+    async def test_resumed_identity_wins_over_old_message_recipient(self):
+        lead, helper = str(uuid.uuid4()), str(uuid.uuid4())
+        self.gateway.agent_paths.update({lead: '/root', helper: '/root/worker'})
+        for thread, recipient in ((lead, '/root/worker'), (helper, '/root')):
+            response = await self.client.post('/v1/responses', headers=self.headers(thread), json={
+                'instructions': 'Original instructions',
+                'input': [{'type': 'agent_message', 'author': '/root',
+                           'recipient': recipient, 'content': []}],
+            })
+            self.assertEqual(response.status, 200)
+            await self.response_payload(response)
+            instructions = json.loads(self.calls[-1][3])['instructions']
+            if thread == lead:
+                self.assertEqual(instructions, 'Original instructions')
+            else:
+                self.assertIn('Current agent identity: /root/worker', instructions)
