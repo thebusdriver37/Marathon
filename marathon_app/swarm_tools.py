@@ -3,6 +3,8 @@
 import copy
 import json
 
+from .local_history import normalize_local_history
+
 
 def agent_identity(payload):
     """Resolve the recipient of a thread's initial task, before flattening it."""
@@ -52,27 +54,8 @@ def flatten_request(payload, names):
         if len(aliases) != len(set(aliases)):
             raise ValueError('Swarm tool names collide after namespace translation.')
         payload['tools'] = tools
-    reverse = {value: key for key, value in names.items()}
-    for index, item in enumerate(payload.get('input', [])):
-        if isinstance(item, dict) and item.get('type') == 'agent_message':
-            # V2 stores the model-supplied message in encrypted_content. For
-            # this local-only provider that value is the original plain text.
-            content = [{'type': 'input_text', 'text':
-                        f'Agent message from {item["author"]} to {item["recipient"]}:\n'}]
-            for part in item.get('content', []):
-                if part.get('type') == 'input_text':
-                    content.append(part)
-                elif part.get('type') == 'encrypted_content':
-                    content.append({'type': 'input_text', 'text': part['encrypted_content']})
-                else:
-                    raise ValueError('Unsupported local agent message content.')
-            payload['input'][index] = {'type': 'message', 'role': 'user', 'content': content}
-            continue
-        if isinstance(item, dict) and item.get('type') == 'function_call':
-            alias = reverse.get((item.get('namespace'), item.get('name')))
-            if alias:
-                item['name'] = alias
-                item.pop('namespace', None)
+    if 'input' in payload:
+        payload['input'] = normalize_local_history(payload['input'])
     return payload
 
 

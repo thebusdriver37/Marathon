@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -133,6 +134,10 @@ def codex_command(
         "-m", runtime.model.alias,
         "-c", f"model_catalog_json={json.dumps(str(runtime.catalog_file))}",
         "-c", 'web_search="cached"',
+        # Native Linux command sandboxes also isolate PIDs. Host-wide pkill
+        # must not be the default just because stock Codex used full access.
+        "-c", 'sandbox_mode="workspace-write"',
+        "-c", 'sandbox_workspace_write.network_access=true',
         "-c", 'tui.terminal_title=["app-name","status","current-dir"]',
     ]
     if shared_profile:
@@ -187,10 +192,10 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
     )
     with runtime.frontend_signals():
         result = subprocess.run(
-            command,
+            [sys.executable, str(Path(__file__).with_name("child_process.py")),
+             str(os.getpid()), *command],
             cwd=Path.cwd(),
             env=environment,
-            preexec_fn=_restore_sigint,
             check=False,
         )
     summaries = summarize_session_changes(

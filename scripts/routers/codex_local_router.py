@@ -41,6 +41,7 @@ from aiohttp import ClientTimeout
 from aiohttp import WSMsgType
 from aiohttp import web
 
+from marathon_app.local_history import normalize_local_history
 from marathon_app.catalog import external_models
 from marathon_app.checkpoints import RollingCheckpointStore
 from marathon_app.checkpoints import SNAPSHOT_SIDECAR_SUFFIXES
@@ -1988,6 +1989,8 @@ def normalize_responses_request(
     *,
     request_kind: str | None = None,
 ) -> dict[str, Any]:
+    if "input" in data:
+        data["input"] = normalize_local_history(data["input"])
     original_instructions = data.get("instructions")
     instruction_base = original_instructions if isinstance(original_instructions, str) else ""
     data["_marathon_instruction_base_hash"] = _sha256_text(instruction_base)

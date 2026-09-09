@@ -19,7 +19,10 @@ marathon swarm exec "Split this task between two helpers, integrate their work, 
 Run these commands from the project you want to work on.
 The lead assigns disjoint files or separate Git worktrees before parallel edits.
 Worktrees are not created automatically, so this is still a shared-workspace experiment unless the agents explicitly create them.
-The normal approval and sandbox configuration remains in effect.
+Marathon defaults to Codex's workspace-write sandbox with network access enabled.
+On Linux, each shell command runs in a separate PID namespace, so broad process-name kills cannot reach the frontend, supervisor, or another command's processes.
+Run from your project directory and use Codex's additional writable directories when needed.
+Explicitly disabling the sandbox also disables this process protection.
 
 To compare the same three-agent workflow on one GPU, or try it while only one pool lease is free:
 
@@ -31,12 +34,21 @@ marathon swarm --workers 1 exec "Your task"
 Worker count defaults to agent count.
 Each command starts a new team with an isolated Codex home.
 Reuse the helpers through messages and follow-up tasks; the gateway does not recycle thread assignments during a session.
-Attaching existing conversations and resuming a saved swarm are not implemented.
+Reconnecting an entire saved team is not implemented.
+You can resume the lead conversation as a single agent using its saved home and the complete session ID:
+
+```bash
+MARATHON_CODEX_HOME=/absolute/path/to/run/codex-home marathon resume SESSION_UUID
+```
+
+The normal router translates saved local collaboration messages during both inference and compaction, including when collaboration tools are no longer enabled.
+The saved rollout is not rewritten by that translation.
 
 ## Validation
 
 ```bash
 .marathon/venv/bin/python -m unittest discover -s tests -p test_swarm.py -v
+MARATHON_TEST_CODEX_BIN=~/.local/share/marathon/bin/codex .marathon/venv/bin/python -m unittest discover -s tests -p test_process_isolation.py -v
 .marathon/venv/bin/python scripts/evals/swarm.py --run-gpu --workers 1
 .marathon/venv/bin/python scripts/evals/swarm.py --run-gpu --workers 3
 ```
@@ -54,6 +66,12 @@ GPU utilization samples from the initial attempt also confirmed simultaneous act
 The first three-GPU attempt exposed helpers confusing inherited lead context with their own identity; explicit per-thread helper identity fixed this on the rerun.
 The 56.29-second result is about twice as fast as the earlier baseline, but the identity fix and single-run variability mean this is not a controlled GPU-only speedup measurement.
 
+Recovery validation reproduced the llama.cpp `Cannot determine type of 'item'` error by resuming a copy of an interrupted real swarm rollout.
+With shared history normalization, that same copy compacted successfully and answered the diagnostic prompt, while the original rollout remained byte-for-byte unchanged.
+The real Codex recovery test checks rejection of a second live writer, forcibly kills its disposable launcher, then successfully resumes the conversation without removing lock files.
+The process-isolation test verifies a separate PID namespace before running the original broad `pkill` pattern and checks that a matching host sentinel survives.
+The post-fix three-agent coding evaluation passed on one worker in 98.15 seconds, including independent verification of all three coding tests.
+
 ## Implementation and cleanup
 
 The loopback gateway uses a fresh bearer token and forwards requests with each worker's own router credentials.
@@ -65,6 +83,9 @@ Normal Marathon compaction remains on the agent's assigned worker.
 Each agent gets its own stable prompt-cache key so helpers cannot supersede each other's requests when sharing a worker in the baseline.
 
 Exit closes the gateway and releases its runtime processes and pool leases, including partially started teams.
+On Linux, the frontend receives SIGTERM if its launcher dies, including a launcher SIGKILL, so an orphan cannot retain the session writer lock indefinitely.
+The launcher check also covers death before the child installs its parent-death signal.
+A second frontend still cannot resume a conversation with a live writer; close that frontend first instead of deleting lock files or automatically killing a process based on a session ID.
 The broker may keep model weights warm under its existing idle TTL.
 Other Marathon instances and the broker configuration remain untouched.
 Session history and routing evidence are retained under `.marathon/swarms/<run-id>` in the working directory, or a new directory supplied with `--output-dir`.

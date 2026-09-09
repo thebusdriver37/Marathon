@@ -12,6 +12,9 @@ Source builds also need the platform's OpenSSL development headers and libraries
 On Ubuntu, install `build-essential cmake pkg-config libssl-dev bubblewrap`; install Rust with rustup and the CUDA toolkit separately for NVIDIA acceleration.
 Linux also needs working user namespaces for the tool sandbox; restrictive containers may block them even with bubblewrap installed.
 Marathon reports sandbox problems without disabling the sandbox.
+Marathon defaults to workspace-write with network access enabled, using Codex's Linux PID namespaces to keep tool commands from signaling its frontend and runtime processes.
+Run Marathon from the project directory, or add writable directories with Codex's `--add-dir` option.
+Explicit command-line sandbox overrides remain available; unrestricted execution removes this process isolation.
 Marathon bootstraps its own pinned, checksum-verified pip when the system Python lacks it, including on Ubuntu without `python3-venv`.
 Normal installation does not require `just`, `cargo-nextest`, or running the developer test suite.
 Backend builds omit llama.cpp's optional browser UI and its unrelated asset downloads.

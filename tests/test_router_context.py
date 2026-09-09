@@ -38,6 +38,33 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_saved_swarm_history_replays_without_active_collaboration_tools(self):
+        history = [
+            {"type": "function_call", "namespace": "collaboration", "name": "spawn_agent",
+             "call_id": "call_1", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "worker started"},
+            {"type": "agent_message", "author": "/root/helper", "recipient": "/root",
+             "content": [{"type": "input_text", "text": "Task complete."},
+                         {"type": "encrypted_content", "encrypted_content": "Tests passed."}]},
+        ]
+        original = copy.deepcopy(history)
+        for kind in (None, "compaction"):
+            with self.subTest(request_kind=kind):
+                result = router_module.normalize_responses_request(
+                    {"input": history, "tools": []}, request_kind=kind)
+                self.assertEqual(result["input"][0], {
+                    "type": "function_call", "name": "collaboration__spawn_agent",
+                    "call_id": "call_1", "arguments": "{}"})
+                self.assertEqual(result["input"][1], history[1])
+                self.assertEqual(result["input"][2], {
+                    "type": "message", "role": "user", "content": [
+                        {"type": "input_text", "text": "Agent message from /root/helper to /root:\n"},
+                        {"type": "input_text", "text": "Task complete."},
+                        {"type": "input_text", "text": "Tests passed."}]})
+                self.assertEqual(router_module.normalize_responses_request(
+                    copy.deepcopy(result), request_kind=kind)["input"], result["input"])
+        self.assertEqual(history, original)
+
     def test_base_instructions_include_marathon_runtime_safety(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             prompt_path = Path(directory) / "prompt.md"
