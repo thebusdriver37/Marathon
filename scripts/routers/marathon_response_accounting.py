@@ -40,6 +40,7 @@ class ResponseAccounting:
     accepted_draft_tokens: int = 0
     backend_calls: int = 0
     timed_backend_calls: int = 0
+    estimated_backend_calls: int = 0
 
     def add(self, response: dict[str, Any]) -> None:
         self.backend_calls += 1
@@ -60,6 +61,17 @@ class ResponseAccounting:
         )
         timings = response.get("timings")
         if not isinstance(timings, dict):
+            # Client-observed streaming duration excludes queueing and prefill.
+            # Keep this separate from server timings: chunk buffering and
+            # transport overhead make it an estimate, not a GPU measurement.
+            observed = response.get("marathon_stream_timing") or {}
+            duration = _microseconds(observed.get("decode_ms"))
+            tokens = self.context_usage["output_tokens"]
+            if duration and tokens > 1:
+                self.decode_tokens += tokens - 1
+                self.decode_microseconds += duration
+                self.timed_backend_calls += 1
+                self.estimated_backend_calls += 1
             return
         decode_us = _microseconds(timings.get("predicted_ms"))
         prefill_us = _microseconds(timings.get("prompt_ms"))
@@ -104,5 +116,11 @@ class ResponseAccounting:
             "accepted_draft_tokens": self.accepted_draft_tokens,
             "backend_calls": self.backend_calls,
             "timed_backend_calls": self.timed_backend_calls,
+            "estimated_backend_calls": self.estimated_backend_calls,
+            "decode_timing_source": (
+                "stream_estimate" if self.estimated_backend_calls == self.timed_backend_calls
+                and self.estimated_backend_calls else
+                "mixed" if self.estimated_backend_calls else "backend"
+            ),
         }
         response["usage_metadata"] = metadata

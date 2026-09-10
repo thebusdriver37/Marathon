@@ -2857,6 +2857,9 @@ class RouterState:
         apply_patch_argument_buffers: dict[str, str] = {}
         pending_apply_patch_added: dict[str, dict[str, Any]] = {}
         tool_argument_limit = _tool_argument_max_chars()
+        first_generation_at: float | None = None
+        generation_events = 0
+        stream_completed_at: float | None = None
 
         async def send_event(event: dict[str, Any]) -> None:
             if event_sink is None:
@@ -2923,6 +2926,19 @@ class RouterState:
             # backend exit closes this stream immediately.
             async for event in self._iter_sse_json(response):
                 event_type = event.get("type")
+                received_at = time.perf_counter()
+                if event_type in {
+                    "response.output_text.delta",
+                    "response.reasoning_text.delta",
+                    "response.reasoning_summary_text.delta",
+                    "response.function_call_arguments.delta",
+                    "response.custom_tool_call_input.delta",
+                } and event.get("delta"):
+                    if first_generation_at is None:
+                        first_generation_at = received_at
+                    generation_events += 1
+                if event_type == "response.completed":
+                    stream_completed_at = received_at
                 if not isinstance(event_type, str):
                     continue
 
@@ -3094,6 +3110,17 @@ class RouterState:
             raise RuntimeError("backend stream ended before response.completed")
 
         backend_response = completed_response
+        if (
+            profile.external
+            and not isinstance(backend_response.get("timings"), dict)
+            and first_generation_at is not None
+            and stream_completed_at is not None
+            and generation_events > 1
+            and stream_completed_at - first_generation_at >= 0.001
+        ):
+            backend_response["marathon_stream_timing"] = {
+                "decode_ms": (stream_completed_at - first_generation_at) * 1000,
+            }
         if output_items:
             backend_response["output"] = list(output_items)
         elif not isinstance(backend_response.get("output"), list):

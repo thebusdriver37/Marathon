@@ -13,6 +13,33 @@ from test_router_context import fixture_profile, router_module
 
 
 class ResponseAccountingTests(unittest.TestCase):
+    def test_stream_estimate_counts_reasoning_without_inventing_prefill(self):
+        accounting = router_module.ResponseAccounting()
+        accounting.add({
+            "usage": {"output_tokens": 101,
+                      "output_tokens_details": {"reasoning_tokens": 80}},
+            "marathon_stream_timing": {"decode_ms": 2000},
+        })
+        response = {}
+        accounting.apply(response)
+        metrics = response["usage_metadata"]["marathon"]
+        self.assertEqual(metrics["decode_tokens"], 100)
+        self.assertEqual(metrics["decode_microseconds"], 2_000_000)
+        self.assertEqual(metrics["prefill_microseconds"], 0)
+        self.assertEqual(metrics["decode_timing_source"], "stream_estimate")
+        self.assertEqual(metrics["timed_backend_calls"], 1)
+
+    def test_server_timings_take_precedence_over_stream_estimate(self):
+        accounting = router_module.ResponseAccounting()
+        accounting.add({
+            "usage": {"output_tokens": 101},
+            "marathon_stream_timing": {"decode_ms": 9000},
+            "timings": {"predicted_n": 101, "predicted_ms": 1000,
+                        "prompt_ms": 100, "prompt_n": 20},
+        })
+        self.assertEqual(accounting.decode_microseconds, 1_000_000)
+        self.assertEqual(accounting.estimated_backend_calls, 0)
+
     def test_partial_timing_coverage_is_explicit(self):
         accounting = router_module.ResponseAccounting()
         measured = {
@@ -52,6 +79,40 @@ class ResponseAccountingTests(unittest.TestCase):
 
 
 class RouterAccountingIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_external_stream_measures_reasoning_and_tool_arguments(self):
+        async def backend(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await asyncio.sleep(0.08)  # Queue/prefill must not enter decode time.
+            events = [
+                {"type": "response.reasoning_text.delta", "delta": "Think"},
+                {"type": "response.function_call_arguments.delta", "delta": "{}"},
+                {"type": "response.completed", "response": {
+                    "output": [], "usage": {"output_tokens": 21},
+                }},
+            ]
+            for event in events:
+                await response.write(f"data: {json.dumps(event)}\n\n".encode())
+                await asyncio.sleep(0.02)
+            await response.write_eof()
+            return response
+
+        app = web.Application()
+        app.router.add_post("/v1/responses", backend)
+        async with TestServer(app) as server, ClientSession() as http:
+            state = object.__new__(router_module.RouterState)
+            state.http_client = http
+            profile = replace(fixture_profile(), external=True,
+                              target=str(server.make_url("")))
+            response = await state._request_responses_stream(profile, {})
+        duration = response["marathon_stream_timing"]["decode_ms"]
+        self.assertGreaterEqual(duration, 30)
+        self.assertLess(duration, 100)
+        accounting = router_module.ResponseAccounting()
+        accounting.add(response)
+        self.assertEqual(accounting.timed_backend_calls, 1)
+        self.assertEqual(accounting.decode_tokens, 20)
+
     async def test_websocket_tool_loop_counts_all_calls_and_preserves_context(self):
         calls = []
         usage = [
