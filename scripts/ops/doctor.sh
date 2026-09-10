@@ -382,18 +382,18 @@ if isinstance(raw_failures, list):
             reason = str(failure[1]) if len(failure) > 1 else "failed"
             failures.append(f"{name}: {reason}")
 print(
-    f"{count}|{'yes' if 'google cse' in engines else 'no'}|"
+    f"{count}|{'yes' if not failures else 'no'}|"
     f"{', '.join(sorted(engines))}|{'; '.join(failures)}"
 )
 PY
 )"
-  IFS='|' read -r search_result_count google_cse_present search_engines search_failures <<<"$search_probe"
+  IFS='|' read -r search_result_count search_without_failures search_engines search_failures <<<"$search_probe"
   if [[ "${search_result_count:-0}" =~ ^[0-9]+$ ]] \
     && (( search_result_count > 0 )) \
-    && [[ "$google_cse_present" == "yes" ]]; then
-    pass "SearXNG functional search returned $search_result_count results with Google CSE"
+    && [[ "$search_without_failures" == "yes" ]]; then
+    pass "SearXNG functional search returned $search_result_count results via ${search_engines:-unknown}"
   elif [[ "${search_result_count:-0}" =~ ^[0-9]+$ ]] && (( search_result_count > 0 )); then
-    warn "Google CSE contributed no results; fallback providers: ${search_engines:-unknown}${search_failures:+ ($search_failures)}"
+    warn "Search returned partial results via: ${search_engines:-unknown}${search_failures:+ ($search_failures)}"
   else
     warn "SearXNG is reachable but search returned no results${search_failures:+ ($search_failures)}"
   fi

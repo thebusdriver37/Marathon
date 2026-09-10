@@ -389,16 +389,43 @@ marathon search down
 
 The first start generates a local secret in `docker/searxng/.env`.
 `search up`, `search restart`, and `search status` include a real search probe so upstream engine failures are visible immediately.
-The probe queries Google CSE directly and fails if only fallback providers are working.
-The bundled Google CSE engine uses SearXNG's public endpoint and has no user API key or numeric quota endpoint to inspect.
-Marathon therefore verifies live Google CSE contribution and surfaces 429, suspension, and fallback details in search tool output.
-The bundled configuration keeps only Google CSE, Bing, and Wikipedia, with Google CSE weighted first for technical and documentation queries.
+The probe uses the configured engines and reports partial failures without requiring one particular provider.
+The default search path is the local SearXNG service using free upstream interfaces.
+It requires no search API subscription or API key and adds no separate answer-verification model.
+The bundled configuration uses Google CSE, Google HTML, Brave, and Wikipedia.
+Google CSE and Google HTML share an index; Brave provides an independent index but may rate-limit.
+Bing is installed but disabled in the default mix because the tested HTML endpoint returned irrelevant first-word matches for multi-word research queries.
+The model can explicitly compare it with `web_search` using `engines = ["bing"]`.
+By default Marathon selects one available general-search engine from Google HTML, Brave, and Google CSE, rotating among healthy providers and trying the others if results are empty or a provider fails.
+Wikipedia remains explicitly selectable for encyclopedia searches.
+These unauthenticated upstream interfaces can return CAPTCHA, suspension, or rate-limit errors even though the local SearXNG service is healthy.
+Marathon reports the observed engine failures and contributing providers, rather than inferring account quotas or claiming that unrelated results are trustworthy.
 The search tool accepts an optional `time_range` of `day`, `week`, `month`, or `year`.
 Result deduplication ignores fragments, common tracking parameters, scheme and `www` aliases, query ordering, and trailing slashes while retaining semantic query parameters.
 Set `MARATHON_SEARXNG_URL` when the service runs somewhere else.
 Set `MARATHON_WEB_SEARCH_MODE=disabled`, `cached`, or `live` to control Codex's web-search mode.
 Set `MARATHON_WEB_SEARCH_RETRIES` from `0` through `3` to control retries for transient SearXNG transport and server failures.
+Set `MARATHON_WEB_SEARCH_MAX_ITERS` to limit managed research rounds per response (default 12); searches and fetches share this budget.
+Exact repeated actions are still guarded against loops.
+When the web budget is exhausted, final output is buffered and checked for tool-only markup.
+One bounded finalization retry is allowed; persistent failure is reported explicitly instead of accepting tool markup as an answer.
+Search traffic from Marathon processes on the same host and user account shares a bounded SQLite cache and advisory lock.
+Identical queries, engine selections, and freshness filters reuse results for up to five minutes; legitimate empty results expire after 30 seconds.
+The cache retains at most 256 responses of at most 64 KiB each.
+Requests are serialized with a two-second minimum dispatch interval per engine and a 45-second queue wait limit.
+Failed engines enter adaptive cooldowns, starting at five minutes for CAPTCHA or rate-limit errors and extending up to one hour after repeated failures.
+The model receives an availability error instead of repeatedly dispatching reworded searches to blocked engines.
+These controls reduce avoidable traffic but cannot guarantee availability of external free search providers.
+Set `MARATHON_WEB_SEARCH_COORDINATE=0` to restore uncoordinated SearXNG requests.
+Set `MARATHON_WEB_SEARCH_STATE` to choose the shared database path, `MARATHON_WEB_SEARCH_INTERVAL` to tune pacing, or `MARATHON_WEB_SEARCH_ENGINES` to provide a comma-separated default engine list for a custom deployment.
+The default database is `$XDG_CACHE_HOME/marathon/search.sqlite3`, falling back to `~/.cache/marathon/search.sqlite3`.
+For controlled evaluations, `MARATHON_RESEARCH_EVIDENCE_CHECK=1` adds a short evidence-check instruction; it is disabled by default pending evidence of consistent benefit.
+Set `MARATHON_WEB_TRACE_FILE` to a distinct file per evaluation process to capture managed tool arguments and returned public source text.
+That opt-in trace may contain query or page content and is not enabled for normal sessions.
 Set `MARATHON_WEB_BROWSE_ENABLE=0` to hide the optional browser-rendering path.
+
+PDF text extraction uses `pdftotext` from Poppler (`sudo apt install poppler-utils` on Debian/Ubuntu).
+It extracts at most 100 pages within 15 seconds and applies the requested text limit; scanned PDFs without text require OCR and return an explicit error.
 
 Fetch blocks loopback and private-network targets unless `MARATHON_WEB_FETCH_ALLOW_PRIVATE=1` is explicitly set.
 

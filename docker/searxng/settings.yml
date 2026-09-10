@@ -11,9 +11,11 @@ use_default_settings:
     # SearXNG otherwise merges every upstream default into this file.
     # Keep the small set that is useful and currently reliable for local agents.
     keep_only:
-      - bing
+      - google
+      - brave
       - google cse
       - wikipedia
+      - bing
 
 general:
   debug: false
@@ -64,15 +66,20 @@ outgoing:
   enable_http2: true
   retries: 1
 
-# Google CSE currently provides the best technical/documentation results without
-# requiring a user API key. Bing provides an independent fallback, and Wikipedia
-# improves entity searches. Avoid the CAPTCHA-prone HTML scrapers that make local
-# agent searches intermittently fail.
+# Google HTML and CSE are separate access paths to the same index.
+# Brave adds an independent index, but can rate-limit; report partial failures.
+# Bing's HTML endpoint returned first-word-only matches in the research probe.
 engines:
   - name: google cse
     disabled: false
     weight: 2.0
-  - name: bing
+  - name: google
+    disabled: false
+  - name: brave
     disabled: false
   - name: wikipedia
     disabled: false
+  # Keep Bing selectable explicitly without mixing its degraded matches into
+  # every research query.
+  - name: bing
+    disabled: true

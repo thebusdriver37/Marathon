@@ -15,8 +15,12 @@ router unchanged:
                                 (default: http://127.0.0.1:18093)
   MARATHON_WEB_SEARCH_TIMEOUT   per-search timeout in seconds (default: 15)
   MARATHON_WEB_SEARCH_MAX_RESULTS  results to forward to the model (default: 8)
-  MARATHON_WEB_SEARCH_MAX_ITERS    cap on tool-call iterations (default: 5)
+  MARATHON_WEB_SEARCH_MAX_ITERS    cap on tool-call iterations (default: 12)
   MARATHON_WEB_SEARCH_RETRIES      transient request retries (default: 1)
+  MARATHON_WEB_SEARCH_COORDINATE   shared pacing/cache (default: 1; 0 disables)
+  MARATHON_WEB_SEARCH_STATE        shared SQLite cache path
+  MARATHON_WEB_SEARCH_INTERVAL     minimum per-engine interval (default: 2s)
+  MARATHON_WEB_SEARCH_ENGINES      default coordinated engine names
   MARATHON_WEB_FETCH_ALLOW_PRIVATE
                                 set to "1" to allow fetches to private/local IPs
 
@@ -36,9 +40,13 @@ import json
 import logging
 import os
 import socket
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
+
+from marathon_search_coordinator import SearchCoordinator
 from typing import Any, TYPE_CHECKING
 from urllib.parse import parse_qsl
 from urllib.parse import urlencode
@@ -93,6 +101,13 @@ WEB_SEARCH_TOOL_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
+        "engines": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": 5,
+            "description": "Optional SearXNG engine names, such as ['bing']. Omit for automatic healthy-engine selection; select another engine when results are poor.",
+        },
         "query": {
             "type": "string",
             "description": "The search query in natural language.",
@@ -166,6 +181,7 @@ class WebSearchSettings:
     max_results: int
     max_iterations: int
     retries: int = 1
+    shared_state: str | None = None
 
     @classmethod
     def from_env(cls) -> "WebSearchSettings":
@@ -173,8 +189,10 @@ class WebSearchSettings:
             base_url=os.getenv("MARATHON_SEARXNG_URL", "http://127.0.0.1:18093").rstrip("/"),
             timeout_s=_env_float("MARATHON_WEB_SEARCH_TIMEOUT", 15.0),
             max_results=_env_int("MARATHON_WEB_SEARCH_MAX_RESULTS", 8),
-            max_iterations=_env_int("MARATHON_WEB_SEARCH_MAX_ITERS", 5),
+            max_iterations=_env_int("MARATHON_WEB_SEARCH_MAX_ITERS", 12),
             retries=max(0, min(_env_int("MARATHON_WEB_SEARCH_RETRIES", 1), 3)),
+            shared_state=(None if os.getenv("MARATHON_WEB_SEARCH_COORDINATE", "1") == "0" else
+                os.getenv("MARATHON_WEB_SEARCH_STATE", str(Path(os.getenv("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "marathon" / "search.sqlite3"))),
         )
 
 
@@ -359,6 +377,15 @@ class WebSearchExecutor:
         self.settings = settings
         self._owned_client: ClientSession | None = None
         self._client: ClientSession | None = http_client
+        self.coordinator = (
+            SearchCoordinator(
+                Path(settings.shared_state), settings.base_url,
+                interval=max(0.0, _env_float("MARATHON_WEB_SEARCH_INTERVAL", 2.0)),
+                engines=tuple(n.strip() for n in os.getenv(
+                    "MARATHON_WEB_SEARCH_ENGINES", "google,brave,google cse"
+                ).split(",") if n.strip()) or ("google", "brave", "google cse"),
+            ) if settings.shared_state else None
+        )
 
     async def _ensure_client(self) -> ClientSession:
         if self._client is not None:
@@ -400,49 +427,27 @@ class WebSearchExecutor:
         query: str,
         max_results: int | None = None,
         time_range: str | None = None,
+        engines: list[str] | None = None,
     ) -> SearchOutcome:
         if not query or not query.strip():
             return SearchOutcome(results=[])
         normalized_time_range = normalize_time_range(time_range)
-        client = await self._ensure_client()
         params = {"q": query.strip(), "format": "json", "safesearch": "0"}
+        if engines is not None:
+            if (
+                not isinstance(engines, list) or not 1 <= len(engines) <= 5
+                or any(not isinstance(name, str) or not name.strip()
+                       or len(name) > 80 or any(c in name for c in ",\n\r")
+                       for name in engines)
+            ):
+                raise ValueError("engines must be a list of 1 to 5 engine names")
+            params["engines"] = ",".join(name.strip() for name in engines)
         if normalized_time_range is not None:
             params["time_range"] = normalized_time_range
-        url = f"{self.settings.base_url}/search?{urlencode(params)}"
-        timeout = ClientTimeout(total=self.settings.timeout_s)
-        retries = max(0, min(self.settings.retries, 3))
-        payload: Any = None
-        for attempt in range(retries + 1):
-            try:
-                async with client.get(url, timeout=timeout) as response:
-                    if response.status >= 500:
-                        text = await response.text()
-                        raise _RetryableSearchError(
-                            f"SearXNG returned HTTP {response.status}: {text[:200]}"
-                        )
-                    if response.status >= 400:
-                        text = await response.text()
-                        raise RuntimeError(
-                            f"SearXNG returned HTTP {response.status}: {text[:200]}"
-                        )
-                    payload = await response.json(content_type=None)
-                break
-            except (
-                ClientError,
-                asyncio.TimeoutError,
-                json.JSONDecodeError,
-                _RetryableSearchError,
-            ) as exc:
-                if attempt >= retries:
-                    raise RuntimeError(
-                        f"SearXNG request failed after {attempt + 1} attempt(s): {exc}"
-                    ) from exc
-                LOG.warning(
-                    "SearXNG search attempt %d failed; retrying: %s",
-                    attempt + 1,
-                    exc,
-                )
-                await asyncio.sleep(min(0.25 * (2**attempt), 1.0))
+        if self.coordinator is not None:
+            payload = await self.coordinator.request(params, self._request_payload)
+        else:
+            payload = await self._request_payload(params)
 
         raw_results = payload.get("results") if isinstance(payload, dict) else None
         if not isinstance(raw_results, list):
@@ -493,7 +498,49 @@ class WebSearchExecutor:
                 "; ".join(engine_failures),
             )
         warnings = _provider_warnings(contributing_engines, engine_failures)
+        if payload.get("marathon_cache_hit"):
+            warnings += ("Reused a shared search result cached within the last five minutes.",)
         return SearchOutcome(results=formatted, warnings=warnings)
+
+    async def _request_payload(self, params: dict[str, str]) -> Any:
+        client = await self._ensure_client()
+        url = f"{self.settings.base_url}/search?{urlencode(params)}"
+        timeout = ClientTimeout(total=self.settings.timeout_s)
+        retries = max(0, min(self.settings.retries, 3))
+        payload: Any = None
+        for attempt in range(retries + 1):
+            try:
+                async with client.get(url, timeout=timeout) as response:
+                    if response.status >= 500:
+                        text = await response.text()
+                        raise _RetryableSearchError(
+                            f"SearXNG returned HTTP {response.status}: {text[:200]}"
+                        )
+                    if response.status >= 400:
+                        text = await response.text()
+                        raise RuntimeError(
+                            f"SearXNG returned HTTP {response.status}: {text[:200]}"
+                        )
+                    payload = await response.json(content_type=None)
+                break
+            except (
+                ClientError,
+                asyncio.TimeoutError,
+                json.JSONDecodeError,
+                _RetryableSearchError,
+            ) as exc:
+                if attempt >= retries:
+                    raise RuntimeError(
+                        f"SearXNG request failed after {attempt + 1} attempt(s): {exc}"
+                    ) from exc
+                LOG.warning(
+                    "SearXNG search attempt %d failed; retrying: %s",
+                    attempt + 1,
+                    exc,
+                )
+                await asyncio.sleep(min(0.25 * (2**attempt), 1.0))
+
+        return payload
 
 
 class _RetryableSearchError(RuntimeError):
@@ -597,34 +644,15 @@ def _provider_warnings(
     contributing_engines: set[str],
     engine_failures: list[str],
 ) -> tuple[str, ...]:
-    if "google cse" in contributing_engines:
+    # Report observed failures, not an assumed primary provider or cause.
+    # An engine can be disabled or legitimately have no matches.
+    if not engine_failures:
         return ()
-
-    google_failures = [
-        failure for failure in engine_failures if failure.casefold().startswith("google cse:")
-    ]
-    fallback_engines = sorted(
-        engine for engine in contributing_engines if engine != "google cse"
-    )
-    fallback_text = ", ".join(fallback_engines) or "other providers"
-    if google_failures:
-        detail = "; ".join(google_failures)
-        rate_limited = any(
-            marker in detail.casefold()
-            for marker in ("429", "too many", "rate limit", "quota", "suspended")
-        )
-        if rate_limited:
-            return (
-                "Google CSE is rate-limited or suspended by SearXNG's public endpoint, "
-                f"which has no user key quota counter ({detail}). Results are "
-                f"fallback-only via {fallback_text}.",
-            )
-        return (
-            f"Google CSE failed ({detail}). Results are fallback-only via {fallback_text}.",
-        )
+    providers = ", ".join(sorted(contributing_engines)) or "none"
     return (
-        "Google CSE contributed no results. Results are fallback-only via "
-        f"{fallback_text}.",
+        "Partial search results. Engines reporting failures: "
+        + "; ".join(engine_failures)
+        + f". Results supplied by: {providers}.",
     )
 
 
@@ -922,6 +950,29 @@ def _format_fetched_markdown(url: str, body: str, cap: int) -> str:
 async def _extract_to_markdown(raw: bytes, content_type: str, url: str, cap: int) -> str:
     """Convert fetched bytes into a clean Markdown excerpt."""
 
+    if "application/pdf" in content_type or raw.startswith(b"%PDF-"):
+        executable = shutil.which("pdftotext")
+        if executable is None:
+            raise RuntimeError("PDF extraction requires pdftotext (Poppler); install poppler-utils.")
+        process = await asyncio.create_subprocess_exec(
+            executable, "-f", "1", "-l", "100", "-enc", "UTF-8", "-", "-",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(raw), timeout=15)
+        except BaseException:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            raise
+        if process.returncode:
+            raise RuntimeError("PDF extraction failed: " + stderr.decode("utf-8", errors="replace")[:200])
+        body = stdout.decode("utf-8", errors="replace").strip()
+        if not body:
+            raise RuntimeError("PDF contains no extractable text; it may require OCR.")
+        return _format_fetched_markdown(url, "[PDF text; first 100 pages maximum]\n\n" + body, cap)
+
     text = _decode_bytes(raw, content_type)
 
     if "text/plain" in content_type or "application/json" in content_type:
@@ -979,10 +1030,9 @@ async def _crawl4ai_fetch(
                 await _validate_fetch_url(final_url, allow_private_networks=False)
         markdown = getattr(result, "markdown", None)
         if isinstance(markdown, str) and markdown.strip():
-            md = markdown.strip()
-            if len(md) > cap:
-                md = md[:cap]
-            return md
+            # The caller applies the cap and labels truncation. Cutting here
+            # hides from the model that the rest of the page was omitted.
+            return markdown.strip()
     except Exception as exc:
         LOG.warning("crawl4ai fetch failed for %s: %s", url, exc)
         raise RuntimeError(f"Crawl4AI fetch failed: {exc}") from exc
@@ -994,8 +1044,14 @@ def _html_to_markdown(html: str, url: str) -> str:
     except ImportError:
         return _html_fallback(html)
 
+    document = trafilatura.load_html(html)
+    if document is None:
+        return _html_fallback(html)
+    # Resolve before extraction: otherwise relative links can be joined to the
+    # host root, losing the document directory and fragment-only destinations.
+    document.make_links_absolute(url, resolve_base_href=True)
     extracted = trafilatura.extract(
-        html,
+        document,
         output_format="markdown",
         url=url,
         include_links=True,

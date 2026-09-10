@@ -1698,6 +1698,27 @@ def _response_tool_protocol_error(
     return None
 
 
+def _web_final_response_has_answer(response: dict[str, Any]) -> bool:
+    """Reject tool-only output when the managed research budget is exhausted."""
+    messages = []
+    for item in response.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") in {"function_call", "custom_tool_call", "web_search_call"}:
+            return False
+        if item.get("type") == "message":
+            text = "".join(part.get("text", "") for part in item.get("content", [])
+                           if isinstance(part, dict) and part.get("type") in {"output_text", "text"}).strip()
+            # A planning sentence can precede leaked protocol markup. Ignore
+            # fenced examples, but reject standalone protocol lines anywhere.
+            prose = "".join(re.split(r"```.*?```", text, flags=re.DOTALL))
+            if re.search(r"(?m)^\s*<(?:tool_call>|function=)", prose):
+                return False
+            if text:
+                messages.append(text)
+    return bool(messages)
+
+
 def _structured_patch_to_input(operations: Any) -> str:
     if not isinstance(operations, list) or not operations:
         return ""
@@ -2018,6 +2039,15 @@ def normalize_responses_request(
         if web_browse_available() and WEB_BROWSE_TOOL_NAME not in names:
             normalized_tools.append(web_browse_function_tool())
         data["tools"] = normalized_tools
+    if web_search_requested and os.getenv("MARATHON_RESEARCH_EVIDENCE_CHECK", "0") == "1":
+        evidence_instruction = (
+            "Before finalizing research, check that each main conclusion follows from "
+            "the cited evidence. Preserve uncertainty and population limits. Distinguish "
+            "measured effects from explanations and recommendations; do not infer "
+            "effects for unmeasured groups."
+        )
+        if evidence_instruction not in (data.get("instructions") or ""):
+            data["instructions"] = (data.get("instructions") or "") + "\n\n" + evidence_instruction
     data["_marathon_web_search_enabled"] = web_search_requested
 
     input_items = data.get("input")
@@ -4353,10 +4383,14 @@ class RouterState:
             )
 
         try:
+            search_options = {}
+            if args.get("engines") is not None:
+                search_options["engines"] = args["engines"]
             outcome = await self.web_search.search_with_diagnostics(
                 query,
                 max_results=max_results,
                 time_range=time_range,
+                **search_options,
             )
         except Exception as exc:
             self._log_tool_error("web_search", query, exc)
@@ -4364,8 +4398,8 @@ class RouterState:
                 call_id,
                 f"Web search failed: {exc}\nThe SearXNG instance at "
                 f"{self.web_search_settings.base_url} could not complete this query. "
-                "Tell the user the exact search error and answer from your own "
-                "knowledge if possible.",
+                "For unavailable engines, fetch known URLs or retry later. "
+                "Change the query only when results are irrelevant or genuinely empty.",
             )
 
         return make_function_call_output(
@@ -4409,9 +4443,8 @@ class RouterState:
             return make_function_call_output(
                 call_id,
                 f"web_fetch failed for {url}: {exc}\nIf this URL depends on "
-                "browser-rendered JavaScript, tell the user static fetch could "
-                "not extract it. "
-                "Otherwise prefer a different result from the previous search.",
+                "browser-rendered JavaScript, try web_browse if available. "
+                "Otherwise try another search result or an accessible copy of the page.",
             )
 
         return make_function_call_output(call_id, content)
@@ -4494,6 +4527,18 @@ class RouterState:
             return result
 
         result = await self._execute_managed_call(item, fallback_index)
+        trace_path = os.getenv("MARATHON_WEB_TRACE_FILE")
+        if trace_path:
+            # Explicit opt-in evaluation capture, never enabled for normal sessions.
+            # One file per evaluation process; includes public source text, not reasoning.
+            try:
+                fd = os.open(trace_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as trace:
+                    trace.write(json.dumps({"time": time.time(), "tool": _managed_call_name(item),
+                        "arguments": parse_function_call_arguments(item.get("arguments")),
+                        "result": result}, ensure_ascii=False) + "\n")
+            except OSError as exc:
+                print(f"Could not write opt-in web trace: {exc}", file=sys.stderr)
         stored = copy.deepcopy(result)
         stored.pop("call_id", None)
         cache[key] = stored
@@ -4539,6 +4584,7 @@ class RouterState:
         request_suffix: list[dict[str, Any]] = []
         seen_signatures: set[str] = set()
         finalizing = False
+        finalization_recoveries = 0
         last_response: dict[str, Any] = {}
         accounting = ResponseAccounting()
         iterations = 0
@@ -4617,14 +4663,14 @@ class RouterState:
                     return replayed, cumulative_items, iterations
 
         for _attempt in range(
-            max_iters + max_stalled_recoveries + max_tool_protocol_recoveries + 2
+            max_iters + max_stalled_recoveries + max_tool_protocol_recoveries + 3
         ):
             attempt_output_limit = int(
                 request.get("max_output_tokens") or _max_output_tokens(profile)
             )
             response = None
             try:
-                if event_sink is None:
+                if event_sink is None or finalizing:
                     request = copy.deepcopy(request)
                     request["stream"] = False
                     response = await self._request_json(
@@ -4637,6 +4683,19 @@ class RouterState:
                         event_sink=event_sink,
                     )
                 accounting.add(response)
+                if finalizing and not _web_final_response_has_answer(response):
+                    if finalization_recoveries:
+                        raise RuntimeError("Research budget exhausted and the model did not produce an answer after a finalization retry.")
+                    finalization_recoveries += 1
+                    self.telemetry.emit("router.web_tool.finalization_recovery", {"attempt": 1}, level="warning")
+                    request = copy.deepcopy(request)
+                    request["tools"] = []
+                    request["instructions"] = (request.get("instructions") or "") + (
+                        "\nResearch tools are now unavailable. Give the user your best answer "
+                        "from the sources already retrieved, stating material gaps. "
+                        "Do not emit tool calls or tool-call markup."
+                    )
+                    continue
                 protocol_error = _response_tool_protocol_error(
                     response,
                     _tool_argument_max_chars(),
@@ -4695,6 +4754,17 @@ class RouterState:
                     raise RuntimeError(summary_error)
 
             cumulative_items.extend(iter_items)
+            if finalizing:
+                # Finalization is buffered until validated, including after reconnect.
+                # Save before publishing so a disconnect cannot trigger fresh inference.
+                completed = copy.deepcopy(last_response)
+                accounting.apply(completed)
+                persist_progress(completed_response=completed)
+                if event_sink is not None:
+                    for item in externalize_for_codex(copy.deepcopy(iter_items)):
+                        if not await event_sink({"type": "response.output_item.done", "item": item}):
+                            raise ConnectionError("websocket client disconnected")
+                break
 
             has_actionable_output = _response_has_actionable_output(iter_items)
             stalled_at_output_limit = _response_stalled_at_output_limit(
@@ -4806,6 +4876,12 @@ class RouterState:
                         level="warning",
                     )
                 else:
+                    self.telemetry.emit(
+                        "router.web_tool.iteration_cap",
+                        {"iterations": iterations, "limit": max_iters,
+                         "pending_calls": len(pending_calls)},
+                        level="warning",
+                    )
                     tool_outputs = [
                         make_function_call_output(
                             synthesize_call_id(call, idx),
@@ -4824,32 +4900,7 @@ class RouterState:
                 request["tool_choice"] = "none"
                 finalizing = True
                 persist_progress()
-                if event_sink is None:
-                    request["stream"] = False
-                    final = await self._request_json(profile, "POST", "/v1/responses", request)
-                else:
-                    final = await self._request_responses_stream(
-                        profile,
-                        request,
-                        event_sink=event_sink,
-                    )
-                accounting.add(final)
-                last_response = final
-                final_items: list[dict[str, Any]] = []
-                for item in final.get("output", []):
-                    if isinstance(item, dict):
-                        final_items.append(
-                            self.sanitize_output_item(
-                                item,
-                                replayable_reasoning=profile.supports_slots,
-                            )
-                        )
-                _annotate_message_phases(final_items, final_response=True)
-                final_items = [
-                    item for item in final_items if not _is_droppable_commentary_message(item)
-                ]
-                cumulative_items.extend(final_items)
-                break
+                continue
 
             tool_outputs = []
             for idx, call in enumerate(pending_calls):

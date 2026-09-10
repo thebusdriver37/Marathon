@@ -125,7 +125,6 @@ check_search() {
   if ! "${curl_command[@]}" --max-time 20 \
     --data-urlencode 'q=SearXNG documentation official' \
     --data-urlencode 'format=json' \
-    --data-urlencode 'engines=google cse' \
     "$url/search" >"$response_file"; then
     rm -f "$response_file"
     echo "error: SearXNG search request failed at $url" >&2
@@ -163,17 +162,10 @@ if isinstance(results, list):
             engines.update(str(name).casefold() for name in names if name)
         elif result.get("engine"):
             engines.add(str(result["engine"]).casefold())
-if isinstance(results, list) and results and "google cse" in engines:
-    print(f"Google CSE provider works: {len(results)} results")
-    raise SystemExit(0)
 if isinstance(results, list) and results:
-    providers = ", ".join(sorted(engines)) or "unknown providers"
-    print(
-        f"error: Google CSE contributed no results; got fallback results via {providers}{detail}",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-print(f"error: Google CSE returned no usable results{detail}", file=sys.stderr)
+    print(f"Search works: {len(results)} results via {', '.join(sorted(engines))}{detail}")
+    raise SystemExit(0)
+print(f"error: Search returned no usable results{detail}", file=sys.stderr)
 raise SystemExit(1)
 PY
 )"; then

@@ -38,6 +38,69 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_web_finalization_retries_tool_markup_without_streaming_it(self):
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=1)
+        state.telemetry = mock.Mock()
+        state._execute_managed_call = mock.AsyncMock(return_value={"type": "function_call_output", "call_id": "a", "output": "source text"})
+        def call(key):
+            return {"output": [{"type": "function_call", "name": "web_search", "call_id": key, "arguments": json.dumps({"query": key})}]}
+        def message(text):
+            return {"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}], "usage": {"output_tokens": 10}}
+        state._request_responses_stream = mock.AsyncMock(side_effect=[call("a"), call("b")])
+        state._request_json = mock.AsyncMock(side_effect=[message("<tool_call><function=web_fetch></function></tool_call>"), message("Supported answer, with limited sources.")])
+        request = {"model": profile.alias, "prompt_cache_key": "final-test", "input": [{"role": "user", "content": "research"}], "tools": [router_module.web_search_function_tool()], "max_output_tokens": 8192}
+        events = []
+        async def sink(event):
+            events.append(event)
+            return True
+        async def scenario():
+            first = await state._run_responses_loop(profile=profile, forward_request=request, web_search_enabled=True, event_sink=sink)
+            replay = await state._run_responses_loop(profile=profile, forward_request=request, web_search_enabled=True, event_sink=sink)
+            return first, replay
+        first, replay = asyncio.run(scenario())
+        self.assertNotIn("<tool_call>", json.dumps(events))
+        self.assertIn("Supported answer", json.dumps(events))
+        self.assertEqual(state._request_json.await_count, 2)
+        self.assertEqual(state._execute_managed_call.await_count, 1)
+        self.assertEqual(state._request_json.await_args.args[3]["tools"], [])
+        self.assertEqual(first[0]["usage"]["output_tokens"], 20)
+        self.assertEqual(first[1], replay[1])
+
+    def test_web_finalization_failure_is_bounded(self):
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=1)
+        state.telemetry = mock.Mock()
+        state._execute_managed_call = mock.AsyncMock(return_value={"type": "function_call_output", "call_id": "a", "output": "source"})
+        call = lambda key: {"output": [{"type": "function_call", "name": "web_search", "call_id": key, "arguments": json.dumps({"query": key})}]}
+        bad = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "<tool_call>bad"}]}]}
+        state._request_json = mock.AsyncMock(side_effect=[call("a"), call("b"), bad, bad])
+        request = {"input": [{"role": "user", "content": "research"}], "tools": [router_module.web_search_function_tool()]}
+        with self.assertRaisesRegex(RuntimeError, "finalization retry"):
+            asyncio.run(state._run_responses_loop(profile=fixture_profile(), forward_request=request, web_search_enabled=True))
+        self.assertEqual(state._request_json.await_count, 4)
+        state._execute_managed_call.assert_awaited_once()
+
+    def test_web_final_answer_validator(self):
+        for text, expected in (("An answer", True), ("", False),
+                               ("<tool_call>unfinished", False),
+                               ("I'll now compose the answer.\n\n<tool_call>\n<function=get_goal>\n</function>\n</tool_call>", False),
+                               ("Example:\n```xml\n<tool_call>\n</tool_call>\n```", True),
+                               ("Example syntax: `<tool_call>`", True)):
+            response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}]}
+            self.assertEqual(router_module._web_final_response_has_answer(response), expected)
+        self.assertFalse(router_module._web_final_response_has_answer({"output": [{"type": "function_call"}]}))
+
+    def test_evidence_instruction_is_scoped_and_switchable(self):
+        for enabled, tools, expected in (("0", [{"type": "web_search"}], False),
+                                         ("1", [], False),
+                                         ("1", [{"type": "web_search"}], True)):
+            with mock.patch.dict("os.environ", {"MARATHON_RESEARCH_EVIDENCE_CHECK": enabled}):
+                result = router_module.normalize_responses_request({"instructions": "Original", "tools": tools, "input": []})
+                self.assertEqual("Preserve uncertainty" in result["instructions"], expected)
+                self.assertTrue(result["instructions"].startswith("Original"))
+
     def test_saved_swarm_history_replays_without_active_collaboration_tools(self):
         history = [
             {"type": "function_call", "namespace": "collaboration", "name": "spawn_agent",
@@ -3874,8 +3937,9 @@ context = 32768
             "usage": {"output_tokens": 10},
         }
         state._request_responses_stream = mock.AsyncMock(
-            side_effect=[search("search_1"), search("search_2"), final]
+            side_effect=[search("search_1"), search("search_2")]
         )
+        state._request_json = mock.AsyncMock(return_value=final)
         request = {
             "model": profile.alias,
             "prompt_cache_key": "session-repeat",
@@ -3914,9 +3978,10 @@ context = 32768
         self.assertEqual(replayed[0]["usage"], first[0]["usage"])
         self.assertEqual(replayed[0]["usage_metadata"], first[0]["usage_metadata"])
         self.assertEqual(first[2], 2)
-        self.assertEqual(state._request_responses_stream.await_count, 3)
+        self.assertEqual(state._request_responses_stream.await_count, 2)
+        state._request_json.assert_awaited_once()
         state._execute_managed_call.assert_awaited_once()
-        final_request = state._request_responses_stream.await_args_list[2].args[1]
+        final_request = state._request_json.await_args.args[3]
         # Tool schemas are part of Qwen's prompt prefix. Finalizing must not
         # invalidate either this request's cache or the next ordinary turn.
         self.assertEqual(final_request["tools"], request["tools"])
