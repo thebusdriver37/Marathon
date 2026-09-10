@@ -51,6 +51,8 @@ The normal router translates saved local collaboration messages during both infe
 The saved rollout is not rewritten by that translation.
 
 Swarm requests omit long runs of literal echo-only commands and their associated reasoning from the model's view of old history, while preserving the saved rollout and useful commands.
+Compaction uses the same filtered history, without the recovery instruction or helper calls.
+Restoring the omitted spam during compaction can make the prompt exceed the context limit even when the preceding inference request fit.
 For a recovered lead, the first inference request exposes only the read-only helper-list tool; subsequent requests restore the normal tools.
 This breaks the observed pattern of announcing helper calls while merely printing shell markers.
 If an agent produces eight consecutive echo-only commands in a turn, Marathon stops that turn with an explanatory error instead of allowing the loop to continue indefinitely.
@@ -84,6 +86,7 @@ With shared history normalization, that same copy compacted successfully and ans
 The real Codex recovery test checks rejection of a second live writer, forcibly kills its disposable launcher, then successfully resumes the conversation without removing lock files.
 The optional resume evaluation shuts down a fresh team, resumes through the ordinary headless command, and verifies that the same three thread IDs run again without changing the completed files.
 The recovery evaluation copies a real three-agent history and its SQLite state into a private temporary directory, asks both saved helpers for a diagnostic reply, and checks their identities, the absence of new shell calls, and that the original history is unchanged.
+With `MARATHON_TEST_CODEX_BIN` set, the gateway tests also resume a disposable echo-heavy history through the installed frontend, trigger automatic compaction, and verify that a summary is installed without restoring the spam.
 Its transcript and results remain in the printed evidence directory for inspection.
 The echo recovery change passed a real-history replay with both original helpers replying and zero new shell commands, plus a fresh three-GPU coding trial in 38.69 seconds with all three independent tests passing.
 A separate replay still showed a helper continuing its old task despite receiving the new brief correctly; the echo guard does not guarantee that the model follows every instruction.

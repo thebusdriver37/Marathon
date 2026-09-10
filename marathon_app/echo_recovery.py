@@ -39,11 +39,12 @@ def echo_marker(item):
             and not any(token and all(c in ';&|<>()' for c in token) for token in tokens[1:]))
 
 
-def recover_echo_history(payload):
+def recover_echo_history(payload, *, include_note=True):
     """Return a request-only cleanup and the current turn's echo streak.
 
     Stored rollouts remain intact. Only complete call/result pairs in long runs
     are omitted; useful commands, short runs, and all user messages remain.
+    Compaction uses the same cleanup without an instruction to contact helpers.
     """
     items = payload.get('input')
     if not isinstance(items, list):
@@ -90,5 +91,6 @@ def recover_echo_history(payload):
     cleaned = [item for index, item in enumerate(items) if index not in omitted]
     # A single bounded correction at the end of the request, after the old
     # examples, is more useful than repeating a warning for every omitted call.
-    cleaned.append({'type': 'message', 'role': 'developer', 'content': RECOVERY_NOTE})
+    if include_note:
+        cleaned.append({'type': 'message', 'role': 'developer', 'content': RECOVERY_NOTE})
     return {**payload, 'input': cleaned}, omitted_calls, streak

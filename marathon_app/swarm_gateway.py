@@ -67,15 +67,16 @@ class SwarmGateway:
                 original = json.loads(body)
                 if not isinstance(original, dict):
                     raise ValueError('Swarm requests must be JSON objects.')
-                omitted, echo_streak = 0, 0
                 metadata = json.loads(request.headers.get('x-codex-turn-metadata') or '{}')
                 compaction = isinstance(metadata, dict) and metadata.get('request_kind') == 'compaction'
-                # Compaction and tools-disabled requests must remain summaries,
-                # without the recovery instruction to contact helpers.
-                if (request.path == '/v1/responses' and not compaction
-                        and original.get('tool_choice') != 'none'):
-                    original, omitted, echo_streak = recover_echo_history(original)
-                if request.path == '/v1/responses' and echo_streak >= ECHO_LIMIT:
+                allow_recovery_actions = (request.path == '/v1/responses' and not compaction
+                                          and original.get('tool_choice') != 'none')
+                # Keep the same history budget during inference and compaction.
+                # Only the instruction and tool actions are inference-specific;
+                # restoring old spam while compacting can overflow the context.
+                original, omitted, echo_streak = recover_echo_history(
+                    original, include_note=allow_recovery_actions)
+                if allow_recovery_actions and echo_streak >= ECHO_LIMIT:
                     self.record('swarm.echo_loop_stopped', {'thread': thread_id, 'calls': echo_streak})
                     raise web.HTTPBadRequest(text=(
                         'Marathon stopped this turn after repeated echo-only commands. '
@@ -92,7 +93,7 @@ class SwarmGateway:
                     # send_message can silently leave an idle helper asleep.
                     payload['tools'] = [tool for tool in payload['tools']
                                         if tool.get('name') != 'collaboration__send_message']
-                if (omitted and identity == '/root' and request.path == '/v1/responses'
+                if (omitted and allow_recovery_actions and identity == '/root'
                         and payload.get('tool_choice') in (None, 'auto')
                         and thread_id not in self.echo_recovered
                         and any(tool.get('name') == 'collaboration__list_agents'

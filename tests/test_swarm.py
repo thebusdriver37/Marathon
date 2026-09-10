@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 import tempfile
 import unittest
 import uuid
@@ -18,6 +19,8 @@ class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.calls = []
         self.echo_backend = False
+        self.summary_backend = False
+        self.compaction_requests = []
         self.events = []
         self.servers = []
         self.active = 0
@@ -35,6 +38,28 @@ class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     body = await request.read()
                 self.calls.append((index, request.path, request.headers.get('Authorization'), body))
+                if websocket and self.summary_backend:
+                    from marathon_app.echo_recovery import echo_marker
+                    payload = json.loads(body)
+                    metadata = json.loads(request.headers.get('x-codex-turn-metadata') or '{}')
+                    compacting = metadata.get('request_kind') == 'compaction'
+                    if compacting:
+                        self.compaction_requests.append(payload)
+                    number = len(self.calls)
+                    await websocket.send_json({'type': 'response.created', 'response': {'id': f'resp_{number}'}})
+                    if compacting and any(echo_marker(item) for item in payload.get('input', [])):
+                        await websocket.send_json({'type': 'response.failed', 'response': {
+                            'id': f'resp_{number}', 'status': 'failed',
+                            'error': {'message': 'Test context overflow: old echo history was restored'}}})
+                    else:
+                        item = {'type': 'message', 'role': 'assistant', 'id': f'msg_{number}',
+                                'content': [{'type': 'output_text', 'text': 'COMPACTION_OK' if compacting else 'READY'}]}
+                        await websocket.send_json({'type': 'response.output_item.done', 'output_index': 0, 'item': item})
+                        await websocket.send_json({'type': 'response.completed', 'response': {
+                            'id': f'resp_{number}', 'status': 'completed', 'output': [item],
+                            'usage': {'input_tokens': 10, 'output_tokens': 1, 'total_tokens': 11}}})
+                    await websocket.close()
+                    return websocket
                 if request.query.get('wait'):
                     self.active += 1
                     self.peak = max(self.peak, self.active)
@@ -248,23 +273,28 @@ class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent['tool_choice'], 'auto')
         self.assertEqual([tool['name'] for tool in sent['tools']], ['exec_command', 'collaboration__list_agents'])
 
-    async def test_compaction_and_tools_disabled_requests_do_not_start_echo_recovery(self):
+    async def test_compaction_and_tools_disabled_requests_filter_spam_without_recovery_actions(self):
         from test_echo_recovery import loop
+        summary = {'type': 'message', 'role': 'user', 'content': 'Summarize the useful work.'}
         for path, extra in (('/v1/responses/compact', {'tools': [{'type': 'function', 'name': 'exec_command'}]}),
                             ('/v1/responses', {'tools': [{'type': 'function', 'name': 'exec_command'}],
                                                'tool_choice': 'none'})):
-            original = {'input': loop(), **extra}
+            original = {'input': [*loop(), summary], **extra}
             response = await self.client.post(path, headers=self.headers(), json=original)
             self.assertEqual(response.status, 200)
             await self.response_payload(response)
-            self.assertEqual(len(json.loads(self.calls[-1][3])['input']), len(original['input']))
-        self.assertFalse(any(event[0].startswith('swarm.echo_') for event in self.events))
+            self.assertEqual(json.loads(self.calls[-1][3])['input'], [summary])
         response = await self.client.post('/v1/responses', headers={
             **self.headers(), 'x-codex-turn-metadata': '{"request_kind":"compaction"}'},
-            json={'input': loop()})
+            json={'input': [*loop(), summary], 'tools': [{'type': 'namespace', 'name': 'collaboration',
+                  'tools': [{'type': 'function', 'name': 'list_agents', 'parameters': {'type': 'object'}}]}]})
         self.assertEqual(response.status, 200)
         await self.response_payload(response)
-        self.assertEqual(len(json.loads(self.calls[-1][3])['input']), len(loop()))
+        sent = json.loads(self.calls[-1][3])
+        self.assertEqual(sent['input'], [summary])
+        self.assertNotEqual(sent.get('tool_choice'), 'required')
+        self.assertFalse(any(event[0] in ('swarm.echo_recovery_inventory', 'swarm.echo_loop_stopped')
+                             for event in self.events))
 
     async def test_lead_uses_followup_but_helpers_can_still_send_messages(self):
         for identity in ('/root', '/root/helper'):
@@ -294,6 +324,48 @@ class SwarmGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         self.assertIn('JSON objects', await response.text())
         self.assertEqual(self.calls, [])
+
+    @unittest.skipUnless(os.environ.get('MARATHON_TEST_CODEX_BIN'), 'Requires installed Codex frontend')
+    async def test_real_frontend_compacts_a_saved_echo_loop_without_restoring_spam(self):
+        from test_echo_recovery import loop
+        self.summary_backend = True
+        with tempfile.TemporaryDirectory(prefix='marathon-echo-compaction-') as directory:
+            provider = ('model_providers.marathon-local={name="Compaction test",wire_api="responses",'
+                        f'base_url="{self.client.make_url("/v1")}",env_key="MARATHON_ROUTER_TOKEN",'
+                        'requires_openai_auth=false,supports_websockets=false,stream_max_retries=0}')
+            async def run(*arguments):
+                process = await asyncio.create_subprocess_exec(
+                    os.environ['MARATHON_TEST_CODEX_BIN'], '-c', provider,
+                    '-c', 'model_provider="marathon-local"', '-c', 'sandbox_mode="read-only"', *arguments,
+                    cwd=directory, env=dict(os.environ, CODEX_HOME=directory, CODEX_SQLITE_HOME=directory,
+                                           MARATHON_LOCAL_ONLY='1', MARATHON_ROUTER_TOKEN='gateway-secret'),
+                    stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=45)
+                    self.assertEqual(process.returncode, 0, (stdout + stderr).decode()[-3000:])
+                finally:
+                    if process.returncode is None:
+                        process.terminate()
+                        await process.wait()
+            await run('exec', '--skip-git-repo-check', 'Reply READY')
+            rollout = next(Path(directory).glob('sessions/**/*.jsonl'))
+            recorded = [json.loads(line) for line in rollout.read_text().splitlines()]
+            ordinal = max(event.get('ordinal', 0) for event in recorded) + 1
+            # Seed only this disposable test session with historical call/result
+            # pairs. No shell commands are executed to build the fixture.
+            with rollout.open('a') as output:
+                for item in loop():
+                    if item['type'] != 'reasoning':
+                        output.write(json.dumps({'timestamp': recorded[-1]['timestamp'], 'ordinal': ordinal,
+                                                 'type': 'response_item', 'payload': item}) + '\n')
+                        ordinal += 1
+            await run('-c', 'model_auto_compact_token_limit=1', 'exec', 'resume', '--last',
+                      '--skip-git-repo-check', 'Reply READY after compaction')
+            self.assertTrue(self.compaction_requests)
+            events = [json.loads(line) for line in rollout.read_text().splitlines()]
+            self.assertTrue(any(event['type'] == 'compacted' and 'COMPACTION_OK' in
+                                event['payload'].get('message', '') for event in events))
+            self.assertTrue(any(event.get('payload', {}).get('call_id') == 'echo-0' for event in events))
 
     @unittest.skipUnless(os.environ.get('MARATHON_TEST_CODEX_BIN'), 'Requires installed Codex frontend')
     async def test_real_frontend_exits_a_repeating_shell_loop(self):
