@@ -1060,7 +1060,10 @@ class Runtime:
         environment.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         environment.setdefault("CUDA_SCALE_LAUNCH_QUEUES", "4x")
         if progress:
-            progress(f"Starting {self._backend.display_name}")
+            if self._backend.kind == "llama_swap_pool":
+                progress("Preparing one worker from the configured pool")
+            else:
+                progress(f"Starting {self._backend.display_name}")
         if slot_api_enabled:
             slot_path.mkdir(parents=True, exist_ok=True)
         load_started = time.monotonic()
