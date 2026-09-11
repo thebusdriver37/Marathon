@@ -2106,6 +2106,18 @@ def normalize_responses_request(
         if item.get("type") == "reasoning":
             restored_reasoning = _restore_local_reasoning_item(item)
             if restored_reasoning is not None:
+                if profile is not None and profile.external:
+                    # Local capsules and llama.cpp's `text` parts are private
+                    # replay formats. External Responses servers require
+                    # reasoning_text and must not receive our capsule marker.
+                    restored_reasoning = {
+                        "type": "reasoning",
+                        "summary": restored_reasoning["summary"],
+                        "content": [
+                            {"type": "reasoning_text", "text": part["text"]}
+                            for part in restored_reasoning["content"]
+                        ],
+                    }
                 normalized_input.append(restored_reasoning)
                 input_changed = input_changed or restored_reasoning is not item
                 continue

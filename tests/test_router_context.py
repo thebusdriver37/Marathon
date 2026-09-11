@@ -729,6 +729,36 @@ context = 32768
             router_module._conversation_checkpoint_prefix_hash(resumed_request, 3),
         )
 
+    def test_switch_to_external_translates_local_reasoning_history(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        saved = state.sanitize_output_item(
+            {
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "Saved reasoning."}],
+            },
+            replayable_reasoning=True,
+        )
+        call = {"type": "function_call", "name": "lookup", "call_id": "call-1", "arguments": "{}"}
+        result = {"type": "function_call_output", "call_id": "call-1", "output": "42"}
+        for serialized in (False, True):
+            with self.subTest(serialized=serialized):
+                item = copy.deepcopy(saved)
+                if serialized:
+                    item.pop("content")
+                original = {"input": [item, call, result, {"role": "user", "content": "Continue."}]}
+                normalized = router_module.normalize_responses_request(
+                    copy.deepcopy(original), replace(fixture_profile(), external=True, supports_slots=False)
+                )
+                self.assertEqual(normalized["input"][0], {
+                    "type": "reasoning", "summary": [],
+                    "content": [{"type": "reasoning_text", "text": "Saved reasoning."}],
+                })
+                self.assertEqual(normalized["input"][1:], original["input"][1:])
+                local = router_module.normalize_responses_request(copy.deepcopy(original), fixture_profile())
+                self.assertEqual(local["input"][0]["encrypted_content"], saved["encrypted_content"])
+                self.assertEqual(local["input"][0]["content"][0]["type"], "text")
+
     def test_invalid_local_reasoning_capsule_is_not_replayed(self) -> None:
         normalized = router_module.normalize_responses_request(
             {
