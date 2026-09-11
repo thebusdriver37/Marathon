@@ -3604,6 +3604,36 @@ context = 32768
             level="warning",
         )
 
+    def test_compaction_recovers_prose_prefixed_tool_call_without_publishing_it(self):
+        # Exact failed response observed in the live two-cycle compaction audit.
+        invalid = "I'll write the compaction summary to a handoff file in the workspace.\n\n<tool_call>\n<function=exec_command>\n<parameter=cmd>\nls -la && ls handoff-compact.md 2>/dev/null && head -5 handoff-compact.md\n</parameter>\n</function>\n</tool_call>"
+        def response(text):
+            return {"output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": text}]}], "usage": {"output_tokens": 10}}
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        state._request_json = mock.AsyncMock(side_effect=[response(invalid), response("Checkpoint delta-59; next validate replica lag.")])
+        state._request_responses_stream = mock.AsyncMock(return_value=response(invalid))
+        request = {"input": [{"role": "user", "content": "Checkpoint delta-59"}],
+                   "tools": [], "chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "medium"},
+                   "client_metadata": {"x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}}
+        events = []
+        async def sink(event):
+            events.append(event)
+            return True
+        result, items, _ = asyncio.run(state._run_responses_loop(
+            profile=fixture_profile(), forward_request=request, web_search_enabled=False, event_sink=sink))
+        self.assertNotIn("<tool_call>", json.dumps(items))
+        self.assertNotIn("<tool_call>", json.dumps(events))
+        self.assertIn("delta-59", json.dumps(events))
+        self.assertEqual(result["usage"]["output_tokens"], 20)
+        state._request_responses_stream.assert_not_awaited()
+        retry = state._request_json.await_args_list[1].args[3]
+        self.assertEqual(retry["input"][0], request["input"][0])
+        self.assertEqual(retry["chat_template_kwargs"], request["chat_template_kwargs"])
+        self.assertEqual(retry["tool_choice"], "none")
+
     def test_compaction_rejects_tool_markup_instead_of_installing_it_as_summary(self) -> None:
         state = object.__new__(router_module.RouterState)
         state.web_search_settings = SimpleNamespace(max_iterations=3)
@@ -3635,6 +3665,40 @@ context = 32768
                     "input": [], "tools": [], "client_metadata": {
                         "x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}},
                 web_search_enabled=False))
+
+    def test_compaction_exhausted_retry_never_publishes_invalid_summary(self):
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        state._request_json = mock.AsyncMock(return_value={
+            "output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "I will write it.\n<tool_call><function=exec_command>"}]}]})
+        sink = mock.AsyncMock(return_value=True)
+        with self.assertRaisesRegex(RuntimeError, "tool-call markup"):
+            asyncio.run(state._run_responses_loop(
+                profile=fixture_profile(), forward_request={
+                    "input": [], "tools": [], "client_metadata": {
+                        "x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}},
+                web_search_enabled=False, event_sink=sink))
+        self.assertEqual(state._request_json.await_count, 2)
+        sink.assert_not_awaited()
+
+    def test_compaction_allows_quoted_protocol_examples(self):
+        for text in [
+            "Investigating `<tool_call>` parsing; next add validation.",
+            "Recorded failure:\n```xml\n<tool_call>\n<function=exec_command>\n</tool_call>\n```\nNext fix validation.",
+            "Recorded failure:\n~~~~xml\n<tool_call>\n~~~~\nNext fix validation.",
+            "Recorded failure:\n> <tool_call>\n> </tool_call>\nNext fix validation.",
+        ]:
+            with self.subTest(text=text):
+                self.assertIsNone(router_module._compaction_summary_error([
+                    {"type": "message", "role": "assistant", "content": [
+                        {"type": "output_text", "text": text}]}]))
+
+    def test_compaction_rejects_call_after_quoted_example(self):
+        self.assertIsNotNone(router_module._compaction_summary_error([
+            {"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "Example:\n```xml\n<tool_call>\n```\nNow I will write it. <tool_call><function=exec_command>"}]}]))
 
     def test_compaction_validation_allows_summaries_without_spaces(self) -> None:
         self.assertIsNone(router_module._compaction_summary_error([

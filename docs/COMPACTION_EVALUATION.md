@@ -1,5 +1,24 @@
 # Compaction evaluation
 
+## Summary validation fix, 2026-09-11
+
+The prompt audit recorded a second-cycle failure where Qwen returned introductory prose followed by a textual tool call instead of a summary.
+The previous validator only rejected responses starting with `<tool_call>`, allowing this response to replace useful context and lose all twelve fixture facts.
+The router now detects unquoted tool-call markup after prose, while allowing inline-code, fenced-code, and blockquote examples in legitimate summaries.
+Compaction responses are buffered until validation succeeds, including on the streaming frontend path.
+On invalid markup or a bare acknowledgement, the router retries once using the original context and unchanged reasoning settings, with tools disabled and a direct summary instruction.
+The rejected response is never replayed as an accepted assistant turn.
+If the retry also fails validation, the router returns an error without publishing the invalid summary.
+The production base prompt and `Minimize thinking.` remain unchanged.
+
+Regression tests replay the exact failed response and cover successful recovery, bounded failure without published output, quoted protocol examples, and preservation of context and medium reasoning.
+The Python suite passed 393 tests with seven skipped.
+All six live compaction cycles across three fresh sessions preserved all twelve facts and recalled them without tools, with medium reasoning and live prefix-cache reuse.
+Live terminal verification evidence is retained in `.marathon/diagnostics/compaction-validation-fix-20260911`.
+New Marathon router processes pick up the fix; already-running sessions are not restarted automatically.
+
+## Prefix-cache evaluation
+
 Cache-preserving compaction is now enabled by default for the local Responses websocket path.
 A live long-context comparison reduced compaction from 188.14 seconds to 11.58 seconds, about 16.25 times faster, with all 12 fixture facts preserved in both the summary and subsequent tool-free recall.
 

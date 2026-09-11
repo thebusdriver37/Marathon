@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -53,6 +54,8 @@ def main():
     parser.add_argument("--auto-compact-token-limit", type=int,
                         help="also require automatic compaction during fixture setup")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--model-instructions-file", type=Path,
+                        help="test-only complete base prompt override for prompt comparisons")
     args = parser.parse_args()
     if not args.run_gpu:
         parser.error("live inference is opt-in; pass --run-gpu")
@@ -80,6 +83,14 @@ def main():
                 lines.insert(index * max(1, len(lines) // len(FACTS)), f"ACTIVE HANDOFF FACT {key}: {value}")
             (project / "handoff.txt").write_text("\n".join(lines) + "\n")
             instance = f"compact-{os.getpid()}"
+            # Keep the native skill installer isolated during parallel trials.
+            skill_root = trial / "codex-home" / "instances" / instance / "skills"
+            skill_root.mkdir(parents=True)
+            system_skills = Path.home() / ".codex/skills/.system"
+            if system_skills.exists():
+                shutil.copytree(system_skills, skill_root / ".system", symlinks=True)
+            else:
+                (skill_root / ".system").mkdir()
             environment = dict(os.environ, TERM="xterm-256color", CODEX_CLI_NAME="codex",
                                MARATHON_CLI_NAME=str(LAUNCHER),
                                MARATHON_CODEX_HOME=str(trial / "codex-home"),
@@ -91,8 +102,10 @@ def main():
                 environment["MARATHON_COMPACTION_REASONING_EFFORT"] = effort
             sessions = trial / "codex-home/instances" / instance / "sessions"
             config_args = []
+            if args.model_instructions_file:
+                config_args += ["-c", "model_instructions_file=" + json.dumps(str(args.model_instructions_file.resolve()))]
             if args.auto_compact_token_limit:
-                config_args = ["-c", f"model_auto_compact_token_limit={args.auto_compact_token_limit}"]
+                config_args += ["-c", f"model_auto_compact_token_limit={args.auto_compact_token_limit}"]
             terminal = Terminal([
                 str(LAUNCHER), "--instance", instance, "codex", "--no-alt-screen",
                 "-s", "workspace-write", "-c", f'model_reasoning_effort="{args.coding_effort or effort}"',

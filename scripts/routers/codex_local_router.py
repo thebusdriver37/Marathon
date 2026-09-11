@@ -1117,12 +1117,40 @@ def _stalled_final_response_recovery_message(
     }
 
 
+def _has_unquoted_tool_call(text: str) -> bool:
+    """Recognize attempted calls without rejecting Markdown protocol examples."""
+    fence = None
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(">"):
+            continue
+        marker = re.match(r"(`{3,}|~{3,})", stripped)
+        if marker:
+            delimiter = marker.group(1)
+            if fence is None:
+                fence = delimiter
+            elif (
+                delimiter[0] == fence[0]
+                and len(delimiter) >= len(fence)
+                and not stripped[len(delimiter):].strip()
+            ):
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        # Inline code is quoted task data, too.
+        unquoted = re.sub(r"(`+).*?\1", "", line)
+        if "<tool_call>" in unquoted:
+            return True
+    return False
+
+
 def _compaction_summary_error(items: list[dict[str, Any]]) -> str | None:
     for item in reversed(items):
         if not _is_assistant_message_item(item) or item.get("phase") == "commentary":
             continue
         text = _assistant_message_text(item).strip()
-        if text.startswith("<tool_call>"):
+        if _has_unquoted_tool_call(text):
             # Without tools, Qwen can emit its tool protocol as plain text.
             return "compaction returned tool-call markup instead of a context summary"
         # Match bare acknowledgements, not word counts: valid summaries in some
@@ -4602,6 +4630,8 @@ class RouterState:
         iterations = 0
         stalled_recoveries = 0
         tool_protocol_recoveries = 0
+        compaction_recoveries = 0
+        is_compaction = _codex_request_kind(request) == "compaction"
         max_stalled_recoveries = max(
             0,
             _env_int(
@@ -4682,7 +4712,7 @@ class RouterState:
             )
             response = None
             try:
-                if event_sink is None or finalizing:
+                if event_sink is None or finalizing or is_compaction:
                     request = copy.deepcopy(request)
                     request["stream"] = False
                     response = await self._request_json(
@@ -4763,7 +4793,33 @@ class RouterState:
                     raise RuntimeError("tools are disabled during compaction")
                 summary_error = _compaction_summary_error(iter_items)
                 if summary_error:
-                    raise RuntimeError(summary_error)
+                    if compaction_recoveries:
+                        raise RuntimeError(summary_error)
+                    compaction_recoveries += 1
+                    self.telemetry.emit(
+                        "router.response.compaction_recovery",
+                        {"attempt": compaction_recoveries, "reason": summary_error},
+                        level="warning",
+                    )
+                    # Keep the original context and reasoning settings; never replay
+                    # the invalid summary as if it were an accepted assistant turn.
+                    request = copy.deepcopy(request)
+                    request["input"] = list(request.get("input") or []) + [{
+                        "type": "message", "role": "user", "content": [{
+                            "type": "input_text",
+                            "text": "The previous response was not a context summary. "
+                            "Return the summary directly as text now, preserving the objective, "
+                            "decisions, exact continuation values, pending work, and constraints "
+                            "from the original context. Do not call tools, emit tool-call markup, "
+                            "write a file, or merely acknowledge the request.",
+                        }],
+                    }]
+                    request["tool_choice"] = "none"
+                    continue
+                if event_sink is not None and _response_has_actionable_output(iter_items):
+                    for item in externalize_for_codex(copy.deepcopy(iter_items)):
+                        if not await event_sink({"type": "response.output_item.done", "item": item}):
+                            raise ConnectionError("websocket client disconnected")
 
             cumulative_items.extend(iter_items)
             if finalizing:
