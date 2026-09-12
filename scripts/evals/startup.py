@@ -22,11 +22,16 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--launcher", type=Path, default=LAUNCHER)
+    parser.add_argument("--typing-delay", type=float, default=0.0)
     args = parser.parse_args()
     if not args.run_gpu:
         parser.error("live inference is opt-in; pass --run-gpu")
     if min(args.repeats, args.timeout) < 1:
         parser.error("repeats and timeout must be positive")
+    if args.typing_delay < 0:
+        parser.error("typing delay must be non-negative")
+    launcher = args.launcher.resolve()
     output = args.output_dir.resolve() if args.output_dir else Path(
         tempfile.mkdtemp(prefix="marathon-startup-")
     )
@@ -37,12 +42,20 @@ def main() -> int:
     for repeat in range(args.repeats):
         trial = output / str(repeat)
         trial.mkdir()
-        environment = dict(os.environ, TERM="xterm-256color", MARATHON_RUNS_DIR=str(trial / "runs"))
+        environment = dict(
+            os.environ,
+            TERM="xterm-256color",
+            MARATHON_RUNS_DIR=str(trial / "runs"),
+            MARATHON_CODEX_HOME=str(trial / "codex-home"),
+            MARATHON_STOCK_CODEX_HOME=str(trial / "stock-codex-home"),
+            MARATHON_AUTO_INSTALL_CLI="0",
+        )
+        environment.pop("PYTHONPATH", None)
         # Use normal worker selection and session preparation, including an
         # automatic instance relaunch when other Marathon sessions are open.
         started = time.monotonic_ns()
-        terminal = Terminal([str(LAUNCHER), "codex", "--no-alt-screen"],
-                            Path.cwd(), environment, trial / "terminal.txt")
+        terminal = Terminal([str(launcher), "codex", "--no-alt-screen"],
+                            launcher.parent.parent, environment, trial / "terminal.txt")
 
         def events():
             return [event for path in (trial / "runs").rglob("*.jsonl")
@@ -63,6 +76,8 @@ def main() -> int:
             sessions = Path(frontend["data"]["codex_home"]) / "sessions"
             before = {path: path.stat().st_size for path in sessions.rglob("*.jsonl")}
             expected = f"STARTUP_OK_{os.getpid()}_{repeat}"
+            time.sleep(args.typing_delay)
+            prompted = time.monotonic_ns()
             terminal.prompt(f"Reply only {expected}. Do not use tools.")
 
             def reply():
@@ -83,8 +98,17 @@ def main() -> int:
                 return False
 
             terminal.wait(reply, args.timeout)
+            completed = time.monotonic_ns()
+            terminal.wait(
+                lambda: expected in terminal.clean()
+                and terminal.clean().rfind("Ask Marathon to do anything")
+                > terminal.clean().rfind(expected),
+                args.timeout,
+            )
             row = dict(repeat=repeat, passed=True, ready_seconds=round((ready - started) / 1e9, 3),
-                       first_reply_seconds=round((time.monotonic_ns() - started) / 1e9, 3),
+                       first_reply_seconds=round((completed - started) / 1e9, 3),
+                       prompt_reply_seconds=round((completed - prompted) / 1e9, 3),
+                       typing_delay_seconds=args.typing_delay,
                        milestones=milestones)
         except Exception as error:
             row = dict(repeat=repeat, passed=False, error=str(error))

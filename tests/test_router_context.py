@@ -1361,7 +1361,7 @@ context = 32768
         self.assertTrue(router_module._is_warmup_root(warmup))
         self.assertFalse(router_module._is_warmup_root(generated))
 
-    def test_non_generating_warmup_defers_prefix_work_until_first_turn(self) -> None:
+    def test_non_generating_warmup_schedules_prefix_work_without_blocking(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)
         state.resolve_model = mock.Mock(return_value=profile)
@@ -1410,6 +1410,9 @@ context = 32768
         state._trace_seq = 0
         state._response_id_seq = 0
         state.debug = False
+        state.schedule_starter_cache_prewarm = mock.Mock(
+            return_value={"status": "scheduled"}
+        )
 
         warmup = asyncio.run(
             state.process_websocket_create(
@@ -1426,6 +1429,7 @@ context = 32768
 
         state.prepare_starter_cache.assert_not_awaited()
         state.ensure_model_async.assert_not_awaited()
+        state.schedule_starter_cache_prewarm.assert_called_once()
         self.assertNotIn(profile.slug, state.live_slot_by_model)
 
         first_turn = asyncio.run(
@@ -1487,12 +1491,115 @@ context = 32768
         ]
         self.assertEqual(
             completed[0]["slot"]["prepare_mode"],
-            "warmup-deferred-prefix-cache",
+            "warmup-background-prefix-cache",
         )
         self.assertEqual(
             completed[1]["slot"]["prepare_mode"],
             "build-starter-cache",
         )
+
+    def test_background_starter_prewarm_restores_an_unclaimed_slot(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state._closing = False
+        state.starter_cache_enabled = True
+        state.live_slot_by_model = {}
+        state.live_prompt_cache_key_by_model = {}
+        state.starter_slot_models = set()
+        state.prewarmed_starter_slot_models = set()
+        state.starter_prewarm_tasks = {}
+        state.backend_lock = asyncio.Lock()
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.prepare_starter_cache = mock.AsyncMock(
+            return_value={
+                "mode": "restore-starter-cache",
+                "status": "restored",
+            }
+        )
+        state.telemetry = mock.Mock()
+
+        async def run_prewarm() -> dict[str, object]:
+            result = state.schedule_starter_cache_prewarm(
+                profile,
+                {"instructions": "stable", "tools": [], "input": []},
+                "warm-response",
+                "session-a",
+            )
+            task = state.starter_prewarm_tasks[profile.slug]
+            await task
+            return result
+
+        scheduled = asyncio.run(run_prewarm())
+
+        self.assertEqual(scheduled["status"], "scheduled")
+        state.ensure_model_async.assert_awaited_once_with(profile.slug)
+        state.prepare_starter_cache.assert_awaited_once()
+        self.assertEqual(
+            state.live_slot_by_model[profile.slug],
+            "warm-response",
+        )
+        self.assertEqual(
+            state.live_prompt_cache_key_by_model[profile.slug],
+            "session-a",
+        )
+        self.assertIn(profile.slug, state.starter_slot_models)
+        self.assertIn(profile.slug, state.prewarmed_starter_slot_models)
+        self.assertNotIn(profile.slug, state.starter_prewarm_tasks)
+
+    def test_background_starter_prewarm_does_not_replace_a_claimed_slot(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state._closing = False
+        state.starter_cache_enabled = True
+        state.live_slot_by_model = {}
+        state.live_prompt_cache_key_by_model = {}
+        state.starter_slot_models = set()
+        state.prewarmed_starter_slot_models = set()
+        state.starter_prewarm_tasks = {}
+        state.backend_lock = asyncio.Lock()
+        state.prepare_starter_cache = mock.AsyncMock(
+            return_value={
+                "mode": "restore-starter-cache",
+                "status": "restored",
+            }
+        )
+        state.telemetry = mock.Mock()
+
+        async def run_prewarm() -> None:
+            model_ready = asyncio.Event()
+
+            async def ensure_model(_slug: str) -> object:
+                await model_ready.wait()
+                return profile
+
+            state.ensure_model_async = mock.AsyncMock(side_effect=ensure_model)
+            state.schedule_starter_cache_prewarm(
+                profile,
+                {"instructions": "stable", "tools": [], "input": []},
+                "warm-response",
+                "session-a",
+            )
+            task = state.starter_prewarm_tasks[profile.slug]
+            await asyncio.sleep(0)
+            state._set_live_slot(
+                profile.slug,
+                "real-response",
+                "session-a",
+                starter=False,
+            )
+            model_ready.set()
+            await task
+
+        asyncio.run(run_prewarm())
+
+        state.prepare_starter_cache.assert_not_awaited()
+        self.assertEqual(
+            state.live_slot_by_model[profile.slug],
+            "real-response",
+        )
+        self.assertNotIn(profile.slug, state.starter_slot_models)
+        self.assertNotIn(profile.slug, state.prewarmed_starter_slot_models)
+        self.assertNotIn(profile.slug, state.starter_prewarm_tasks)
 
     def test_root_resume_after_warmup_attempts_conversation_checkpoint(self) -> None:
         profile = fixture_profile()
@@ -1596,6 +1703,31 @@ context = 32768
         self.assertEqual(
             completed[1]["slot"]["prepare_mode"],
             "restore-conversation-checkpoint",
+        )
+
+    def test_prewarmed_starter_is_trusted_once_only_for_full_input(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        state.prewarmed_starter_slot_models = {"model"}
+
+        self.assertFalse(
+            state._consume_prewarmed_starter_slot(
+                "model",
+                delta_only_restore=True,
+            )
+        )
+        self.assertIn("model", state.prewarmed_starter_slot_models)
+        self.assertTrue(
+            state._consume_prewarmed_starter_slot(
+                "model",
+                delta_only_restore=False,
+            )
+        )
+        self.assertNotIn("model", state.prewarmed_starter_slot_models)
+        self.assertFalse(
+            state._consume_prewarmed_starter_slot(
+                "model",
+                delta_only_restore=False,
+            )
         )
 
     def test_lineage_uses_parent_chains_and_rebases_at_the_lru_limit(self) -> None:

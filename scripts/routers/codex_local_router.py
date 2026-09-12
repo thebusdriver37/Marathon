@@ -2325,6 +2325,7 @@ class RouterState:
         self.slot_snapshot_max_bytes = self.slot_checkpoint_store.max_bytes
         self.pending_checkpoints: dict[str, ConversationCheckpointCandidate] = {}
         self.checkpoint_tasks: dict[str, asyncio.Task[Any]] = {}
+        self.starter_prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
         self.awaiting_post_compaction_checkpoints: set[tuple[str, str]] = set()
         self.checkpoint_maintenance_task: asyncio.Task[Any] | None = None
         self._closing = False
@@ -2347,6 +2348,7 @@ class RouterState:
         self.live_slot_by_model: dict[str, str] = {}
         self.live_prompt_cache_key_by_model: dict[str, str] = {}
         self.starter_slot_models: set[str] = set()
+        self.prewarmed_starter_slot_models: set[str] = set()
         self.active_ws_tasks: dict[str, asyncio.Task[Any]] = {}
         self.web_tool_cache_max_entries = max(
             1,
@@ -2398,15 +2400,36 @@ class RouterState:
             starter_slots.add(profile_slug)
         else:
             starter_slots.discard(profile_slug)
+        getattr(self, "prewarmed_starter_slot_models", set()).discard(profile_slug)
 
     def _clear_live_slot(self, profile_slug: str) -> str | None:
         response_id = self.live_slot_by_model.pop(profile_slug, None)
         self.live_prompt_cache_key_by_model.pop(profile_slug, None)
         getattr(self, "starter_slot_models", set()).discard(profile_slug)
+        getattr(self, "prewarmed_starter_slot_models", set()).discard(profile_slug)
         return response_id
 
     def _live_slot_is_starter(self, profile_slug: str) -> bool:
         return profile_slug in getattr(self, "starter_slot_models", set())
+
+    def _consume_prewarmed_starter_slot(
+        self,
+        profile_slug: str,
+        *,
+        delta_only_restore: bool,
+    ) -> bool:
+        """Trust one full-input request after a successful background restore."""
+
+        if delta_only_restore:
+            return False
+        prewarmed = getattr(self, "prewarmed_starter_slot_models", set())
+        if profile_slug not in prewarmed:
+            return False
+        # llama.cpp omits n_prompt_tokens from /slots immediately after a slot
+        # load. The full request is still safe if the worker restarted because
+        # cache_prompt will prefill it normally from an empty slot.
+        prewarmed.discard(profile_slug)
+        return True
 
     def _live_slot_scaffold_matches(
         self,
@@ -2542,6 +2565,13 @@ class RouterState:
 
     async def close(self) -> None:
         self._closing = True
+        starter_tasks = list(self.starter_prewarm_tasks.values())
+        self.starter_prewarm_tasks.clear()
+        for task in starter_tasks:
+            if not task.done():
+                task.cancel()
+        if starter_tasks:
+            await asyncio.gather(*starter_tasks, return_exceptions=True)
         maintenance = self.checkpoint_maintenance_task
         self.checkpoint_maintenance_task = None
         if maintenance is not None and not maintenance.done():
@@ -3497,6 +3527,85 @@ class RouterState:
                 "error": str(exc),
                 "erase_result": erased,
             }
+
+    def schedule_starter_cache_prewarm(
+        self,
+        profile: ModelProfile,
+        request: dict[str, Any],
+        response_id: str,
+        prompt_cache_key: str,
+    ) -> dict[str, Any]:
+        """Restore the starter slot after Ready without blocking the frontend."""
+
+        if (
+            getattr(self, "_closing", False)
+            or not getattr(self, "starter_cache_enabled", False)
+            or not profile.supports_slots
+            or profile.slug in self.live_slot_by_model
+        ):
+            return {"status": "skipped"}
+
+        previous = self.starter_prewarm_tasks.get(profile.slug)
+        if previous is not None and not previous.done():
+            return {"status": "already-scheduled"}
+        task = asyncio.create_task(
+            self._prewarm_starter_cache(
+                profile,
+                copy.deepcopy(request),
+                response_id,
+                prompt_cache_key,
+            ),
+            name=f"marathon-starter-prewarm-{profile.slug}",
+        )
+        self.starter_prewarm_tasks[profile.slug] = task
+        return {"status": "scheduled"}
+
+    async def _prewarm_starter_cache(
+        self,
+        profile: ModelProfile,
+        request: dict[str, Any],
+        response_id: str,
+        prompt_cache_key: str,
+    ) -> None:
+        current_task = asyncio.current_task()
+        started = time.perf_counter()
+        try:
+            await self.ensure_model_async(profile.slug)
+            async with self.backend_lock:
+                if (
+                    getattr(self, "_closing", False)
+                    or profile.slug in self.live_slot_by_model
+                ):
+                    return
+                result = await self.prepare_starter_cache(profile, request)
+                if result.get("status") in {"built", "restored"}:
+                    self._set_live_slot(
+                        profile.slug,
+                        response_id,
+                        prompt_cache_key,
+                        starter=True,
+                    )
+                    self.prewarmed_starter_slot_models.add(profile.slug)
+                self.telemetry.emit(
+                    "router.starter_cache.prewarm_completed",
+                    {
+                        "profile_slug": profile.slug,
+                        "status": result.get("status"),
+                        "mode": result.get("mode"),
+                        "duration_ms": (time.perf_counter() - started) * 1000.0,
+                    },
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.telemetry.emit(
+                "router.starter_cache.prewarm_failed",
+                {"profile_slug": profile.slug, "error": str(exc)},
+                level="warning",
+            )
+        finally:
+            if self.starter_prewarm_tasks.get(profile.slug) is current_task:
+                self.starter_prewarm_tasks.pop(profile.slug, None)
 
     def _conversation_scaffold_fingerprint(
         self,
@@ -5218,9 +5327,18 @@ class RouterState:
 
         if generate is False:
             response_id = preset_response_id or self.mint_response_id("warm")
-            starter_cache_result: dict[str, Any] | None = None
-            slot_prepare_mode = "warmup-deferred-prefix-cache"
             slot_prepare_start = time.perf_counter()
+            starter_cache_result = self.schedule_starter_cache_prewarm(
+                profile,
+                forward_request,
+                response_id,
+                prompt_cache_key,
+            )
+            slot_prepare_mode = (
+                "warmup-background-prefix-cache"
+                if starter_cache_result.get("status") == "scheduled"
+                else "warmup-deferred-prefix-cache"
+            )
             slot_prepare_ms = (time.perf_counter() - slot_prepare_start) * 1000.0
             async with self.lineage_lock:
                 self._store_response_snapshot(
@@ -5324,17 +5442,21 @@ class RouterState:
             conversation_checkpoint_result: dict[str, Any] | None = None
             slot_prepare_mode = "erase-root"
             if profile.supports_slots and profile.slug in self.live_slot_by_model:
-                live_slot_valid = await self._slot_has_cached_prompt(profile)
-                if live_slot_valid is False:
-                    stale_response_id = self._clear_live_slot(profile.slug)
-                    self.telemetry.emit(
-                        "router.slot.invalidated",
-                        {
-                            "profile_slug": profile.slug,
-                            "response_id": stale_response_id,
-                            "reason": "backend slot has no cached prompt",
-                        },
-                    )
+                if not self._consume_prewarmed_starter_slot(
+                    profile.slug,
+                    delta_only_restore=delta_only_restore,
+                ):
+                    live_slot_valid = await self._slot_has_cached_prompt(profile)
+                    if live_slot_valid is False:
+                        stale_response_id = self._clear_live_slot(profile.slug)
+                        self.telemetry.emit(
+                            "router.slot.invalidated",
+                            {
+                                "profile_slug": profile.slug,
+                                "response_id": stale_response_id,
+                                "reason": "backend slot has no cached prompt",
+                            },
+                        )
             live_parent = (
                 parent_snapshot is not None
                 and previous_response_id is not None
