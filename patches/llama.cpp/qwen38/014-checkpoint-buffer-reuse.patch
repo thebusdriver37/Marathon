@@ -1,0 +1,84 @@
+--- a/tools/server/server-task.h
++++ b/tools/server/server-task.h
+@@ -567,10 +567,12 @@
+     server_tokens tokens;
+ 
+     std::list<common_prompt_checkpoint> checkpoints;
++    std::list<common_prompt_checkpoint> checkpoint_buffer_pool;
+ 
+     void clear() {
+         tokens.clear();
+         checkpoints.clear();
++        checkpoint_buffer_pool.clear();
+     }
+ 
+     int n_tokens() const {
+@@ -581,6 +583,7 @@
+         return server_prompt {
+             tokens.clone(),
+             checkpoints,
++            {},
+         };
+     }
+ };
+--- a/tools/server/server-task.cpp
++++ b/tools/server/server-task.cpp
+@@ -1778,8 +1778,9 @@
+ 
+     states.push_back({
+         /*.prompt =*/ {
+-            /*.tokens      =*/ prompt.tokens.clone(),
+-            /*.checkpoints =*/ prompt.checkpoints,
++            /*.tokens                 =*/ prompt.tokens.clone(),
++            /*.checkpoints            =*/ prompt.checkpoints,
++            /*.checkpoint_buffer_pool =*/ {},
+         },
+         /*.data   =*/ {
+             /*.main =*/ std::move(state_data_tgt),
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -2499,7 +2499,9 @@
+                 SLT_TRC(slot, "erasing context checkpoint too close to an earlier one (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+                         it->pos_min, it->pos_max, it->n_tokens, (float) it->size() / 1024 / 1024);
+ 
+-                it = slot.prompt.checkpoints.erase(it);
++                auto current = it++;
++                slot.prompt.checkpoint_buffer_pool.splice(
++                        slot.prompt.checkpoint_buffer_pool.end(), slot.prompt.checkpoints, current);
+                 continue;
+             }
+ 
+@@ -2514,10 +2516,18 @@
+             SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+                     cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
+ 
+-            slot.prompt.checkpoints.erase(slot.prompt.checkpoints.begin());
+-        }
+-
+-        auto & cur = slot.prompt.checkpoints.emplace_back();
++            slot.prompt.checkpoint_buffer_pool.splice(
++                    slot.prompt.checkpoint_buffer_pool.end(), slot.prompt.checkpoints, slot.prompt.checkpoints.begin());
++        }
++
++        if (slot.prompt.checkpoint_buffer_pool.empty()) {
++            slot.prompt.checkpoints.emplace_back();
++        } else {
++            slot.prompt.checkpoints.splice(
++                    slot.prompt.checkpoints.end(), slot.prompt.checkpoint_buffer_pool,
++                    slot.prompt.checkpoint_buffer_pool.begin());
++        }
++        auto & cur = slot.prompt.checkpoints.back();
+ 
+         cur.id_task = id_task;
+ 
+@@ -3628,7 +3638,9 @@
+                                     const auto & cur = *it;
+                                     if (cur.pos_max > pos_next) {
+                                         SLT_TRC(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.size() / 1024 / 1024);
+-                                        it = slot.prompt.checkpoints.erase(it);
++                                        auto current = it++;
++                                        slot.prompt.checkpoint_buffer_pool.splice(
++                                                slot.prompt.checkpoint_buffer_pool.end(), slot.prompt.checkpoints, current);
+                                     } else {
+                                         ++it;
+                                     }
