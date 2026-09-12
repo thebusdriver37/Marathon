@@ -2231,6 +2231,14 @@ class RouterState:
             default_model = next(iter(self.available_profiles))
         self.default_model = default_model
         self.current_model: str | None = None
+        self.prewarm_model = os.getenv("MARATHON_MODEL_PREWARM_SLUG", "").strip()
+        try:
+            self.model_ready_timeout_seconds = max(
+                0.0,
+                float(os.getenv("MARATHON_MODEL_READY_TIMEOUT_SECONDS", "0")),
+            )
+        except ValueError:
+            self.model_ready_timeout_seconds = 0.0
         self.slot_id = int(os.getenv("MARATHON_ROUTER_SLOT_ID") or "0")
         self.experimental_delta_only = bool(os.getenv("MARATHON_WS_EXPERIMENTAL_DELTA_ONLY"))
         configured_slot_save_root = os.getenv("MARATHON_SLOT_SAVE_ROOT")
@@ -2808,7 +2816,17 @@ class RouterState:
     def ensure_model(self, requested_model: str | None) -> ModelProfile:
         profile = self.resolve_model(requested_model)
         with self.model_lock:
-            if not self._profile_ready(profile):
+            ready = self._profile_ready(profile)
+            timeout = (
+                self.model_ready_timeout_seconds
+                if profile.slug == self.prewarm_model
+                else 0.0
+            )
+            deadline = time.monotonic() + timeout
+            while not ready and time.monotonic() < deadline:
+                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+                ready = self._profile_ready(profile)
+            if not ready:
                 if profile.external:
                     raise RuntimeError(
                         f"external backend for {profile.slug} is unavailable at "

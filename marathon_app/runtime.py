@@ -521,6 +521,7 @@ class Runtime:
         self.session_home: Path | None = None
         self._backend_watch_enabled = False
         self._backend_failure_reported = False
+        self._model_loader: threading.Thread | None = None
         self._old_handlers: dict[int, object] = {}
 
     @property
@@ -952,6 +953,27 @@ class Runtime:
         )
         return process
 
+    def _finish_pool_model_load(self, load_started: float) -> None:
+        try:
+            self._wait_for_model(None)
+        except Exception as error:
+            if not self._cleaned:
+                self.record(
+                    "backend.model.failed",
+                    {"error": str(error)},
+                    level="error",
+                )
+            return
+        if self._cleaned:
+            return
+        self.record(
+            "backend.model.ready",
+            {
+                "load_ms": (time.monotonic() - load_started) * 1000.0,
+                "loaded_context": self.context_window,
+            },
+        )
+
     def start(self, progress: Callable[[str], None] | None = None) -> None:
         if self.profile.bundle:
             from .runtime_setup import prepare_bundle_profile
@@ -1078,14 +1100,25 @@ class Runtime:
             self._backend_processes.append((spec.name, process))
             self.llama = process
         self._write_session()
-        self._wait_for_model(progress)
-        self.record(
-            "backend.model.ready",
-            {
-                "load_ms": (time.monotonic() - load_started) * 1000.0,
-                "loaded_context": self.context_window,
-            },
-        )
+        pool_model_load = self._backend.kind == "llama_swap_pool"
+        if pool_model_load:
+            self.record("backend.model.prewarming", {})
+            self._model_loader = threading.Thread(
+                target=self._finish_pool_model_load,
+                args=(load_started,),
+                name="marathon-model-loader",
+                daemon=True,
+            )
+            self._model_loader.start()
+        else:
+            self._wait_for_model(progress)
+            self.record(
+                "backend.model.ready",
+                {
+                    "load_ms": (time.monotonic() - load_started) * 1000.0,
+                    "loaded_context": self.context_window,
+                },
+            )
         if progress:
             progress("Starting Marathon router")
         router_env = environment.copy()
@@ -1165,6 +1198,10 @@ class Runtime:
         )
         if self._backend.kind == "llama_swap_pool":
             router_env["MARATHON_MODEL_EXTERNAL"] = "1"
+            router_env["MARATHON_MODEL_PREWARM_SLUG"] = self.model.alias
+            router_env["MARATHON_MODEL_READY_TIMEOUT_SECONDS"] = str(
+                self.config.health_timeout
+            )
             if self._backend.api_key_env:
                 router_env["MARATHON_MODEL_API_KEY_ENV"] = self._backend.api_key_env
             if self._backend.api_key_file:
@@ -1204,7 +1241,11 @@ class Runtime:
         self._wait_for_router(progress)
         self._write_catalog()
         if progress:
-            progress("Backend ready")
+            progress(
+                "Marathon ready; model is warming in the background"
+                if pool_model_load
+                else "Backend ready"
+            )
         self.record(
             "runtime.ready",
             {

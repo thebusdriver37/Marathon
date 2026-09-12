@@ -46,7 +46,13 @@ The first seven patches reproduce the deployed private branch through `ca461b488
 
 Three following patches preserve the deployed cache preference, opt-in scheduler reuse, and recurrent rewind-checkpoint serialization.
 The profile enables scheduler reuse through `LLAMA_REUSE_SCHEDULER=1`.
+Patch `014-checkpoint-buffer-reuse.patch` recycles the large recurrent-checkpoint byte buffers when short tool continuations replace or invalidate checkpoints.
+The saved bytes and model arithmetic are unchanged, while the deployed single-GPU worker reduced the measured short continuation preparation path from 329.6 ms to 137.9 ms across six paired runs.
 Rejected J32, asynchronous-copy, shared-store, and short-context attention experiments are not included.
+
+For a llama-swap pool, Marathon starts the selected worker and local router concurrently, then opens Codex while the worker finishes loading.
+The router serializes the readiness check so an immediate first prompt waits for that same load safely.
+In two cold paired runs on the local pool, this moved the Codex Ready screen from an average 11.12 seconds after runtime start to 1.24 seconds and reduced the immediate first reply from 16.39 seconds to 14.50 seconds.
 
 Patch `011-media-single-column-verification.patch` introduced image-position repairs and an exact-arithmetic verification path for the single-GPU SM86, 27B IQ4_XS, Q8-KV configuration.
 The tested image was selected for the machine-local production pool on 2026-09-05, with a new cache identity and separate snapshot directory.

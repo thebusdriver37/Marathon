@@ -411,6 +411,45 @@ context = 32768
         self.assertEqual(profile.api_key_env, "POOL_API_KEY")
         self.assertEqual(profile.api_key_file, "/tmp/pool.env")
 
+    def test_prewarming_model_waits_for_the_background_load(self) -> None:
+        profile = replace(fixture_profile(), external=True)
+        state = object.__new__(router_module.RouterState)
+        state.model_lock = threading.Lock()
+        state.lock = threading.Lock()
+        state.current_model = None
+        state.prewarm_model = profile.slug
+        state.model_ready_timeout_seconds = 30.0
+        state.resolve_model = mock.Mock(return_value=profile)
+        state._profile_ready = mock.Mock(side_effect=(False, False, True))
+
+        with mock.patch.object(router_module.time, "sleep") as sleep:
+            selected = state.ensure_model(profile.slug)
+
+        self.assertIs(selected, profile)
+        self.assertEqual(state.current_model, profile.slug)
+        self.assertEqual(state._profile_ready.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_other_external_models_still_fail_fast(self) -> None:
+        profile = replace(fixture_profile(), external=True)
+        state = object.__new__(router_module.RouterState)
+        state.model_lock = threading.Lock()
+        state.lock = threading.Lock()
+        state.current_model = None
+        state.prewarm_model = "different-model"
+        state.model_ready_timeout_seconds = 30.0
+        state.resolve_model = mock.Mock(return_value=profile)
+        state._profile_ready = mock.Mock(return_value=False)
+
+        with (
+            mock.patch.object(router_module.time, "sleep") as sleep,
+            self.assertRaisesRegex(RuntimeError, "external backend.*unavailable"),
+        ):
+            state.ensure_model(profile.slug)
+
+        state._profile_ready.assert_called_once_with(profile)
+        sleep.assert_not_called()
+
     def test_custom_profile_loads_reasoning_capabilities(self) -> None:
         environment = {
             "MARATHON_MODEL_PATH": "/tmp/model.gguf",
