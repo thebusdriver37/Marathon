@@ -38,6 +38,34 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_session_derived_prompt_cache_key_uses_stable_thread_id(self) -> None:
+        request = {"prompt_cache_key": "resume-session"}
+
+        changed = router_module._stabilize_codex_prompt_cache_key(
+            request,
+            {
+                "session-id": "resume-session",
+                "thread-id": "stable-thread",
+            },
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(request["prompt_cache_key"], "stable-thread")
+
+    def test_explicit_prompt_cache_key_is_preserved(self) -> None:
+        request = {"prompt_cache_key": "guardian:parent-thread"}
+
+        changed = router_module._stabilize_codex_prompt_cache_key(
+            request,
+            {
+                "session-id": "resume-session",
+                "thread-id": "stable-thread",
+            },
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(request["prompt_cache_key"], "guardian:parent-thread")
+
     def test_web_finalization_retries_tool_markup_without_streaming_it(self):
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)
@@ -1507,9 +1535,16 @@ context = 32768
         state.live_prompt_cache_key_by_model = {}
         state.starter_slot_models = set()
         state.prewarmed_starter_slot_models = set()
+        state.prewarmed_conversation_slot_models = set()
         state.starter_prewarm_tasks = {}
         state.backend_lock = asyncio.Lock()
         state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.prepare_conversation_checkpoint = mock.AsyncMock(
+            return_value={
+                "mode": "conversation-checkpoint-miss",
+                "status": "skipped",
+            }
+        )
         state.prepare_starter_cache = mock.AsyncMock(
             return_value={
                 "mode": "restore-starter-cache",
@@ -1546,6 +1581,48 @@ context = 32768
         self.assertIn(profile.slug, state.prewarmed_starter_slot_models)
         self.assertNotIn(profile.slug, state.starter_prewarm_tasks)
 
+    def test_background_prewarm_prefers_a_conversation_checkpoint(self) -> None:
+        profile = fixture_profile()
+        state = object.__new__(router_module.RouterState)
+        state._closing = False
+        state.starter_cache_enabled = True
+        state.live_slot_by_model = {}
+        state.live_prompt_cache_key_by_model = {}
+        state.starter_slot_models = set()
+        state.prewarmed_starter_slot_models = set()
+        state.prewarmed_conversation_slot_models = set()
+        state.starter_prewarm_tasks = {}
+        state.backend_lock = asyncio.Lock()
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.prepare_conversation_checkpoint = mock.AsyncMock(
+            return_value={
+                "mode": "restore-conversation-checkpoint",
+                "status": "restored",
+            }
+        )
+        state.prepare_starter_cache = mock.AsyncMock()
+        state.telemetry = mock.Mock()
+
+        async def run_prewarm() -> None:
+            state.schedule_starter_cache_prewarm(
+                profile,
+                {"instructions": "stable", "tools": [], "input": []},
+                "warm-response",
+                "stable-thread",
+            )
+            await state.starter_prewarm_tasks[profile.slug]
+
+        asyncio.run(run_prewarm())
+
+        state.prepare_conversation_checkpoint.assert_awaited_once()
+        state.prepare_starter_cache.assert_not_awaited()
+        self.assertEqual(
+            state.live_prompt_cache_key_by_model[profile.slug],
+            "stable-thread",
+        )
+        self.assertNotIn(profile.slug, state.starter_slot_models)
+        self.assertIn(profile.slug, state.prewarmed_conversation_slot_models)
+
     def test_background_starter_prewarm_does_not_replace_a_claimed_slot(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)
@@ -1555,8 +1632,15 @@ context = 32768
         state.live_prompt_cache_key_by_model = {}
         state.starter_slot_models = set()
         state.prewarmed_starter_slot_models = set()
+        state.prewarmed_conversation_slot_models = set()
         state.starter_prewarm_tasks = {}
         state.backend_lock = asyncio.Lock()
+        state.prepare_conversation_checkpoint = mock.AsyncMock(
+            return_value={
+                "mode": "conversation-checkpoint-miss",
+                "status": "skipped",
+            }
+        )
         state.prepare_starter_cache = mock.AsyncMock(
             return_value={
                 "mode": "restore-starter-cache",
@@ -1705,26 +1789,124 @@ context = 32768
             "restore-conversation-checkpoint",
         )
 
-    def test_prewarmed_starter_is_trusted_once_only_for_full_input(self) -> None:
+    def test_root_resume_reuses_background_conversation_restore(self) -> None:
+        profile = fixture_profile()
+        prompt_cache_key = "stable-thread"
+        instructions = "stable system prompt"
+        warm_response_id = "warm_prior"
+        warm_snapshot = router_module.ResponseSnapshot(
+            response_id=warm_response_id,
+            profile_slug=profile.slug,
+            parent_response_id=None,
+            input_items=[],
+            output_items=[],
+            conversation_item_count=0,
+            snapshot_filename="",
+            instructions_text=instructions,
+            base_instructions_hash=router_module._sha256_text(instructions),
+            instructions_hash=router_module._sha256_text(instructions),
+            tools_hash=router_module._sha256_text("[]"),
+            prompt_cache_key=prompt_cache_key,
+            created_at=0.0,
+        )
+        state = object.__new__(router_module.RouterState)
+        state.resolve_model = mock.Mock(return_value=profile)
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.lineage_lock = asyncio.Lock()
+        state.lineage = {warm_response_id: warm_snapshot}
+        state.last_response_by_model = {profile.slug: warm_response_id}
+        state.live_slot_by_model = {profile.slug: warm_response_id}
+        state.live_prompt_cache_key_by_model = {
+            profile.slug: prompt_cache_key,
+        }
+        state.starter_slot_models = set()
+        state.prewarmed_starter_slot_models = set()
+        state.prewarmed_conversation_slot_models = {profile.slug}
+        state.experimental_delta_only = False
+        state.slot_id = 0
+        state.backend_lock = asyncio.Lock()
+        state.prepare_conversation_checkpoint = mock.AsyncMock()
+        state.prepare_starter_cache = mock.AsyncMock()
+        state._slot_has_cached_prompt = mock.AsyncMock(return_value=False)
+        state._run_responses_loop = mock.AsyncMock(
+            return_value=(
+                {
+                    "id": "resp_resumed",
+                    "usage": {
+                        "input_tokens": 13_000,
+                        "input_tokens_details": {"cached_tokens": 12_000},
+                    },
+                },
+                [],
+                0,
+            )
+        )
+        state.schedule_conversation_checkpoint = mock.Mock(
+            return_value={"status": "scheduled"}
+        )
+        state.telemetry = mock.Mock()
+        state.trace_request = mock.Mock()
+        state.lock = threading.Lock()
+        state._trace_seq = 0
+        state._response_id_seq = 0
+        state.debug = False
+
+        asyncio.run(
+            state.process_websocket_create(
+                {
+                    "model": profile.slug,
+                    "prompt_cache_key": prompt_cache_key,
+                    "previous_response_id": warm_response_id,
+                    "instructions": instructions,
+                    "tools": [],
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "continued history"}
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+        state.prepare_conversation_checkpoint.assert_not_awaited()
+        state.prepare_starter_cache.assert_not_awaited()
+        state._slot_has_cached_prompt.assert_not_awaited()
+        completed = [
+            call.args[1]
+            for call in state.telemetry.emit.call_args_list
+            if call.args[0] == "router.response.completed"
+        ]
+        self.assertEqual(
+            completed[0]["slot"]["prepare_mode"],
+            "reuse-prewarmed-conversation-checkpoint",
+        )
+
+    def test_prewarmed_slot_is_trusted_once_only_for_full_input(self) -> None:
         state = object.__new__(router_module.RouterState)
         state.prewarmed_starter_slot_models = {"model"}
+        state.prewarmed_conversation_slot_models = set()
 
-        self.assertFalse(
-            state._consume_prewarmed_starter_slot(
+        self.assertIsNone(
+            state._consume_prewarmed_slot(
                 "model",
                 delta_only_restore=True,
             )
         )
         self.assertIn("model", state.prewarmed_starter_slot_models)
-        self.assertTrue(
-            state._consume_prewarmed_starter_slot(
+        self.assertEqual(
+            state._consume_prewarmed_slot(
                 "model",
                 delta_only_restore=False,
-            )
+            ),
+            "starter",
         )
         self.assertNotIn("model", state.prewarmed_starter_slot_models)
-        self.assertFalse(
-            state._consume_prewarmed_starter_slot(
+        self.assertIsNone(
+            state._consume_prewarmed_slot(
                 "model",
                 delta_only_restore=False,
             )

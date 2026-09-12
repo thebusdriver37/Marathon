@@ -128,9 +128,17 @@ def main():
     parser.add_argument("--output-dir", type=Path, help="new directory to retain test evidence")
     parser.add_argument("--workers", type=int, choices=(1, 3), default=1,
                         help="use three workers to additionally test pool exhaustion")
+    parser.add_argument(
+        "--resume-typing-delay-seconds",
+        type=float,
+        default=0.0,
+        help="wait this long between typing the resumed prompt and pressing Enter",
+    )
     args = parser.parse_args()
     if not args.run_gpu:
         parser.error("live inference is opt-in; pass --run-gpu")
+    if args.resume_typing_delay_seconds < 0:
+        parser.error("--resume-typing-delay-seconds cannot be negative")
     output = args.output_dir.resolve() if args.output_dir else Path(tempfile.mkdtemp(prefix="marathon-smoke-"))
     if args.output_dir:
         output.mkdir(parents=True, exist_ok=False)
@@ -162,7 +170,7 @@ def main():
 
     def launch(name, prompt):
         terminal = Terminal([str(LAUNCHER), "--instance", name, "codex", "--no-alt-screen",
-                             "-s", "workspace-write", "-c", 'model_reasoning_effort="low"', prompt],
+                             "-s", "workspace-write", prompt],
                             project, environment, output / f"{name}.terminal.txt")
         terminals.append(terminal)
         return terminal
@@ -258,10 +266,25 @@ def main():
         resumed = Terminal(["bash", "-lc", command], project, environment, output / "resume.terminal.txt")
         terminals.append(resumed)
         resumed.wait(lambda: PHRASE in resumed.clean())
-        turn = next_turn(resumed, session, "Reply only with the original remembered phrase. Do not use tools.")
+        prompt = "Reply only with the original remembered phrase. Do not use tools."
+        completed_before_resume = len(completed(session))
+        resumed.send(prompt)
+        time.sleep(max(0.25, args.resume_typing_delay_seconds))
+        resumed_submit_started = time.monotonic()
+        resumed.send("\r")
+        turn = resumed.wait(
+            lambda: completed(session)[completed_before_resume:] or None
+        )[0]
+        resumed_submit_ms = (time.monotonic() - resumed_submit_started) * 1000.0
         assert turn["last_agent_message"].strip() == PHRASE, turn
         resumed.close()
-        record("paste-printed-resume-command", command=command)
+        record(
+            "paste-printed-resume-command",
+            command=command,
+            typing_delay_seconds=args.resume_typing_delay_seconds,
+            submit_to_complete_ms=resumed_submit_ms,
+            first_activity_ms=turn.get("time_to_first_token_ms"),
+        )
 
         headless = subprocess.run([str(LAUNCHER), "--instance", instance, "exec", "--json", "-s", "workspace-write",
                                    "--config=model_reasoning_effort=\"low\"", "-c", 'web_search="disabled"',

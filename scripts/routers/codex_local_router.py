@@ -436,6 +436,26 @@ def _codex_request_kind(request: dict[str, Any]) -> str | None:
     )
 
 
+def _stabilize_codex_prompt_cache_key(
+    request: dict[str, Any],
+    headers: Mapping[str, str],
+) -> bool:
+    """Use Codex's persistent thread identity for session-derived cache keys."""
+
+    prompt_cache_key = request.get("prompt_cache_key")
+    session_id = str(headers.get("session-id") or "").strip()
+    thread_id = str(headers.get("thread-id") or "").strip()
+    if (
+        isinstance(prompt_cache_key, str)
+        and prompt_cache_key.strip()
+        and prompt_cache_key.strip() == session_id
+        and thread_id
+    ):
+        request["prompt_cache_key"] = thread_id
+        return thread_id != session_id
+    return False
+
+
 def _starter_scaffold_chat_body(
     request: dict[str, Any],
     user_content: str = STARTER_CACHE_SENTINEL,
@@ -2349,6 +2369,7 @@ class RouterState:
         self.live_prompt_cache_key_by_model: dict[str, str] = {}
         self.starter_slot_models: set[str] = set()
         self.prewarmed_starter_slot_models: set[str] = set()
+        self.prewarmed_conversation_slot_models: set[str] = set()
         self.active_ws_tasks: dict[str, asyncio.Task[Any]] = {}
         self.web_tool_cache_max_entries = max(
             1,
@@ -2401,35 +2422,45 @@ class RouterState:
         else:
             starter_slots.discard(profile_slug)
         getattr(self, "prewarmed_starter_slot_models", set()).discard(profile_slug)
+        getattr(self, "prewarmed_conversation_slot_models", set()).discard(profile_slug)
 
     def _clear_live_slot(self, profile_slug: str) -> str | None:
         response_id = self.live_slot_by_model.pop(profile_slug, None)
         self.live_prompt_cache_key_by_model.pop(profile_slug, None)
         getattr(self, "starter_slot_models", set()).discard(profile_slug)
         getattr(self, "prewarmed_starter_slot_models", set()).discard(profile_slug)
+        getattr(self, "prewarmed_conversation_slot_models", set()).discard(profile_slug)
         return response_id
 
     def _live_slot_is_starter(self, profile_slug: str) -> bool:
         return profile_slug in getattr(self, "starter_slot_models", set())
 
-    def _consume_prewarmed_starter_slot(
+    def _consume_prewarmed_slot(
         self,
         profile_slug: str,
         *,
         delta_only_restore: bool,
-    ) -> bool:
+    ) -> str | None:
         """Trust one full-input request after a successful background restore."""
 
         if delta_only_restore:
-            return False
+            return None
+        prewarmed_conversation = getattr(
+            self,
+            "prewarmed_conversation_slot_models",
+            set(),
+        )
+        if profile_slug in prewarmed_conversation:
+            prewarmed_conversation.discard(profile_slug)
+            return "conversation"
         prewarmed = getattr(self, "prewarmed_starter_slot_models", set())
         if profile_slug not in prewarmed:
-            return False
+            return None
         # llama.cpp omits n_prompt_tokens from /slots immediately after a slot
         # load. The full request is still safe if the worker restarted because
         # cache_prompt will prefill it normally from an empty slot.
         prewarmed.discard(profile_slug)
-        return True
+        return "starter"
 
     def _live_slot_scaffold_matches(
         self,
@@ -3577,19 +3608,31 @@ class RouterState:
                     or profile.slug in self.live_slot_by_model
                 ):
                     return
-                result = await self.prepare_starter_cache(profile, request)
+                result = await self.prepare_conversation_checkpoint(
+                    profile,
+                    request,
+                    prompt_cache_key,
+                )
+                prewarm_kind = "conversation"
+                if result.get("status") != "restored":
+                    result = await self.prepare_starter_cache(profile, request)
+                    prewarm_kind = "starter"
                 if result.get("status") in {"built", "restored"}:
                     self._set_live_slot(
                         profile.slug,
                         response_id,
                         prompt_cache_key,
-                        starter=True,
+                        starter=prewarm_kind == "starter",
                     )
-                    self.prewarmed_starter_slot_models.add(profile.slug)
+                    if prewarm_kind == "conversation":
+                        self.prewarmed_conversation_slot_models.add(profile.slug)
+                    else:
+                        self.prewarmed_starter_slot_models.add(profile.slug)
                 self.telemetry.emit(
                     "router.starter_cache.prewarm_completed",
                     {
                         "profile_slug": profile.slug,
+                        "kind": prewarm_kind,
                         "status": result.get("status"),
                         "mode": result.get("mode"),
                         "duration_ms": (time.perf_counter() - started) * 1000.0,
@@ -5441,11 +5484,13 @@ class RouterState:
             starter_cache_result: dict[str, Any] | None = None
             conversation_checkpoint_result: dict[str, Any] | None = None
             slot_prepare_mode = "erase-root"
+            prewarmed_slot_kind: str | None = None
             if profile.supports_slots and profile.slug in self.live_slot_by_model:
-                if not self._consume_prewarmed_starter_slot(
+                prewarmed_slot_kind = self._consume_prewarmed_slot(
                     profile.slug,
                     delta_only_restore=delta_only_restore,
-                ):
+                )
+                if prewarmed_slot_kind is None:
                     live_slot_valid = await self._slot_has_cached_prompt(profile)
                     if live_slot_valid is False:
                         stale_response_id = self._clear_live_slot(profile.slug)
@@ -5504,14 +5549,35 @@ class RouterState:
                     "reason": "same prompt cache key; llama.cpp will prefix-match full prompt",
                 }
             elif starter_root:
-                conversation_checkpoint_result = (
-                    await self.prepare_conversation_checkpoint(
-                        profile,
-                        forward_request,
-                        prompt_cache_key,
+                prewarmed_conversation_matches = (
+                    prewarmed_slot_kind == "conversation"
+                    and self.live_prompt_cache_key_by_model.get(profile.slug)
+                    == prompt_cache_key
+                    and self._live_slot_scaffold_matches(
+                        profile.slug,
+                        scaffold_fingerprint,
+                        instructions_hash,
+                        tools_hash,
                     )
                 )
-                if conversation_checkpoint_result.get("status") == "restored":
+                if not prewarmed_conversation_matches:
+                    conversation_checkpoint_result = (
+                        await self.prepare_conversation_checkpoint(
+                            profile,
+                            forward_request,
+                            prompt_cache_key,
+                        )
+                    )
+                if prewarmed_conversation_matches:
+                    slot_prepare_mode = "reuse-prewarmed-conversation-checkpoint"
+                    restore_result = {
+                        "status": "skipped",
+                        "reason": "conversation checkpoint restored during warmup",
+                    }
+                elif (
+                    conversation_checkpoint_result is not None
+                    and conversation_checkpoint_result.get("status") == "restored"
+                ):
                     slot_prepare_mode = str(conversation_checkpoint_result["mode"])
                     action_result = conversation_checkpoint_result.get("restore_result")
                     restore_result = (
@@ -5931,6 +5997,11 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
     if data is not None:
         raw_snapshot = data
         data = dict(data)
+        if _stabilize_codex_prompt_cache_key(data, request.headers):
+            state.telemetry.emit(
+                "router.prompt_cache_key.stabilized",
+                {"transport": "http"},
+            )
         data["model"] = profile.alias
         if profile.temperature is not None:
             data["temperature"] = profile.temperature
@@ -6136,6 +6207,12 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
                     }
                 )
                 continue
+
+            if _stabilize_codex_prompt_cache_key(payload, request.headers):
+                state.telemetry.emit(
+                    "router.prompt_cache_key.stabilized",
+                    {"transport": "websocket"},
+                )
 
             # Pre-mint the response id and acknowledge IMMEDIATELY so Codex's
             # WS client doesn't time out waiting through a long generation.
