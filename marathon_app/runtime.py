@@ -6,6 +6,7 @@ import contextlib
 import ctypes
 import fcntl
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -38,6 +39,7 @@ from .catalog import (
 from .instance import InstanceConfig, instance_path, normalize_instance_name, resolve_instance
 from .telemetry import EventWriter, create_run_writer, redact_text, runs_dir
 from .router_security import is_loopback, open_api_request
+from .pool import acquire_pool_worker
 
 
 def _xdg_path(env_name: str, fallback: Path) -> Path:
@@ -466,12 +468,11 @@ def automatic_launch_instance() -> str | None:
 
     if not _runtime_lock_held():
         return None
-    for name in AUTOMATIC_INSTANCE_NAMES:
+    for name in itertools.chain(
+        AUTOMATIC_INSTANCE_NAMES, (f"instance-{i}" for i in itertools.count(4))
+    ):
         if not _runtime_lock_held(name):
             return name
-    raise RuntimeError(
-        "No free worker. All Marathon workers are busy; try again when one is free."
-    )
 
 
 def _set_parent_death_signal() -> None:
@@ -655,37 +656,8 @@ class Runtime:
     def _acquire_pool_model(self, backend: Backend) -> None:
         """Lease one interchangeable broker worker for this Marathon process."""
 
-        pool_dir = RUNTIME_DIR / "backend-pools" / backend.id
-        pool_dir.mkdir(parents=True, exist_ok=True)
-        for model_id in backend.pool_models:
-            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", model_id).strip("-")
-            suffix = hashlib.sha256(model_id.encode("utf-8")).hexdigest()[:12]
-            path = pool_dir / f"{safe_name or 'worker'}-{suffix}.lock"
-            handle = path.open("a+", encoding="utf-8")
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                handle.close()
-                continue
-            handle.seek(0)
-            handle.truncate()
-            handle.write(
-                json.dumps(
-                    {
-                        "pid": os.getpid(),
-                        "instance": self.instance.name,
-                        "model": model_id,
-                        "started_at": int(time.time()),
-                    }
-                )
-            )
-            handle.flush()
-            self._pool_lock = handle
-            self._pool_model = model_id
-            return
-        raise RuntimeError(
-            f"No free worker. All {len(backend.pool_models)} workers are already assigned "
-            "to running Marathon sessions; try again when one is free."
+        self._pool_lock, self._pool_model = acquire_pool_worker(
+            backend, RUNTIME_DIR, self.instance.name
         )
 
     def _backend_api_key(self) -> str | None:
@@ -974,7 +946,9 @@ class Runtime:
             },
         )
 
-    def start(self, progress: Callable[[str], None] | None = None) -> None:
+    def start(
+        self, progress: Callable[[str], None] | None = None, *, lazy_pool: bool = False
+    ) -> None:
         if self.profile.bundle:
             from .runtime_setup import prepare_bundle_profile
 
@@ -984,7 +958,8 @@ class Runtime:
         self.telemetry = create_run_writer(self.model.id, self.instance.name)
         self._run_started_mono = time.monotonic()
         self._backend = backend_for(self.model, self.profile)
-        if self._backend.kind == "llama_swap_pool":
+        lazy_pool = lazy_pool and self._backend.kind == "llama_swap_pool"
+        if self._backend.kind == "llama_swap_pool" and not lazy_pool:
             self._acquire_pool_model(self._backend)
         slot_api_enabled = _slot_api_enabled(self.model, self._backend)
         router_slot_root = self._backend.slot_save_root or self.paths.slot_root
@@ -1082,7 +1057,9 @@ class Runtime:
         environment.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         environment.setdefault("CUDA_SCALE_LAUNCH_QUEUES", "4x")
         if progress:
-            if self._backend.kind == "llama_swap_pool":
+            if lazy_pool:
+                progress("Starting Marathon; default model warms after the frontend opens")
+            elif self._backend.kind == "llama_swap_pool":
                 progress("Preparing one worker from the configured pool")
             else:
                 progress(f"Starting {self._backend.display_name}")
@@ -1100,7 +1077,7 @@ class Runtime:
             self._backend_processes.append((spec.name, process))
             self.llama = process
         self._write_session()
-        pool_model_load = self._backend.kind == "llama_swap_pool"
+        pool_model_load = self._backend.kind == "llama_swap_pool" and not lazy_pool
         if pool_model_load:
             self.record("backend.model.prewarming", {})
             self._model_loader = threading.Thread(
@@ -1110,7 +1087,7 @@ class Runtime:
                 daemon=True,
             )
             self._model_loader.start()
-        else:
+        elif not lazy_pool:
             self._wait_for_model(progress)
             self.record(
                 "backend.model.ready",
@@ -1206,6 +1183,10 @@ class Runtime:
                 router_env["MARATHON_MODEL_API_KEY_ENV"] = self._backend.api_key_env
             if self._backend.api_key_file:
                 router_env["MARATHON_MODEL_API_KEY_FILE"] = self._backend.api_key_file
+        if lazy_pool:
+            router_env["MARATHON_LAZY_POOL_BACKEND"] = self._backend.id
+            router_env["MARATHON_POOL_RUNTIME_DIR"] = str(RUNTIME_DIR)
+            router_env["MARATHON_MODEL_TARGET"] = self._backend.proxy
         if self.profile.tool_thinking_budget is not None:
             router_env["MARATHON_MODEL_TOOL_THINKING_BUDGET_TOKENS"] = str(
                 self.profile.tool_thinking_budget

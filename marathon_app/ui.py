@@ -1074,7 +1074,7 @@ def run_codex_default(
     result = 0
     try:
         with console.status("[bold red]Preparing Marathon...[/bold red]", spinner="dots") as status:
-            runtime.start(lambda message: status.update(f"[magenta]{message}[/magenta]"))
+            runtime.start(lambda message: status.update(f"[magenta]{message}[/magenta]"), lazy_pool=True)
         result = _launch_frontend(console, runtime, "codex", codex_args)
     except RuntimeBusyError:
         raise

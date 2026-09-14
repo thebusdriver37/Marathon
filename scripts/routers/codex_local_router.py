@@ -32,7 +32,9 @@ from collections.abc import AsyncIterator
 from collections.abc import Callable
 from collections.abc import Mapping
 from dataclasses import dataclass
-from dataclasses import field
+from dataclasses import field, replace
+from contextlib import asynccontextmanager
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +44,8 @@ from aiohttp import WSMsgType
 from aiohttp import web
 
 from marathon_app.local_history import normalize_local_history
-from marathon_app.catalog import external_models
+from marathon_app.catalog import external_models, backends
+from marathon_app.pool import acquire_pool_worker
 from marathon_app.checkpoints import RollingCheckpointStore
 from marathon_app.checkpoints import SNAPSHOT_SIDECAR_SUFFIXES
 from marathon_app.checkpoints import conversation_key_hash
@@ -2243,6 +2246,14 @@ class RouterState:
         self.state_dir = state_dir
         self.log_dir = log_dir
         self.telemetry = EventWriter.from_env("router")
+        pool_id = os.getenv("MARATHON_LAZY_POOL_BACKEND", "")
+        self.pool_backend = backends().get(pool_id) if pool_id else None
+        if pool_id and (self.pool_backend is None or self.pool_backend.kind != "llama_swap_pool"):
+            raise ValueError(f"invalid lazy pool backend: {pool_id}")
+        self.pool_slug = os.getenv("MARATHON_MODEL_SLUG", "") if self.pool_backend else ""
+        self.pool_handle = None
+        self.pool_model = None
+        self.pool_request_lock = asyncio.Lock()
         self.available_profiles: dict[str, ModelProfile] = {}
         self._refresh_profiles()
         if not self.available_profiles:
@@ -2485,6 +2496,20 @@ class RouterState:
     def _refresh_profiles(self) -> dict[str, ModelProfile]:
         profiles = _available_profiles()
         if profiles:
+            if getattr(self, "pool_backend", None):
+                self.pool_slugs = {
+                    slug for slug, profile in profiles.items()
+                    if slug == self.pool_slug or (
+                        profile.alias == self.pool_backend.model_alias
+                        and profile.target.rstrip("/") == self.pool_backend.proxy.rstrip("/")
+                    )
+                }
+                if self.pool_model is not None:
+                    for slug in self.pool_slugs:
+                        profiles[slug] = replace(
+                            profiles[slug],
+                            target=f"{self.pool_backend.proxy.rstrip('/')}/upstream/{quote(self.pool_model, safe='')}",
+                        )
             self.available_profiles = profiles
         return self.available_profiles
 
@@ -2624,6 +2649,7 @@ class RouterState:
         if self.web_fetch is not None:
             await self.web_fetch.close()
             self.web_fetch = None
+        self._release_pool_worker()
         if self.http_client is not None:
             await self.http_client.close()
             self.http_client = None
@@ -2864,6 +2890,52 @@ class RouterState:
                 except Exception:
                     pass
 
+    @asynccontextmanager
+    async def pool_request(self, requested_model: str | None, *, generate: bool = True):
+        """Keep routing and worker ownership stable for the entire request."""
+        if not getattr(self, "pool_backend", None):
+            yield
+            return
+        async with self.pool_request_lock:
+            profile = self.resolve_model(requested_model)
+            if profile.slug in self.pool_slugs and self.pool_handle is None:
+                try:
+                    self.pool_handle, self.pool_model = acquire_pool_worker(
+                        self.pool_backend, Path(os.environ["MARATHON_POOL_RUNTIME_DIR"]),
+                        os.getenv("MARATHON_INSTANCE") or None,
+                    )
+                except RuntimeError:
+                    if generate:
+                        raise
+                    # Frontend warmup is best effort: a full local pool must not
+                    # prevent opening the UI and selecting an external model.
+                    yield
+                    return
+                self._refresh_profiles()
+                self.telemetry.emit("router.pool.acquired", {"worker": self.pool_model})
+            elif profile.slug not in self.pool_slugs and self.pool_handle is not None:
+                # Finish or cancel background slot operations before releasing their worker.
+                tasks = list(self.starter_prewarm_tasks.values())
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                await self.flush_conversation_checkpoints()
+                async with self.backend_lock:
+                    for slug in self.pool_slugs:
+                        self._clear_live_slot(slug)
+                    self._release_pool_worker()
+            yield
+
+    def _release_pool_worker(self) -> None:
+        if getattr(self, "pool_handle", None) is not None:
+            worker = self.pool_model
+            self.pool_handle.close()
+            self.pool_handle = None
+            self.pool_model = None
+            self._refresh_profiles()
+            self.telemetry.emit("router.pool.released", {"worker": worker})
+
     def resolve_model(self, requested_model: str | None) -> ModelProfile:
         self._refresh_profiles()
         model_key = (requested_model or self.default_model).strip()
@@ -2880,7 +2952,7 @@ class RouterState:
             ready = self._profile_ready(profile)
             timeout = (
                 self.model_ready_timeout_seconds
-                if profile.slug == self.prewarm_model
+                if profile.slug == self.prewarm_model or profile.slug in getattr(self, "pool_slugs", ())
                 else 0.0
             )
             deadline = time.monotonic() + timeout
@@ -3567,6 +3639,9 @@ class RouterState:
         prompt_cache_key: str,
     ) -> dict[str, Any]:
         """Restore the starter slot after Ready without blocking the frontend."""
+
+        if getattr(self, "pool_backend", None) and self.pool_handle is None:
+            return {"status": "skipped", "reason": "no local worker reserved for optional warmup"}
 
         if (
             getattr(self, "_closing", False)
@@ -5176,6 +5251,23 @@ class RouterState:
         preset_response_id: str | None = None,
         event_sink: StreamEventSink | None = None,
     ) -> dict[str, Any]:
+        requested_model = payload.get("model")
+        if not requested_model and payload.get("previous_response_id"):
+            parent = self.lineage.get(payload["previous_response_id"])
+            if parent is not None:
+                requested_model = parent.profile_slug
+        async with self.pool_request(requested_model, generate=payload.get("generate") is not False):
+            return await self._process_websocket_create(
+                payload, preset_response_id=preset_response_id, event_sink=event_sink
+            )
+
+    async def _process_websocket_create(
+        self,
+        payload: dict[str, Any],
+        *,
+        preset_response_id: str | None = None,
+        event_sink: StreamEventSink | None = None,
+    ) -> dict[str, Any]:
         request_started = time.perf_counter()
         first_activity_ms: float | None = None
         original_sink = event_sink
@@ -5940,6 +6032,19 @@ async def _iter_proxy_content(
 
 async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
     state: RouterState = request.app["state"]
+    if not getattr(state, "pool_backend", None):
+        return await _handle_http_proxy(request)
+    try:
+        data = await request.json()
+        requested_model = data.get("model") if isinstance(data, dict) else None
+        async with state.pool_request(requested_model):
+            return await _handle_http_proxy(request)
+    except Exception as exc:
+        return web.json_response({"error": {"message": str(exc)}}, status=502)
+
+
+async def _handle_http_proxy(request: web.Request) -> web.StreamResponse:
+    state: RouterState = request.app["state"]
     request_started = time.perf_counter()
     raw_body = await request.read()
     path = request.path.rstrip("/")
@@ -6330,7 +6435,8 @@ async def on_startup(app: web.Application) -> None:
     state: RouterState = app["state"]
     await state.open()
     state._log_slot_cleanup(await state.startup_checkpoint_cleanup())
-    threading.Thread(target=state.ensure_model, args=(state.default_model,), daemon=True).start()
+    if not state.pool_backend:
+        threading.Thread(target=state.ensure_model, args=(state.default_model,), daemon=True).start()
 
 
 async def on_cleanup(app: web.Application) -> None:

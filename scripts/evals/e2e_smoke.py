@@ -253,7 +253,7 @@ def main():
             overflow = subprocess.run([str(LAUNCHER), "--instance", f"{instance}-overflow", "exec", "Reply READY"],
                                       cwd=project, env=environment, capture_output=True, text=True, timeout=30)
             (output / "capacity.txt").write_text(overflow.stdout + overflow.stderr)
-            assert overflow.returncode == 2 and "already assigned" in overflow.stdout, overflow
+            assert overflow.returncode != 0 and "No free local worker" in (overflow.stdout + overflow.stderr), overflow
             record("three-workers-and-exhaustion")
             for extra in terminals[1:]:
                 extra.close()

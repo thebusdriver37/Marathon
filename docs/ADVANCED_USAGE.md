@@ -15,9 +15,15 @@ The `marathon dashboard` command exposes model profiles, alternate frontends, wa
 
 ## Automatic Workers and Named Instances
 
-Run `marathon` to start a conversation on a free worker, or `marathon resume <ID>` to continue a saved conversation on a free worker.
+Run `marathon` to start a conversation, or `marathon resume <ID>` to continue a saved conversation.
 No instance flag is needed for either operation.
-When all workers are occupied, Marathon reports `No free worker` and exits.
+Opening additional terminals is independent of local GPU capacity.
+For broker pool profiles, the frontend's default-model warmup reserves a free local worker and warms it in the background after the frontend starts.
+If the local pool is full, that optional warmup is skipped so you can still open `/model` and select Spark or another external model.
+An actual local inference request still requires a free local worker and reports `No free local worker` when the pool is full.
+Sending a request to an external model releases that session's local reservation after pending slot operations finish; the broker's normal idle policy controls unloading.
+Switching back to a local model acquires an available worker again.
+Existing sessions must be reopened to pick up this routing change.
 This also applies to headless `marathon exec` and `marathon fork <ID>`.
 Printed resume commands contain only the Marathon launcher, `resume`, and the session ID.
 IDs from older named instances are located automatically without moving their session files.
@@ -26,7 +32,7 @@ The default resume picker shows that shared history; older explicitly named hist
 
 The default instance preserves Marathon's original paths and configured ports.
 A named instance uses the same model catalog and runtime profiles but owns independent mutable state.
-Automatic launches allocate the internal default, second, or third runtime as needed, while the backend leases an available worker independently.
+Automatic launches allocate the internal default, second, third, instance-4, and subsequent free runtime names as needed, while the backend reserves local workers independently.
 Pass `--instance NAME` when you want a stable custom identity.
 
 Configure local GPU policy in `~/.config/marathon/catalog.toml`:
