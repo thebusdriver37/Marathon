@@ -78,4 +78,6 @@ Speed depends on context, workload, hardware, and speculative acceptance; there 
 - [Setup and troubleshooting](docs/SETUP.md)
 - [Advanced usage](docs/ADVANCED_USAGE.md): instances, caching, tools, remote hosts, and tuning
 - [Runtime packaging](docs/RUNTIME.md): source patches, model pins, and release checks
+- [Custom drafter fine-tuning results](docs/DRAFTER_FINETUNING_2026-09-14.md)
+- [Drafter candidate research](docs/DRAFTER_RESEARCH_2026-09-14.md)
 - [Development](docs/DEVELOPMENT.md)
