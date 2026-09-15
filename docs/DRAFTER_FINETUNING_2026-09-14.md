@@ -247,3 +247,9 @@ The selected checkpoint therefore has strong evidence for a narrow structured-ag
 
 Both variants passed all ten separate coding, debugging, extraction, SQL, and tool-use quality checks with identical final answers.
 The selected checkpoint also passed four of four deterministic synthetic agent tasks, but those trajectories differed and do not provide a controlled speed comparison.
+
+## Published artifact and Marathon integration
+
+The selected Q4_K_M drafter is published at [`Busdriver/Qwen3.8-27B-DFlash2-Marathon-GGUF`](https://huggingface.co/Busdriver/Qwen3.8-27B-DFlash2-Marathon-GGUF).
+Marathon pins Hub revision `ee1d06ea82b7767f462519d3b8b975f84eb5180f` and verifies both the 1,143,006,752-byte size and SHA-256 `e096aa09c26d5096b63b1a4d0400258819980b16250ef5c5d08fcf830e6bb6a6` before installation.
+The recommended Qwen 3.8 bundle downloads this tuned drafter together with its tested IQ4_XS target and vision projector.

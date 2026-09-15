@@ -222,7 +222,7 @@ class RuntimeSetupTests(unittest.TestCase):
                     runtime_setup.prepare_bundle_profile(model, replace(self.profile, gpus=(0,)))
             command = catalog.server_command(model, profile, catalog.Backend("fixture", "Fixture", Path("/portable/bin/llama-server")))
             draft = command[command.index("--spec-draft-model") + 1]
-            self.assertEqual(draft, str(root / "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"))
+            self.assertEqual(draft, str(root / "Qwen3.8-27B-DFlash2-Marathon-R32-Q4_K_M.gguf"))
             self.assertIn("--no-mmproj-offload", command)
             self.assertNotIn("{model_dir}", " ".join(command))
             self.assertNotIn("/home/deforest", " ".join(command))
