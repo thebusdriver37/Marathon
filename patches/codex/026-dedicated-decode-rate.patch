@@ -1,0 +1,522 @@
+diff --git a/codex-rs/tui/src/bottom_pane/status_line_style.rs b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+--- a/codex-rs/tui/src/bottom_pane/status_line_style.rs
++++ b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+@@ -44,9 +44,9 @@
+             | StatusLineItem::UsedTokens
+             | StatusLineItem::TotalInputTokens
+             | StatusLineItem::TotalOutputTokens
++            | StatusLineItem::TokensPerSecond
+             | StatusLineItem::ThreadCredits
+             | StatusLineItem::EstimatedThreadCost => Self::Usage,
+-            StatusLineItem::TokensPerSecond => Self::State,
+             StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => Self::Limit,
+             StatusLineItem::CodexVersion
+             | StatusLineItem::Hostname
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -83,15 +83,7 @@
+                             self.refresh_status_line();
+                         }
+                         ThreadItem::FileChange { id, .. } => {
+-                            self.turn_throughput.begin_patch_apply(id, Instant::now());
+-                            self.refresh_status_line();
+-                        }
+-                        ThreadItem::CommandExecution { .. }
+-                        | ThreadItem::McpToolCall { .. }
+-                        | ThreadItem::DynamicToolCall { .. }
+-                        | ThreadItem::WebSearch { .. }
+-                        | ThreadItem::CollabAgentToolCall { .. } => {
+-                            self.turn_throughput.record_first_output(Instant::now());
++                            self.turn_throughput.begin_patch_apply(id);
+                             self.refresh_status_line();
+                         }
+                         _ => {}
+@@ -157,7 +149,7 @@
+             ServerNotification::FileChangePatchUpdated(notification) => {
+                 if !from_replay {
+                     self.turn_throughput
+-                        .record_patch_progress(&notification.item_id, Instant::now());
++                        .record_patch_progress(&notification.item_id);
+                     self.refresh_status_line();
+                 }
+             }
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -412,28 +412,34 @@
+     }
+ 
+     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
+-        if self.turn_throughput.is_active() {
+-            let now = Instant::now();
+-            let activity = if self.config.animations {
+-                self.turn_throughput
+-                    .generation_activity_frame(now)
+-                    .map_or_else(|| "Working".to_string(), |frame| format!("{frame} Working"))
+-            } else {
+-                "Working".to_string()
+-            };
+-            let elapsed = self.turn_throughput.elapsed(now)?;
+-            return Some(format!("{activity} · {}", format_turn_elapsed(elapsed)));
+-        }
+-
+         self.turn_throughput.elapsed(Instant::now())?;
+-        let mut label = self.turn_throughput.sample().map_or_else(
++        Some(self.turn_throughput.sample().map_or_else(
+             || "speed n/a".to_string(),
+             |sample| format!("{:.1} tok/s", sample.tokens_per_second),
+-        );
+-        if let Some(latency) = self.turn_throughput.time_to_first_output() {
+-            label.push_str(&format!(" · first {}", format_latency(latency)));
+-        }
+-        Some(label)
++        ))
++    }
++
++    /// Render one low-churn activity label while retaining the useful thinking distinction.
++    pub(super) fn status_line_run_state(&self) -> String {
++        let active = self.turn_throughput.is_active();
++        let label = if active {
++            if self.turn_throughput.generation_stage() == Some(GenerationStage::Thinking) {
++                "Thinking"
++            } else {
++                "Working"
++            }
++        } else {
++            return self.run_state_status_text();
++        };
++
++        if self.config.animations
++            && let Some(frame) = self
++                .turn_throughput
++                .generation_activity_frame(Instant::now())
++        {
++            return format!("{frame} {label}");
++        }
++        label.to_string()
+     }
+ 
+     /// Keep the compact footer visibly alive throughout an active turn.
+@@ -443,7 +449,7 @@
+             || !self
+                 .configured_status_line_items()
+                 .iter()
+-                .any(|item| item == "tokens-per-second")
++                .any(|item| item == "run-state" || item == "status")
+         {
+             return;
+         }
+@@ -473,25 +479,3 @@
+         }
+     }
+ }
+-
+-fn format_latency(duration: Duration) -> String {
+-    let seconds = duration.as_secs_f64();
+-    if seconds < 10.0 {
+-        format!("{seconds:.1}s")
+-    } else {
+-        format!("{seconds:.0}s")
+-    }
+-}
+-
+-fn format_turn_elapsed(duration: Duration) -> String {
+-    let seconds = duration.as_secs();
+-    let minutes = seconds / 60;
+-    let hours = minutes / 60;
+-    if hours > 0 {
+-        format!("{hours}:{:02}:{:02}", minutes % 60, seconds % 60)
+-    } else if minutes > 0 {
+-        format!("{minutes}:{:02}", seconds % 60)
+-    } else {
+-        format!("{seconds}s")
+-    }
+-}
+diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+--- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
++++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+@@ -696,7 +696,7 @@
+                         format!("+{} -{}", stats.additions, stats.deletions)
+                     }
+                 }),
+-            StatusLineItem::Status => Some(self.run_state_status_text()),
++            StatusLineItem::Status => Some(self.status_line_run_state()),
+             StatusLineItem::Permissions => Some(permissions_display(&self.config)),
+             StatusLineItem::ApprovalMode => Some(approval_mode_display(&self.config)),
+             StatusLineItem::UsedTokens => {
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
+@@ -1,10 +1,9 @@
+ ---
+ source: tui/src/chatwidget/tests/status_and_layout.rs
+-assertion_line: 3040
+ expression: normalized_backend_snapshot(terminal.backend())
+ ---
+ "                                                                        "
+ "                                                                        "
+ "› Ask Marathon to do anything                                           "
+ "                                                                        "
+-"  60.6 tok/s · first 2.5s                                               "
++"  Working · 105.0 tok/s                                                 "
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -2962,15 +2962,16 @@
+ 
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+     chat.show_welcome_banner = false;
+-    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
++    chat.config.animations = false;
++    chat.config.tui_status_line = Some(vec![
++        "run-state".to_string(),
++        "tokens-per-second".to_string(),
++    ]);
+     let started_at = Instant::now() - Duration::from_secs(200);
+     chat.turn_throughput
+         .start_turn(started_at - Duration::from_millis(2_500));
+-    chat.turn_throughput.record_output_delta(
+-        "streamed response",
+-        GenerationStage::Answering,
+-        started_at,
+-    );
++    chat.turn_throughput
++        .record_output_delta("streamed response", GenerationStage::Answering);
+     chat.handle_server_notification(
+         ServerNotification::RawResponseCompleted(
+             codex_app_server_protocol::RawResponseCompletedNotification {
+@@ -3018,17 +3019,9 @@
+     );
+     chat.refresh_status_line();
+     let live_label = status_line_text(&chat).expect("latest call footer");
+-    assert!(
+-        is_working_status(&live_label),
+-        "tool-loop gaps should keep one stable working state: {live_label}"
+-    );
+-    chat.turn_throughput
+-        .finish_turn(started_at + Duration::from_secs(200));
+-    chat.refresh_status_line();
+-
+     assert_eq!(
+-        status_line_text(&chat),
+-        Some("60.6 tok/s · first 2.5s".to_string())
++        live_label, "Working · 105.0 tok/s",
++        "the rate should update only from the latest completed backend call"
+     );
+ 
+     let width = 72;
+@@ -3041,45 +3034,52 @@
+         "status_line_tokens_per_second_footer",
+         normalized_backend_snapshot(terminal.backend())
+     );
+-}
+-
+-#[tokio::test]
+-async fn status_line_keeps_one_working_state_across_generation_stages() {
++
++    chat.turn_throughput
++        .finish_turn(started_at + Duration::from_secs(200));
++    chat.refresh_status_line();
++
++    assert_eq!(
++        status_line_text(&chat),
++        Some("Ready · 60.6 tok/s".to_string())
++    );
++}
++
++#[tokio::test]
++async fn status_line_limits_active_states_to_working_and_thinking() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+-    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
++    chat.config.tui_status_line = Some(vec!["run-state".to_string()]);
+ 
+     handle_turn_started(&mut chat, "turn-stage");
+     chat.refresh_status_line();
+     assert!(
+-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
++        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
+         "prefill should use the stable working state"
+     );
+ 
+     handle_agent_reasoning_delta(&mut chat, "thinking");
+     assert!(
+-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
+-        "reasoning should retain the stable working state"
++        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Thinking")),
++        "reasoning should expose the useful thinking distinction"
+     );
+ 
+     handle_agent_reasoning_final(&mut chat);
+     assert!(
+-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
++        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
+         "the next action should retain the stable working state"
+     );
+ 
+     handle_agent_message_delta(&mut chat, "answering");
+     assert!(
+-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
++        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
+         "answering should retain the stable working state"
+     );
+ }
+ 
+-fn is_working_status(status: &str) -> bool {
+-    status.contains(" Working · ")
+-        && status
+-            .chars()
+-            .next()
+-            .is_some_and(is_generation_spinner_frame)
++fn is_animated_status(status: &str, label: &str) -> bool {
++    let mut characters = status.chars();
++    characters.next().is_some_and(is_generation_spinner_frame)
++        && characters.as_str().strip_prefix(' ') == Some(label)
+ }
+ 
+ fn is_generation_spinner_frame(frame: char) -> bool {
+@@ -3095,7 +3095,7 @@
+     let (frame_requester, mut frame_rx) = crate::tui::FrameRequester::test_channel();
+     chat.frame_requester = frame_requester;
+     chat.config.animations = true;
+-    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
++    chat.config.tui_status_line = Some(vec!["run-state".to_string()]);
+     handle_turn_started(&mut chat, "turn-animated-stage");
+     while frame_rx.try_recv().is_ok() {}
+ 
+@@ -3135,7 +3135,7 @@
+ #[tokio::test]
+ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+-    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
++    chat.config.tui_status_line = Some(vec!["run-state".to_string()]);
+     handle_turn_started(&mut chat, "turn-patch-progress");
+     handle_agent_message_delta(&mut chat, "I will add the page.");
+ 
+@@ -3158,7 +3158,7 @@
+ 
+     let drafting = status_line_text(&chat).expect("working status");
+     assert!(
+-        is_working_status(&drafting),
++        is_animated_status(&drafting, "Working"),
+         "patch drafting should retain the stable working state: {drafting}"
+     );
+ 
+@@ -3176,7 +3176,7 @@
+         None,
+     );
+     assert!(
+-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
++        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
+         "patch application should retain the stable working state"
+     );
+ 
+@@ -3194,7 +3194,7 @@
+         None,
+     );
+     assert!(
+-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
++        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
+         "the next model request should retain the stable working state"
+     );
+ }
+diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+--- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
++++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+@@ -110,7 +110,7 @@
+     ) {
+         let stage_changed = self.turn_throughput.generation_stage() != Some(generation_stage);
+         self.turn_throughput
+-            .record_output_delta(delta, generation_stage, Instant::now());
++            .record_output_delta(delta, generation_stage);
+         if stage_changed {
+             self.refresh_status_line();
+         }
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+--- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+@@ -28,7 +28,6 @@
+ pub(super) struct TurnThroughput {
+     turn_started_at: Option<Instant>,
+     turn_finished_at: Option<Instant>,
+-    time_to_first_output: Option<Duration>,
+     seen_responses: HashSet<String>,
+     decode_tokens: u64,
+     decode_microseconds: u64,
+@@ -45,25 +44,11 @@
+         self.generation_stage = Some(GenerationStage::Prefill);
+     }
+ 
+-    pub(super) fn record_output_delta(
+-        &mut self,
+-        delta: &str,
+-        generation_stage: GenerationStage,
+-        now: Instant,
+-    ) {
++    pub(super) fn record_output_delta(&mut self, delta: &str, generation_stage: GenerationStage) {
+         if delta.is_empty() {
+             return;
+         }
+-        self.record_first_output(now);
+         self.generation_stage = Some(generation_stage);
+-    }
+-
+-    pub(super) fn record_first_output(&mut self, now: Instant) {
+-        if self.time_to_first_output.is_none()
+-            && let Some(turn_started_at) = self.turn_started_at
+-        {
+-            self.time_to_first_output = Some(now.saturating_duration_since(turn_started_at));
+-        }
+     }
+ 
+     pub(super) fn complete_response(
+@@ -125,10 +110,6 @@
+             .copied()
+     }
+ 
+-    pub(super) fn time_to_first_output(&self) -> Option<Duration> {
+-        self.time_to_first_output
+-    }
+-
+     pub(super) fn elapsed(&self, now: Instant) -> Option<Duration> {
+         self.turn_started_at.map(|start| {
+             self.turn_finished_at
+@@ -147,19 +128,18 @@
+         }
+     }
+ 
+-    pub(super) fn record_patch_progress(&mut self, call_id: &str, now: Instant) {
++    pub(super) fn record_patch_progress(&mut self, call_id: &str) {
+         self.patch_call_id = Some(call_id.to_string());
+-        self.record_first_output(now);
+         self.generation_stage = Some(GenerationStage::DraftingCode);
+     }
+ 
+-    pub(super) fn begin_patch_apply(&mut self, call_id: &str, now: Instant) {
++    pub(super) fn begin_patch_apply(&mut self, call_id: &str) {
+         if self
+             .patch_call_id
+             .as_deref()
+             .is_none_or(|active_call_id| active_call_id != call_id)
+         {
+-            self.record_patch_progress(call_id, now);
++            self.record_patch_progress(call_id);
+         }
+         self.generation_stage = Some(GenerationStage::ApplyingChanges);
+     }
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+--- a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
+@@ -24,11 +24,7 @@
+     let start = Instant::now();
+     let mut throughput = TurnThroughput::default();
+     throughput.start_turn(start);
+-    throughput.record_output_delta(
+-        "first output",
+-        GenerationStage::Thinking,
+-        start + Duration::from_secs(5),
+-    );
++    throughput.record_output_delta("first output", GenerationStage::Thinking);
+     throughput.complete_response("response", Some(&metrics(/*tokens*/ 2600, /*seconds*/ 40)));
+     throughput.finish_turn(start + Duration::from_secs(80));
+     assert_eq!(
+@@ -36,10 +32,6 @@
+         Some(ThroughputSample {
+             tokens_per_second: 65.0
+         })
+-    );
+-    assert_eq!(
+-        throughput.time_to_first_output(),
+-        Some(Duration::from_secs(5))
+     );
+     assert_eq!(
+         throughput.elapsed(start + Duration::from_secs(100)),
+@@ -117,7 +109,6 @@
+     throughput.finish_turn(start + Duration::from_secs(4));
+     throughput.start_turn(start + Duration::from_secs(10));
+     assert_eq!(throughput.sample(), None);
+-    assert_eq!(throughput.time_to_first_output(), None);
+     assert_eq!(
+         throughput.generation_stage(),
+         Some(GenerationStage::Prefill)
+@@ -134,41 +125,25 @@
+     let mut throughput = TurnThroughput::default();
+     throughput.start_turn(start);
+     throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
+-    throughput.record_output_delta(
+-        "unfinished",
+-        GenerationStage::Thinking,
+-        start + Duration::from_secs(5),
+-    );
++    throughput.record_output_delta("unfinished", GenerationStage::Thinking);
+     throughput.finish_turn(start + Duration::from_secs(6));
+     assert_eq!(throughput.sample(), None);
+ }
+ 
+ #[test]
+-fn first_output_is_recorded_once_and_stage_tracks_the_stream() {
+-    let start = Instant::now();
+-    let mut throughput = TurnThroughput::default();
+-    throughput.start_turn(start);
+-    throughput.record_output_delta(
+-        "thinking",
+-        GenerationStage::Thinking,
+-        start + Duration::from_secs(2),
+-    );
++fn generation_stage_tracks_the_stream() {
++    let start = Instant::now();
++    let mut throughput = TurnThroughput::default();
++    throughput.start_turn(start);
++    throughput.record_output_delta("thinking", GenerationStage::Thinking);
+     assert_eq!(
+         throughput.generation_stage(),
+         Some(GenerationStage::Thinking)
+     );
+-    throughput.record_output_delta(
+-        "answer",
+-        GenerationStage::Answering,
+-        start + Duration::from_secs(8),
+-    );
++    throughput.record_output_delta("answer", GenerationStage::Answering);
+     assert_eq!(
+         throughput.generation_stage(),
+         Some(GenerationStage::Answering)
+-    );
+-    assert_eq!(
+-        throughput.time_to_first_output(),
+-        Some(Duration::from_secs(2))
+     );
+     throughput.finish_turn(start + Duration::from_secs(10));
+     assert_eq!(throughput.generation_stage(), None);
+@@ -227,31 +202,3 @@
+     throughput.finish_turn(Instant::now());
+     assert_eq!(throughput.sample(), None);
+ }
+-
+-#[test]
+-fn tool_activity_precedes_later_text_and_empty_deltas_do_not_start_the_clock() {
+-    let start = Instant::now();
+-    let mut throughput = TurnThroughput::default();
+-    throughput.start_turn(start);
+-    throughput.record_output_delta(
+-        "",
+-        GenerationStage::Thinking,
+-        start + Duration::from_secs(1),
+-    );
+-    assert_eq!(throughput.time_to_first_output(), None);
+-    throughput.record_first_output(start + Duration::from_secs(5));
+-    throughput.record_output_delta(
+-        "Done",
+-        GenerationStage::Answering,
+-        start + Duration::from_secs(37),
+-    );
+-    throughput.finish_turn(start + Duration::from_secs(40));
+-    assert_eq!(
+-        throughput.time_to_first_output(),
+-        Some(Duration::from_secs(5))
+-    );
+-    assert_eq!(
+-        throughput.elapsed(start + Duration::from_secs(100)),
+-        Some(Duration::from_secs(40))
+-    );
+-}

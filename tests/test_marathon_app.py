@@ -1716,8 +1716,8 @@ class FrontendTests(unittest.TestCase):
                 command = codex_command(runtime)
 
         self.assertIn(
-            'tui.status_line=["model-with-reasoning", "tokens-per-second", '
-            '"context-tokens"]',
+            'tui.status_line=["model-with-reasoning", "run-state", '
+            '"tokens-per-second", "context-tokens"]',
             command,
         )
 

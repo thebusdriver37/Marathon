@@ -77,7 +77,7 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-tui \
     status_line_tokens_per_second_renders_completed_turn_rate_snapshot
   just test -p codex-tui \
-    status_line_keeps_one_working_state_across_generation_stages
+    status_line_limits_active_states_to_working_and_thinking
   just test -p codex-tui \
     active_turn_footer_schedules_continuous_animation_frames
   just test -p codex-tui \

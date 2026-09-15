@@ -26,6 +26,7 @@ from .runtime_setup import missing_runtime_tools
 
 MARATHON_STATUS_LINE = [
     "model-with-reasoning",
+    "run-state",
     "tokens-per-second",
     "context-tokens",
 ]
