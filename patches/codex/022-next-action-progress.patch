@@ -1,0 +1,87 @@
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index e9536ed60f..5cdfea9679 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -101,9 +101,21 @@ impl ChatWidget {
+                 self.handle_item_started_notification(notification, replay_kind.is_some());
+             }
+             ServerNotification::ItemCompleted(notification) => {
+-                if !from_replay && let ThreadItem::FileChange { id, .. } = &notification.item {
+-                    self.turn_throughput.finish_patch_apply(id);
+-                    self.refresh_status_line();
++                if !from_replay {
++                    match &notification.item {
++                        ThreadItem::FileChange { id, .. } => {
++                            self.turn_throughput.finish_patch_apply(id);
++                            self.refresh_status_line();
++                        }
++                        ThreadItem::Reasoning { .. }
++                        | ThreadItem::AgentMessage { .. }
++                        | ThreadItem::Plan { .. } => {
++                            self.turn_throughput
++                                .set_generation_stage(GenerationStage::PreparingAction);
++                            self.refresh_status_line();
++                        }
++                        _ => {}
++                    }
+                 }
+                 self.handle_item_completed_notification(notification, replay_kind);
+             }
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index 173c2d915d..bd8c157db4 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -413,6 +413,15 @@ impl ChatWidget {
+ 
+     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
+         if let Some(stage) = self.turn_throughput.generation_stage() {
++            if stage == GenerationStage::PreparingAction {
++                let elapsed = self.turn_throughput.elapsed(Instant::now());
++                return Some(match elapsed {
++                    Some(elapsed) => {
++                        format!("{} · total {}", stage.label(), format_latency(elapsed))
++                    }
++                    None => stage.label().to_string(),
++                });
++            }
+             if matches!(
+                 stage,
+                 GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index b9918505a6..7b297a410e 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -3056,6 +3056,13 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+         "reasoning delta should identify thinking"
+     );
+ 
++    handle_agent_reasoning_final(&mut chat);
++    assert!(
++        status_line_text(&chat)
++            .is_some_and(|status| status.starts_with("Preparing next action · total ")),
++        "completed reasoning should show progress while the next item is generated"
++    );
++
+     handle_agent_message_delta(&mut chat, "answering");
+     assert!(
+         status_line_text(&chat).is_some_and(|status| status == "Answering"),
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+index a80df0c9b6..e4f982ee58 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+@@ -10,6 +10,7 @@ pub(super) enum GenerationStage {
+     Prefill,
+     Thinking,
+     Answering,
++    PreparingAction,
+     DraftingCode,
+     ApplyingChanges,
+ }
+@@ -20,6 +21,7 @@ impl GenerationStage {
+             Self::Prefill => "Prefill",
+             Self::Thinking => "Thinking",
+             Self::Answering => "Answering",
++            Self::PreparingAction => "Preparing next action",
+             Self::DraftingCode => "Drafting",
+             Self::ApplyingChanges => "Applying",
+         }

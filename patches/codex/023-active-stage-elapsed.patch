@@ -1,0 +1,90 @@
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index bd8c157db4..45a4b5c8a1 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -413,15 +413,6 @@ impl ChatWidget {
+ 
+     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
+         if let Some(stage) = self.turn_throughput.generation_stage() {
+-            if stage == GenerationStage::PreparingAction {
+-                let elapsed = self.turn_throughput.elapsed(Instant::now());
+-                return Some(match elapsed {
+-                    Some(elapsed) => {
+-                        format!("{} · total {}", stage.label(), format_latency(elapsed))
+-                    }
+-                    None => stage.label().to_string(),
+-                });
+-            }
+             if matches!(
+                 stage,
+                 GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
+@@ -442,7 +433,13 @@ impl ChatWidget {
+                 ));
+                 return Some(label);
+             }
+-            return Some(stage.label().to_string());
++            let elapsed = self.turn_throughput.elapsed(Instant::now());
++            return Some(match elapsed {
++                Some(elapsed) => {
++                    format!("{} · total {}", stage.label(), format_latency(elapsed))
++                }
++                None => stage.label().to_string(),
++            });
+         }
+ 
+         let elapsed = self.turn_throughput.elapsed(Instant::now())?;
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 7b297a410e..e9f4ec7765 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -3048,11 +3048,14 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+ 
+     handle_turn_started(&mut chat, "turn-stage");
+     chat.refresh_status_line();
+-    assert_eq!(status_line_text(&chat), Some("Prefill".to_string()));
++    assert!(
++        status_line_text(&chat).is_some_and(|status| status.starts_with("Prefill · total ")),
++        "prefill should include live turn duration"
++    );
+ 
+     handle_agent_reasoning_delta(&mut chat, "thinking");
+     assert!(
+-        status_line_text(&chat).is_some_and(|status| status == "Thinking"),
++        status_line_text(&chat).is_some_and(|status| status.starts_with("Thinking · total ")),
+         "reasoning delta should identify thinking"
+     );
+ 
+@@ -3065,7 +3068,7 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+ 
+     handle_agent_message_delta(&mut chat, "answering");
+     assert!(
+-        status_line_text(&chat).is_some_and(|status| status == "Answering"),
++        status_line_text(&chat).is_some_and(|status| status.starts_with("Generating · total ")),
+         "answer delta should identify answering"
+     );
+ }
+@@ -3133,7 +3136,10 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+         }),
+         None,
+     );
+-    assert_eq!(status_line_text(&chat), Some("Prefill".to_string()));
++    assert!(
++        status_line_text(&chat).is_some_and(|status| status.starts_with("Prefill · total ")),
++        "the next model request should retain live elapsed feedback"
++    );
+ }
+ 
+ #[tokio::test]
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+index e4f982ee58..a6994b74ff 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+@@ -20,7 +20,7 @@ impl GenerationStage {
+         match self {
+             Self::Prefill => "Prefill",
+             Self::Thinking => "Thinking",
+-            Self::Answering => "Answering",
++            Self::Answering => "Generating",
+             Self::PreparingAction => "Preparing next action",
+             Self::DraftingCode => "Drafting",
+             Self::ApplyingChanges => "Applying",

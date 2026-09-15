@@ -1,0 +1,387 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_start.rs b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+index c46830d190..fb579cc690 100644
+--- a/codex-rs/app-server/tests/suite/v2/turn_start.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+@@ -3972,7 +3972,6 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
+     ];
+     let server = create_mock_responses_server_sequence(responses).await;
+     MockResponsesConfig::new(&server.uri())
+-        .enable_feature(Feature::ApplyPatchStreamingEvents)
+         .disable_feature(Feature::Plugins)
+         .disable_feature(Feature::RemoteModels)
+         .disable_feature(Feature::ShellSnapshot)
+diff --git a/codex-rs/core/tests/suite/apply_patch_cli.rs b/codex-rs/core/tests/suite/apply_patch_cli.rs
+index b5dda68de7..c14e52dc5f 100644
+--- a/codex-rs/core/tests/suite/apply_patch_cli.rs
++++ b/codex-rs/core/tests/suite/apply_patch_cli.rs
+@@ -1513,15 +1513,7 @@ async fn apply_patch_cli_can_use_exec_command_output_as_patch_input() -> Result<
+ async fn apply_patch_custom_tool_streaming_emits_updated_changes() -> Result<()> {
+     skip_if_no_network!(Ok(()));
+ 
+-    let harness = apply_patch_harness_with(|builder| {
+-        builder.with_config(|config| {
+-            config
+-                .features
+-                .enable(Feature::ApplyPatchStreamingEvents)
+-                .expect("enable apply_patch streaming events");
+-        })
+-    })
+-    .await?;
++    let harness = apply_patch_harness().await?;
+     let test = harness.test();
+     let codex = test.codex.clone();
+     let call_id = "apply-patch-streaming";
+diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
+index fdeae5c6f5..6d1e2ae18c 100644
+--- a/codex-rs/features/src/lib.rs
++++ b/codex-rs/features/src/lib.rs
+@@ -1120,8 +1120,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+     FeatureSpec {
+         id: Feature::ApplyPatchStreamingEvents,
+         key: "apply_patch_streaming_events",
+-        stage: Stage::UnderDevelopment,
+-        default_enabled: false,
++        stage: Stage::Stable,
++        default_enabled: true,
+     },
+     FeatureSpec {
+         id: Feature::ApplyPatchPreserveLineEndings,
+diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
+index 5ad5132a2e..6bde15c5e2 100644
+--- a/codex-rs/features/src/tests.rs
++++ b/codex-rs/features/src/tests.rs
+@@ -730,15 +730,12 @@ server_names = ["history", "notes"]
+ #[test]
+ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
+     let mut configured_features = Table::new();
+-    configured_features.insert(
+-        "apply_patch_streaming_events".to_string(),
+-        TomlValue::Boolean(true),
+-    );
++    configured_features.insert("artifact".to_string(), TomlValue::Boolean(true));
+     configured_features.insert("personality".to_string(), TomlValue::Boolean(true));
+     configured_features.insert("unknown".to_string(), TomlValue::Boolean(true));
+ 
+     let mut features = Features::with_defaults();
+-    features.enable(Feature::ApplyPatchStreamingEvents);
++    features.enable(Feature::Artifact);
+ 
+     let warning = unstable_features_warning_event(
+         Some(&configured_features),
+@@ -751,7 +748,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
+     let EventMsg::Warning(WarningEvent { message }) = warning.msg else {
+         panic!("expected warning event");
+     };
+-    assert!(message.contains("apply_patch_streaming_events"));
++    assert!(message.contains("artifact"));
+     assert!(!message.contains("personality"));
+     assert!(message.contains("/tmp/config.toml"));
+ }
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index d74f9afefb..e9536ed60f 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -82,8 +82,12 @@ impl ChatWidget {
+                                 .set_generation_stage(GenerationStage::Answering);
+                             self.refresh_status_line();
+                         }
++                        ThreadItem::FileChange { id, changes, .. } => {
++                            self.turn_throughput
++                                .begin_patch_apply(id, changes, Instant::now());
++                            self.refresh_status_line();
++                        }
+                         ThreadItem::CommandExecution { .. }
+-                        | ThreadItem::FileChange { .. }
+                         | ThreadItem::McpToolCall { .. }
+                         | ThreadItem::DynamicToolCall { .. }
+                         | ThreadItem::WebSearch { .. }
+@@ -97,6 +101,10 @@ impl ChatWidget {
+                 self.handle_item_started_notification(notification, replay_kind.is_some());
+             }
+             ServerNotification::ItemCompleted(notification) => {
++                if !from_replay && let ThreadItem::FileChange { id, .. } = &notification.item {
++                    self.turn_throughput.finish_patch_apply(id);
++                    self.refresh_status_line();
++                }
+                 self.handle_item_completed_notification(notification, replay_kind);
+             }
+             ServerNotification::AgentMessageDelta(notification) => {
+@@ -135,6 +143,16 @@ impl ChatWidget {
+             ServerNotification::FileChangeOutputDelta(notification) => {
+                 self.on_patch_apply_output_delta(notification.item_id, notification.delta);
+             }
++            ServerNotification::FileChangePatchUpdated(notification) => {
++                if !from_replay {
++                    self.turn_throughput.record_patch_progress(
++                        &notification.item_id,
++                        &notification.changes,
++                        Instant::now(),
++                    );
++                    self.refresh_status_line();
++                }
++            }
+             ServerNotification::TurnDiffUpdated(notification) => {
+                 self.on_turn_diff(notification.diff)
+             }
+@@ -268,7 +286,6 @@ impl ChatWidget {
+             | ServerNotification::ProcessOutputDelta(_)
+             | ServerNotification::ProcessExited(_)
+             | ServerNotification::McpServerEventStream(_)
+-            | ServerNotification::FileChangePatchUpdated(_)
+             | ServerNotification::McpToolCallProgress(_)
+             | ServerNotification::McpServerOauthLoginCompleted(_)
+             | ServerNotification::AppListUpdated(_)
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index 940ecdbf96..173c2d915d 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -413,6 +413,26 @@ impl ChatWidget {
+ 
+     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
+         if let Some(stage) = self.turn_throughput.generation_stage() {
++            if matches!(
++                stage,
++                GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
++            ) && let Some(progress) = self.turn_throughput.patch_progress()
++            {
++                let mut label = format!("{} {}", stage.label(), progress.target);
++                if progress.line_count > 0 {
++                    let unit = if progress.line_count == 1 {
++                        "line"
++                    } else {
++                        "lines"
++                    };
++                    label.push_str(&format!(" · {} {unit}", progress.line_count));
++                }
++                label.push_str(&format!(
++                    " · {}",
++                    format_latency(Instant::now().saturating_duration_since(progress.started_at))
++                ));
++                return Some(label);
++            }
+             return Some(stage.label().to_string());
+         }
+ 
+diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 40ef628ff6..b9918505a6 100644
+--- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
++++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+@@ -3063,6 +3063,72 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+     );
+ }
+ 
++#[tokio::test]
++async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
++    handle_turn_started(&mut chat, "turn-patch-progress");
++    handle_agent_message_delta(&mut chat, "I will add the page.");
++
++    let changes = vec![FileUpdateChange {
++        path: "src/pages/dashboard.rs".to_string(),
++        kind: PatchChangeKind::Add,
++        diff: "first\nsecond\nthird\n".to_string(),
++    }];
++    chat.handle_server_notification(
++        ServerNotification::FileChangePatchUpdated(
++            codex_app_server_protocol::FileChangePatchUpdatedNotification {
++                thread_id: "thread".to_string(),
++                turn_id: "turn-patch-progress".to_string(),
++                item_id: "patch-1".to_string(),
++                changes: changes.clone(),
++            },
++        ),
++        None,
++    );
++
++    let drafting = status_line_text(&chat).expect("drafting status");
++    assert!(
++        drafting.starts_with("Drafting src/pages/dashboard.rs · 3 lines · "),
++        "unexpected drafting status: {drafting}"
++    );
++
++    chat.handle_server_notification(
++        ServerNotification::ItemStarted(ItemStartedNotification {
++            thread_id: "thread".to_string(),
++            turn_id: "turn-patch-progress".to_string(),
++            item: AppServerThreadItem::FileChange {
++                id: "patch-1".to_string(),
++                changes: changes.clone(),
++                status: AppServerPatchApplyStatus::InProgress,
++            },
++            started_at_ms: 0,
++        }),
++        None,
++    );
++    assert!(
++        status_line_text(&chat).is_some_and(|status| {
++            status.starts_with("Applying src/pages/dashboard.rs · 3 lines · ")
++        }),
++        "patch application should replace the drafting stage"
++    );
++
++    chat.handle_server_notification(
++        ServerNotification::ItemCompleted(ItemCompletedNotification {
++            thread_id: "thread".to_string(),
++            turn_id: "turn-patch-progress".to_string(),
++            item: AppServerThreadItem::FileChange {
++                id: "patch-1".to_string(),
++                changes,
++                status: AppServerPatchApplyStatus::Completed,
++            },
++            completed_at_ms: 0,
++        }),
++        None,
++    );
++    assert_eq!(status_line_text(&chat), Some("Prefill".to_string()));
++}
++
+ #[tokio::test]
+ async fn status_line_legacy_context_usage_renders_context_used_percent() {
+     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+index b5cbd3a417..a80df0c9b6 100644
+--- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
++++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
+@@ -2,6 +2,7 @@ use std::collections::HashSet;
+ use std::time::Duration;
+ use std::time::Instant;
+ 
++use codex_app_server_protocol::FileUpdateChange;
+ use codex_app_server_protocol::MarathonResponseMetrics;
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -9,6 +10,8 @@ pub(super) enum GenerationStage {
+     Prefill,
+     Thinking,
+     Answering,
++    DraftingCode,
++    ApplyingChanges,
+ }
+ 
+ impl GenerationStage {
+@@ -17,10 +20,20 @@ impl GenerationStage {
+             Self::Prefill => "Prefill",
+             Self::Thinking => "Thinking",
+             Self::Answering => "Answering",
++            Self::DraftingCode => "Drafting",
++            Self::ApplyingChanges => "Applying",
+         }
+     }
+ }
+ 
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(super) struct PatchProgress {
++    pub(super) call_id: String,
++    pub(super) target: String,
++    pub(super) line_count: usize,
++    pub(super) started_at: Instant,
++}
++
+ #[derive(Clone, Copy, Debug, PartialEq)]
+ pub(super) struct ThroughputSample {
+     pub(super) tokens_per_second: f64,
+@@ -39,6 +52,7 @@ pub(super) struct TurnThroughput {
+     missing_timings: bool,
+     latest_sample: Option<ThroughputSample>,
+     generation_stage: Option<GenerationStage>,
++    patch_progress: Option<PatchProgress>,
+ }
+ 
+ impl TurnThroughput {
+@@ -107,6 +121,7 @@ impl TurnThroughput {
+             self.missing_timings = true;
+         }
+         self.generation_stage = None;
++        self.patch_progress = None;
+         self.turn_finished_at.get_or_insert(now);
+     }
+ 
+@@ -128,6 +143,72 @@ impl TurnThroughput {
+ 
+     pub(super) fn set_generation_stage(&mut self, generation_stage: GenerationStage) {
+         self.generation_stage = Some(generation_stage);
++        if !matches!(
++            generation_stage,
++            GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
++        ) {
++            self.patch_progress = None;
++        }
++    }
++
++    pub(super) fn record_patch_progress(
++        &mut self,
++        call_id: &str,
++        changes: &[FileUpdateChange],
++        now: Instant,
++    ) {
++        let started_at = self
++            .patch_progress
++            .as_ref()
++            .filter(|progress| progress.call_id == call_id)
++            .map_or(now, |progress| progress.started_at);
++        self.patch_progress = Some(PatchProgress {
++            call_id: call_id.to_string(),
++            target: patch_target(changes),
++            line_count: changes
++                .iter()
++                .map(|change| change.diff.lines().count())
++                .sum(),
++            started_at,
++        });
++        self.record_first_output(now);
++        self.generation_stage = Some(GenerationStage::DraftingCode);
++    }
++
++    pub(super) fn begin_patch_apply(
++        &mut self,
++        call_id: &str,
++        changes: &[FileUpdateChange],
++        now: Instant,
++    ) {
++        if self
++            .patch_progress
++            .as_ref()
++            .is_none_or(|progress| progress.call_id != call_id)
++        {
++            self.record_patch_progress(call_id, changes, now);
++        }
++        self.generation_stage = Some(GenerationStage::ApplyingChanges);
++    }
++
++    pub(super) fn finish_patch_apply(&mut self, call_id: &str) {
++        if self
++            .patch_progress
++            .as_ref()
++            .is_some_and(|progress| progress.call_id == call_id)
++        {
++            self.patch_progress = None;
++        }
++        if matches!(
++            self.generation_stage,
++            Some(GenerationStage::DraftingCode | GenerationStage::ApplyingChanges)
++        ) {
++            self.generation_stage = Some(GenerationStage::Prefill);
++        }
++    }
++
++    pub(super) fn patch_progress(&self) -> Option<&PatchProgress> {
++        self.patch_progress.as_ref()
+     }
+ 
+     pub(super) fn is_finished(&self) -> bool {
+@@ -149,6 +230,14 @@ impl TurnThroughput {
+     }
+ }
+ 
++fn patch_target(changes: &[FileUpdateChange]) -> String {
++    match changes {
++        [] => "code".to_string(),
++        [change] => change.path.clone(),
++        changes => format!("{} files", changes.len()),
++    }
++}
++
+ #[cfg(test)]
+ #[path = "turn_throughput_tests.rs"]
+ mod tests;
