@@ -258,14 +258,15 @@ This keeps context limits correct when `/model` switches between deployments wit
 
 The patched status line includes:
 
-- Live `Prefill`, `Thinking`, and `Answering` stages in the throughput position.
+- A stable animated `Working` state for the full active turn, including model and tool activity.
+- Elapsed turn time while work is active.
 - Stable completed-turn output tokens divided by active generation time.
 - Time to first activity, including prompt processing and queueing.
 - The active reasoning effort.
-- Context usage based on the backend's actual loaded window.
+- Compact used and loaded context based on the backend's actual loaded window.
 
 Tool execution time is excluded from completed-turn generation throughput.
-The live status shows only the current generation stage so rapidly arriving stream chunks do not make the footer flicker.
+The live status keeps one `Working` label for the entire turn so model and tool transitions do not make the footer flicker.
 First activity means the first nonempty text or reasoning delta, or a model tool-start event observed by the frontend.
 It is not a backend-only first-token measurement.
 Router completion traces separately record total request time, queue wait, first streamed activity, backend time, and slot preparation time.

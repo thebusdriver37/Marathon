@@ -65,7 +65,7 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-tui \
     context_percentage_uses_the_full_runtime_window
   just test -p codex-tui \
-    status_line_context_tokens_renders_live_context_count
+    status_line_context_tokens_renders_compact_usage_ratio
   just test -p codex-tui turn_throughput
   just test -p codex-tui --lib thread_title
   env -u NO_COLOR just test -p codex-tui --lib \
@@ -77,11 +77,11 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-tui \
     status_line_tokens_per_second_renders_completed_turn_rate_snapshot
   just test -p codex-tui \
-    status_line_tokens_per_second_tracks_generation_stage
+    status_line_keeps_one_working_state_across_generation_stages
   just test -p codex-tui \
-    active_generation_footer_schedules_continuous_animation_frames
+    active_turn_footer_schedules_continuous_animation_frames
   just test -p codex-tui \
-    status_line_shows_streaming_patch_progress_and_apply_lifecycle
+    status_line_stays_stable_during_streaming_patch_lifecycle
   just test -p codex-tui distinguishes_unset_from_disabled
   just test -p codex-tui ignores_sqlite_candidate_from_another_provider
   just test -p codex-state \

@@ -1717,7 +1717,7 @@ class FrontendTests(unittest.TestCase):
 
         self.assertIn(
             'tui.status_line=["model-with-reasoning", "tokens-per-second", '
-            '"context-remaining", "context-window-size", "context-tokens"]',
+            '"context-tokens"]',
             command,
         )
 
