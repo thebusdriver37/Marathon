@@ -3642,6 +3642,91 @@ context = 32768
         self.assertEqual(response["usage"]["output_tokens"], 1)
         self.assertEqual(state.http_client.headers, {})
 
+    def test_streamed_output_limit_message_is_working_commentary(self) -> None:
+        profile = fixture_profile(65_536)
+        message_id = "msg_truncated"
+        completed_message = {
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Applying all the changes in one",
+                }
+            ],
+        }
+
+        class Content:
+            async def iter_chunked(self, _size: int):
+                events = [
+                    {
+                        "type": "response.output_item.added",
+                        "item": {
+                            "id": message_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                        },
+                    },
+                    {
+                        "type": "response.output_text.delta",
+                        "item_id": message_id,
+                        "delta": "Applying all the changes in one",
+                    },
+                    {
+                        "type": "response.output_item.done",
+                        "item": completed_message,
+                    },
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_truncated",
+                            "usage": {"output_tokens": 8_192},
+                        },
+                    },
+                ]
+                for event in events:
+                    yield f"data: {json.dumps(event)}\n\n".encode()
+
+        class Response:
+            status = 200
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Client:
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+        state = object.__new__(router_module.RouterState)
+        state.http_client = Client()
+        streamed: list[dict[str, object]] = []
+
+        async def sink(event: dict[str, object]) -> bool:
+            streamed.append(event)
+            return True
+
+        response = asyncio.run(
+            state._request_responses_stream(
+                profile,
+                {"input": [], "tools": [], "max_output_tokens": 8_192},
+                event_sink=sink,
+            )
+        )
+
+        done = next(
+            event
+            for event in streamed
+            if event["type"] == "response.output_item.done"
+        )
+        self.assertEqual(done["item"]["phase"], "commentary")
+        self.assertEqual(response["output"][0]["phase"], "commentary")
+
     def test_truncated_backend_stream_is_not_accepted_as_empty_completion(self) -> None:
         profile = fixture_profile(65_536)
 
@@ -3835,7 +3920,7 @@ context = 32768
                 )
             )
 
-    def test_output_budget_stall_requires_no_actionable_output(self) -> None:
+    def test_output_budget_stall_requires_no_followup_work(self) -> None:
         stalled = {
             "usage": {"output_tokens": 8192},
             "output": [{"type": "reasoning"}],
@@ -3852,7 +3937,7 @@ context = 32768
                 8192,
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             router_module._response_stalled_at_output_limit(
                 stalled,
                 [
@@ -3949,11 +4034,83 @@ context = 32768
         self.assertEqual(response["usage"]["output_tokens"], 8_272)
         second_request = state._request_json.await_args_list[1].args[3]
         self.assertEqual(second_request["tool_choice"], "required")
+        self.assertEqual(second_request["max_output_tokens"], 4_096)
+        self.assertEqual(
+            second_request["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
         self.assertEqual(second_request["input"][-1]["role"], "user")
         self.assertEqual(items[-1]["name"], "exec_command")
         state.telemetry.emit.assert_called_once_with(
             "router.response.stalled_recovery",
             mock.ANY,
+            level="warning",
+        )
+
+    def test_output_limit_partial_message_recovers_with_required_tool_action(self) -> None:
+        profile = fixture_profile(65_536)
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        truncated = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Applying all the changes in one",
+                        }
+                    ],
+                }
+            ],
+            "usage": {"input_tokens": 10_000, "output_tokens": 8_192},
+        }
+        recovered = {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_1",
+                    "arguments": "{}",
+                }
+            ],
+            "usage": {"input_tokens": 10_500, "output_tokens": 80},
+        }
+        state._request_json = mock.AsyncMock(side_effect=[truncated, recovered])
+
+        response, items, _iterations = asyncio.run(
+            state._run_responses_loop(
+                profile=profile,
+                forward_request={
+                    "input": [],
+                    "tools": [{"type": "function", "name": "exec_command"}],
+                    "max_output_tokens": 8_192,
+                },
+                web_search_enabled=False,
+            )
+        )
+
+        self.assertEqual(response["output"], recovered["output"])
+        self.assertEqual(response["usage"]["output_tokens"], 8_272)
+        self.assertEqual(items[0]["phase"], "commentary")
+        self.assertEqual(items[-1]["name"], "exec_command")
+        retry = state._request_json.await_args_list[1].args[3]
+        self.assertEqual(retry["tool_choice"], "required")
+        self.assertEqual(retry["max_output_tokens"], 4_096)
+        self.assertEqual(
+            retry["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
+        state.telemetry.emit.assert_called_once_with(
+            "router.response.stalled_recovery",
+            {
+                "attempt": 1,
+                "reason": "output_limit",
+                "output_tokens": 8_192,
+                "available_tools": 1,
+            },
             level="warning",
         )
 

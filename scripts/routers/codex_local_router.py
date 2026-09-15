@@ -1083,7 +1083,7 @@ def _response_stalled_at_output_limit(
     output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
     if not isinstance(output_tokens, int) or output_tokens < output_limit:
         return False
-    return not _response_has_actionable_output(items)
+    return not any(_starts_followup_work(item) for item in items)
 
 
 def _response_has_actionable_output(items: list[dict[str, Any]]) -> bool:
@@ -1106,8 +1106,8 @@ def _stalled_recovery_message() -> dict[str, Any]:
             {
                 "type": "input_text",
                 "text": (
-                    "Your previous response reached the generation budget without "
-                    "producing a message or tool call. Do not continue internal "
+                    "Your previous response reached the generation budget before "
+                    "completing the requested work. Do not continue internal "
                     "analysis. Use one available tool now to make concrete progress; "
                     "split large edits into smaller tool calls."
                 ),
@@ -1131,9 +1131,9 @@ def _stalled_final_response_recovery_message(
             {
                 "type": "input_text",
                 "text": (
-                    "Your previous response ended without producing an assistant "
-                    f"message. Do not continue internal analysis. Return {requested_output} "
-                    "now, concisely enough to finish within the generation budget."
+                    "Your previous response reached the generation budget before "
+                    f"completing {requested_output}. Do not continue internal analysis. "
+                    "Finish it now, concisely enough to stay within the generation budget."
                 ),
             }
         ],
@@ -3307,8 +3307,22 @@ class RouterState:
                     continue
 
                 if event_type == "response.completed":
-                    await flush_pending_message(_completed_message_phase(output_items))
                     response_payload = event.get("response")
+                    message_phase = _completed_message_phase(output_items)
+                    if isinstance(response_payload, dict):
+                        prospective_items = list(output_items)
+                        if pending_message_done is not None:
+                            pending_item = pending_message_done.get("item")
+                            if isinstance(pending_item, dict):
+                                prospective_items.append(pending_item)
+                        output_limit = request.get("max_output_tokens")
+                        if isinstance(output_limit, int) and _response_stalled_at_output_limit(
+                            response_payload,
+                            prospective_items,
+                            output_limit,
+                        ):
+                            message_phase = "commentary"
+                    await flush_pending_message(message_phase)
                     if isinstance(response_payload, dict):
                         completed_response = copy.deepcopy(response_payload)
                         if isinstance(event.get("timings"), dict):
@@ -4970,11 +4984,37 @@ class RouterState:
                         event_sink=event_sink,
                     )
                 accounting.add(response)
-                if finalizing and not _web_final_response_has_answer(response):
+                finalization_hit_output_limit = _response_stalled_at_output_limit(
+                    response,
+                    [
+                        item
+                        for item in response.get("output", [])
+                        if isinstance(item, dict)
+                    ],
+                    attempt_output_limit,
+                )
+                if finalizing and (
+                    not _web_final_response_has_answer(response)
+                    or finalization_hit_output_limit
+                ):
                     if finalization_recoveries:
-                        raise RuntimeError("Research budget exhausted and the model did not produce an answer after a finalization retry.")
+                        raise RuntimeError(
+                            "Research budget exhausted and the model did not produce "
+                            "an answer after a finalization retry."
+                        )
                     finalization_recoveries += 1
-                    self.telemetry.emit("router.web_tool.finalization_recovery", {"attempt": 1}, level="warning")
+                    self.telemetry.emit(
+                        "router.web_tool.finalization_recovery",
+                        {
+                            "attempt": 1,
+                            "reason": (
+                                "output_limit"
+                                if finalization_hit_output_limit
+                                else "missing_answer"
+                            ),
+                        },
+                        level="warning",
+                    )
                     request = copy.deepcopy(request)
                     request["tools"] = []
                     request["instructions"] = (request.get("instructions") or "") + (
@@ -5033,6 +5073,16 @@ class RouterState:
                 item for item in iter_items if not _is_droppable_commentary_message(item)
             ]
             pending_calls = collect_managed_calls(iter_items)
+            has_actionable_output = _response_has_actionable_output(iter_items)
+            stalled_at_output_limit = _response_stalled_at_output_limit(
+                response,
+                iter_items,
+                attempt_output_limit,
+            )
+            if stalled_at_output_limit:
+                for item in iter_items:
+                    if _is_assistant_message_item(item):
+                        item["phase"] = "commentary"
             if _codex_request_kind(request) == "compaction":
                 if any(_starts_followup_work(item) for item in iter_items):
                     raise RuntimeError("tools are disabled during compaction")
@@ -5061,7 +5111,11 @@ class RouterState:
                     }]
                     request["tool_choice"] = "none"
                     continue
-                if event_sink is not None and _response_has_actionable_output(iter_items):
+                if (
+                    event_sink is not None
+                    and has_actionable_output
+                    and not stalled_at_output_limit
+                ):
                     for item in externalize_for_codex(copy.deepcopy(iter_items)):
                         if not await event_sink({"type": "response.output_item.done", "item": item}):
                             raise ConnectionError("websocket client disconnected")
@@ -5079,15 +5133,15 @@ class RouterState:
                             raise ConnectionError("websocket client disconnected")
                 break
 
-            has_actionable_output = _response_has_actionable_output(iter_items)
-            stalled_at_output_limit = _response_stalled_at_output_limit(
-                response,
-                iter_items,
-                attempt_output_limit,
+            needs_stalled_recovery = (
+                not has_actionable_output or stalled_at_output_limit
             )
-            if not has_actionable_output and stalled_recoveries < max_stalled_recoveries:
+            if needs_stalled_recovery and stalled_recoveries < max_stalled_recoveries:
                 stalled_recoveries += 1
-                tools_available = bool(request.get("tools")) and _codex_request_kind(request) != "compaction"
+                tools_available = (
+                    bool(request.get("tools"))
+                    and _codex_request_kind(request) != "compaction"
+                )
                 usage = response.get("usage")
                 output_tokens = (
                     usage.get("output_tokens") if isinstance(usage, dict) else None
@@ -5116,34 +5170,34 @@ class RouterState:
                 ]
                 request["input"] = list(request.get("input") or []) + recovery_items
                 request_suffix.extend(copy.deepcopy(recovery_items))
+                template_kwargs = request.get("chat_template_kwargs")
+                template_kwargs = (
+                    copy.deepcopy(template_kwargs)
+                    if isinstance(template_kwargs, dict)
+                    else {}
+                )
+                template_kwargs.pop("reasoning_effort", None)
+                template_kwargs["enable_thinking"] = False
+                request["chat_template_kwargs"] = template_kwargs
                 if tools_available:
                     request["tool_choice"] = "required"
+                    request["max_output_tokens"] = min(attempt_output_limit, 4_096)
                 else:
                     if request.get("tools"):
                         request["tool_choice"] = "none"
                     else:
                         request.pop("tool_choice", None)
-                    template_kwargs = request.get("chat_template_kwargs")
-                    template_kwargs = (
-                        copy.deepcopy(template_kwargs)
-                        if isinstance(template_kwargs, dict)
-                        else {}
-                    )
-                    template_kwargs.pop("reasoning_effort", None)
-                    template_kwargs["enable_thinking"] = False
-                    request["chat_template_kwargs"] = template_kwargs
                 persist_progress()
                 continue
 
-            if not has_actionable_output:
-                reason = (
-                    "after reaching the output-token limit"
-                    if stalled_at_output_limit
-                    else "with no usable output"
-                )
+            if needs_stalled_recovery:
+                if stalled_at_output_limit:
+                    raise RuntimeError(
+                        "backend response reached the output-token limit before "
+                        "completing an assistant response or tool call"
+                    )
                 raise RuntimeError(
-                    "backend response completed without an assistant message or tool call "
-                    f"{reason}"
+                    "backend response completed without an assistant message or tool call"
                 )
 
             if not web_search_enabled:
