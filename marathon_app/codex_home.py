@@ -41,6 +41,7 @@ LOCAL_CONFIG = {
         "tool_suggest": False, "recommended_plugins": False,
         "hooks": False, "plugin_hooks": False,
     },
+    "tools": {"update_plan": {"enabled": True}},
 }
 
 

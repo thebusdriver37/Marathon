@@ -36,6 +36,12 @@ class SharedProfileTests(unittest.TestCase):
             source.write_text('')
             self.assertEqual(tomllib.loads(_shared_profile_text(source)), LOCAL_CONFIG)
 
+    def test_generated_profile_enables_update_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'config.toml'
+            parsed = tomllib.loads(_shared_profile_text(source))
+            self.assertTrue(parsed['tools']['update_plan']['enabled'])
+
     def test_project_tables_round_trip_and_root_settings_keep_their_scope(self):
         for projects in ({'/home/david': PROJECTS['/home/david']}, PROJECTS):
             with self.subTest(projects=projects), tempfile.TemporaryDirectory() as directory:
