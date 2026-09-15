@@ -79,6 +79,8 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-tui \
     status_line_tokens_per_second_tracks_generation_stage
   just test -p codex-tui \
+    active_generation_footer_schedules_continuous_animation_frames
+  just test -p codex-tui \
     status_line_shows_streaming_patch_progress_and_apply_lifecycle
   just test -p codex-tui distinguishes_unset_from_disabled
   just test -p codex-tui ignores_sqlite_candidate_from_another_provider
