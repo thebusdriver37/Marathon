@@ -1,0 +1,804 @@
+{
+  "candidates": [
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909-budget4096/davidau/slots/qwen3.8-27b-iq4-xs/conversation__a27a5b95b25e0bed2a72d31e20091cdec9dda34ccd21fd7793e44a5e2057a034.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1297478280,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__a27a5b95b25e0bed2a72d31e20091cdec9dda34ccd21fd7793e44a5e2057a034.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909-budget4096/davidau/slots/qwen3.8-27b-iq4-xs/starter__qwen3.8-27b-iq4-xs__5573535fc6227a3d07d8e8f15fc5816f468e24cef7d3a65a63a49a0536ea0bab.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 374572492,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/starter__qwen3.8-27b-iq4-xs__5573535fc6227a3d07d8e8f15fc5816f468e24cef7d3a65a63a49a0536ea0bab.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909-budget4096/davidau/slots/qwen3.8-27b-iq4-xs/conversation__a27a5b95b25e0bed2a72d31e20091cdec9dda34ccd21fd7793e44a5e2057a034.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1691367268,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__a27a5b95b25e0bed2a72d31e20091cdec9dda34ccd21fd7793e44a5e2057a034.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-temperature06-20260910/davidau/slots/qwen3.8-27b-iq4-xs/conversation__94ba4a7789fb0878961e07560b1dd8562deed528616dfc6ee686a18544a42ebe.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1069229024,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__94ba4a7789fb0878961e07560b1dd8562deed528616dfc6ee686a18544a42ebe.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-temperature06-20260910/davidau/slots/qwen3.8-27b-iq4-xs/conversation__94ba4a7789fb0878961e07560b1dd8562deed528616dfc6ee686a18544a42ebe.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 756525180,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__94ba4a7789fb0878961e07560b1dd8562deed528616dfc6ee686a18544a42ebe.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909/davidau/slots/qwen3.8-27b-iq4-xs/conversation__79347a0653917f0061807941c1430a48a9719ce37feb4a760e08555d8fc05098.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 2011400244,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__79347a0653917f0061807941c1430a48a9719ce37feb4a760e08555d8fc05098.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909/davidau/slots/qwen3.8-27b-iq4-xs/starter__qwen3.8-27b-iq4-xs__5573535fc6227a3d07d8e8f15fc5816f468e24cef7d3a65a63a49a0536ea0bab.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 374572492,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/starter__qwen3.2.8-27b-iq4-xs__5573535fc6227a3d07d8e8f15fc5816f468e24cef7d3a65a63a49a0536ea0bab.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909/davidau/slots/qwen3.8-27b-iq4-xs/conversation__abea327c359c3bff0e1e71a777b6877717f124a4f5b306dfe75b7966ffe04805.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1083437036,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__abea327c359c3bff0e1e71a777b6877717f124a4f5b306dfe75b7966ffe04805.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__65aace3c334dd309e7656933baa8ef0d1173b05d9fb1b7a5f7ac29445c902a31.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1181287000,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__65aace3c334dd309e7656933baa8ef0d1173b05d9fb1b7a5f7ac29445c902a31.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__b32ee5df37d2bdf406fc40572a41d84f5550ccb54d064e0b3166f7c28b887504.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 800707372,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__b32ee5df37d2bdf406fc40572a41d84f5550ccb54d064e0b3166f7c28b887504.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__7af7acc07130790166534ad6da93b25a1ee392b1b72f0a4dbbfced9dfedc3cb7.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 939734932,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__7af7acc07130790166534ad6da93b25a1ee392b1b72f0a4dbbfced9dfedc3cb7.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__e748297206e3eb49ac3955f2c56fd2bca078f4dd14616568849fd59f618d9589.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1012540908,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__e748297206e3eb49ac3955f2c56fd2bca078f4dd14616568849fd59f618d9589.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__32f44c275f32b27f5346ad8d37c231d4b5945d423d4856dd563a4c697097e6ff.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 762727412,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__32f44c275f32b27f5346ad8d37c231d4b5945d423d4856dd563a4c697097e6ff.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__b32ee5df37d2bdf406fc40572a41d84f5550ccb54d064e0b3166f7c28b887504.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 843774856,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__b32ee5df37d2bdf406fc40572a41d84f5550ccb54d064e0b3166f7c28b887504.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__e748297206e3eb49ac3955f2c56fd2bca078f4dd14616568849fd59f618d9589.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1026078364,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__e748297206e3eb49ac3955f2c56fd2bca078f4dd14616568849fd59f618d9589.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__9150b64d7c4e3b437629851413b1ceb53313db494d94cd667e390301093b500b.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1181296696,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__9150b64d7c4e3b437629851413b1ceb53313db494d94cd667e390301093b500b.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/starter__qwen3.8-27b-iq4-xs__38dc2f5a960d3147aa272799c1900c66472f2d97c281b2851d01f1039568f26d.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 337510428,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/starter__qwen3.8-27b-iq4-xs__38dc2f5a960d3147aa272799c1900c66472f2d97c281b2851d01f1039568f26d.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__be7429ef8e0b2f5a645ce257af0251d8422c6414afa4ff0d4cf402bf07713a84.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 743249616,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__be7429ef8e0b2f5a645ce257af0251d8422c6414afa4ff0d4cf402bf07713a84.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__4414242ac45e3f4e554c51d776cefe2bc7f908cc3e1094173ef7e4664da95896.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 859071072,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__4414242ac45e3f4e554c51d776cefe2bc7f908cc3e1094173ef7e4664da95896.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__3a6d7c04e371e07aaf04ac0b76aba9209439af74bb01a03710dba1ee17fa858e.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1718463488,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__3a6d7c04e371e07aaf04ac0b76aba9209439af74bb01a03710dba1ee17fa858e.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__3a6d7c04e371e07aaf04ac0b76aba9209439af74bb01a03710dba1ee17fa858e.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1687581112,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__3a6d7c04e371e07aaf04ac0b76aba9209439af74bb01a03710dba1ee17fa858e.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__4414242ac45e3f4e554c51d776cefe2bc7f908cc3e1094173ef7e4664da95896.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 843781556,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__4414242ac45e3f4e554c51d776cefe2bc7f908cc3e1094173ef7e4664da95896.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__be7429ef8e0b2f5a645ce257af0251d8422c6414afa4ff0d4cf402bf07713a84.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 675028080,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__be7429ef8e0b2f5a645ce257af0251d8422c6414afa4ff0d4cf402bf07713a84.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__32b7bbe73bf3093e655baeb68690200dd15724f5be76b0c87ba4ef68843393fe.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 843792080,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__32b7bbe73bf3093e655baeb68690200dd15724f5be76b0c87ba4ef68843393fe.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/starter__qwen3.8-27b-iq4-xs__38dc2f5a960d3147aa272799c1900c66472f2d97c281b2851d01f1039568f26d.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 418399004,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/starter__qwen3.8-27b-iq4-xs__38dc2f5a960d3147aa272799c1900c66472f2d97c281b2851d01f1039568f26d.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__7af7acc07130790166534ad6da93b25a1ee392b1b72f0a4dbbfced9dfedc3cb7.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1012530996,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__7af7acc07130790166534ad6da93b25a1ee392b1b72f0a4dbbfced9dfedc3cb7.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__9150b64d7c4e3b437629851413b1ceb53313db494d94cd667e390301093b500b.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1162039652,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__9150b64d7c4e3b437629851413b1ceb53313db494d94cd667e390301093b500b.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__32b7bbe73bf3093e655baeb68690200dd15724f5be76b0c87ba4ef68843393fe.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 950745636,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__32b7bbe73bf3093e655baeb68690200dd15724f5be76b0c87ba4ef68843393fe.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__65aace3c334dd309e7656933baa8ef0d1173b05d9fb1b7a5f7ac29445c902a31.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1077577796,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__65aace3c334dd309e7656933baa8ef0d1173b05d9fb1b7a5f7ac29445c902a31.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/gsq-rco-iq3s-marathon-20260910/gsq/slots/qwen3.8-27b-iq4-xs/conversation__32f44c275f32b27f5346ad8d37c231d4b5945d423d4856dd563a4c697097e6ff.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 843770496,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__32f44c275f32b27f5346ad8d37c231d4b5945d423d4856dd563a4c697097e6ff.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909-repeat/davidau/slots/qwen3.8-27b-iq4-xs/conversation__6158ed06bce1f59d7d5d421602651c64a893ab0247148322fd9e5cbaa04e224d.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1096570832,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__6158ed06bce1f59d7d5d421602651c64a893ab0247148322fd9e5cbaa04e224d.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909-repeat/davidau/slots/qwen3.8-27b-iq4-xs/starter__qwen3.8-27b-iq4-xs__5573535fc6227a3d07d8e8f15fc5816f468e24cef7d3a65a63a49a0536ea0bab.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 374572492,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/starter__qwen3.3.8-27b-iq4-xs__5573535fc6227a3d07d8e8f15fc5816f468e24cef7d3a65a63a49a0536ea0bab.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909-repeat/davidau/slots/qwen3.8-27b-iq4-xs/conversation__be98abea64f3fe81a4f05025937e6eb64c24892a4fc7c311f92e71ef33fdebe9.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 2409199796,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__be98abea64f3fe81a4f05025937e6eb64c24892a4fc7c311f92e71ef33fdebe9.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909-repeat/davidau/slots/qwen3.8-27b-iq4-xs/conversation__e45e4108f5281e9ea728529d35a610fceeab74c77900d069a3231eb82c460aee.bin.checkpoints",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 844994004,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__e45e4108f5281e9ea728529d35a610fceeab74c77900d069a3231eb82c460aee.bin.checkpoints"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/gpu-control/benchmarks/results/marathon-e2e-20260909-repeat/davidau/slots/qwen3.8-27b-iq4-xs/conversation__be98abea64f3fe81a4f05025937e6eb64c24892a4fc7c311f92e71ef33fdebe9.bin",
+      "reason": "Historical benchmark inference state; results and cache metadata retained",
+      "bytes": 1937771624,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/conversation__be98abea64f3fe81a4f05025937e6eb64c24892a4fc7c311f92e71ef33fdebe9.bin"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/1-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.2"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/1-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.3"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/2-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.4"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/2-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.5"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/3-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.6"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/3-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.7"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/4-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.8"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/4-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.9"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/5-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.10"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/5-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.11"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/6-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.12"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/6-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.13"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/7-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.14"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/7-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.15"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/initial-probes/0-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.16"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/0-analytics-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.17"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/0-architecture-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.18"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/0-frontend-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.19"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/1-analytics-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.20"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/1-architecture-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.21"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/1-frontend-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.22"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/2-analytics-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.23"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/2-architecture-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.24"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/2-frontend-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.25"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/3-analytics-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.26"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/3-architecture-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.27"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-spectrum-20260915/3-frontend-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.28"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-deterministic-agent/0-precedence-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.29"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-deterministic-agent/0-ttl_cache-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.30"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-deterministic-agent/1-precedence-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.31"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-deterministic-agent/1-ttl_cache-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.32"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-deterministic-agent/2-precedence-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.33"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-deterministic-agent/2-ttl_cache-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.34"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-deterministic-agent/3-precedence-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.35"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-deterministic-agent/3-ttl_cache-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.36"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent/0-ledger-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.37"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent/0-patch-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.38"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent/0-precedence-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.39"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent/0-ttl_cache-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.40"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent/1-ledger-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.41"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent/1-patch-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.42"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent/1-precedence-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.43"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent/1-ttl_cache-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.44"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent-repeat/0-ledger-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.45"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent-repeat/0-patch-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.46"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent-repeat/0-precedence-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.47"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent-repeat/0-ttl_cache-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.48"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent-repeat/1-ledger-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.49"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent-repeat/1-patch-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.50"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent-repeat/1-precedence-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.51"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/agent-r32-final-agent-repeat/1-ttl_cache-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.52"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/dpace-240-agent/0-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.53"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/dpace-240-agent/0-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.54"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/dpace-240-agent/1-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.55"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/dpace-240-agent/2-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.56"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/dpace-240-agent/2-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.57"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/dpace-240-agent/3-recovery-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.58"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/dpace-240-agent/3-retry-agent/home/.tmp/plugins",
+      "reason": "Clean duplicate plugin checkout",
+      "revision": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+      "retained_copy": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins",
+      "bytes": 102076416,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/plugins.59"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/llama.cpp-mtp-build",
+      "reason": "Unused experimental compiled build; source retained and build configuration archived",
+      "bytes": 427507712,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/llama.cpp-mtp-build"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/llama.cpp-next-build",
+      "reason": "Unused experimental compiled build; source retained and build configuration archived",
+      "bytes": 423735296,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/llama.cpp-next-build"
+    },
+    {
+      "path": "/home/deforest/Documents/DEV/Marathon/.marathon/llama.cpp-checkpoint-opt-build",
+      "reason": "Unused experimental compiled build; source retained and build configuration archived",
+      "bytes": 117538816,
+      "status": "trashed",
+      "trash_path": "/home/deforest/.local/share/Trash/files/llama.cpp-checkpoint-opt-build"
+    }
+  ],
+  "retained_plugin_copies": {
+    "1dc195897af4161d039b80d8471ec0a10c9bbc89": "/home/deforest/Documents/DEV/Marathon/.marathon/diagnostics/config-comparison-20260915/0-recovery-agent/home/.tmp/plugins"
+  }
+}

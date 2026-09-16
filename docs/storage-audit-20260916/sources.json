@@ -1,0 +1,166 @@
+[
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched.patch",
+    "untracked": [
+      "codex-rs/core/src/config/local_runtime.rs",
+      "codex-rs/core/src/config/local_runtime_tests.rs",
+      "codex-rs/http-client/src/local_runtime.rs",
+      "codex-rs/http-client/src/local_runtime_tests.rs",
+      "codex-rs/tui/src/chatwidget/.rendering_tests.rs.pending-snap"
+    ]
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-0.151.0",
+    "revision": "78c290807ce710180111df227df3b7a4fe845452",
+    "patch": "codex-patched-0.151.0.patch",
+    "untracked": [
+      "codex-rs/app-server-protocol/schema/typescript/v2/MarathonResponseMetrics.ts",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap",
+      "codex-rs/tui/src/chatwidget/turn_throughput.rs",
+      "codex-rs/tui/src/chatwidget/turn_throughput_tests.rs"
+    ]
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-1db5d84e88be7e32db5ec5e6cc6658cfb90b9e36",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-1db5d84e88be7e32db5ec5e6cc6658cfb90b9e36.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-294e97e11f71f05abf1c40366ea875b195e3c22e",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-294e97e11f71f05abf1c40366ea875b195e3c22e.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-2d332904059926b27acc1101ad18689363056365",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-2d332904059926b27acc1101ad18689363056365.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-7fee98f4a9e9eaed13e763c8e799a6b11536cb2a",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-7fee98f4a9e9eaed13e763c8e799a6b11536cb2a.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-9e7ee7fcc031bbd9f59050c7f53bacccb5b9c597",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-9e7ee7fcc031bbd9f59050c7f53bacccb5b9c597.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-a1c0b95d8f877ba9befe1bc36b177f80be386734",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-a1c0b95d8f877ba9befe1bc36b177f80be386734.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-abff9cad1e886e4ccdd9ec4ffef402137b562e8e",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-abff9cad1e886e4ccdd9ec4ffef402137b562e8e.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-c3be6d432be4084ce343818c7bc6b9bdf26ca13a",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-c3be6d432be4084ce343818c7bc6b9bdf26ca13a.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-ee8da3f9634302017685a5f7e12d9f5255bb4e01",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-ee8da3f9634302017685a5f7e12d9f5255bb4e01.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-motion-final",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-motion-final.patch",
+    "untracked": [
+      "codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__active_reconnect__restored_conversation.snap.new",
+      "codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__disconnect__offline_draft.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__chatwidget_tall.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__compact_queues_user_messages_snapshot.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__completed_turn_clears_visible_running_hook.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__esc_interrupt_goal_paused_footer.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_goal_continuation_drops_stale_reviews.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_parallel_reviews_render_aggregate_status.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__guardian_write_stdin_review_status.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__hidden_shell_paste_queued_preview.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__image_generation_begin_restores_working_status.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__interrupted_turn_clears_visible_running_hook.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__overlapping_hook_live_cell_snapshot.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__preamble_keeps_working_status.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__reasoning_delta_restores_recreated_status_indicator.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__review_queues_user_messages_snapshot.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__running_hooks_share_background_activity_row.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_final_answer_hides_working_status.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_widget_active.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_begin_restores_working_status.snap.new",
+      "codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__unified_exec_wait_status_renders_command_in_single_details_row.snap.new",
+      "codex-rs/tui/src/custom_terminal/tests/snapshots/codex_tui__custom_terminal__tests__cursor__cursor_style_owned_wide_frames.snap.new",
+      "codex-rs/tui/src/custom_terminal/tests/snapshots/codex_tui__custom_terminal__tests__cursor__cursor_style_single_column_frames.snap.new",
+      "codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__pnpm_update_available_history_cell_snapshot.snap.new",
+      "codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__standalone_unix_update_available_history_cell_snapshot.snap.new",
+      "codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__standalone_windows_update_available_history_cell_snapshot.snap.new",
+      "codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__vite_plus_update_available_history_cell_snapshot.snap.new"
+    ]
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-motion-test",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-motion-test.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/codex-patched-motion-test2",
+    "revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "patch": "codex-patched-motion-test2.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/llama.cpp-checkpoint-opt-source",
+    "revision": "ca461b488709b74fb7a59211fa4c75b8643e5601",
+    "patch": "llama.cpp-checkpoint-opt-source.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/llama.cpp-iq4-xs-source",
+    "revision": "ca461b488709b74fb7a59211fa4c75b8643e5601",
+    "patch": "llama.cpp-iq4-xs-source.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/llama.cpp-mtp-source",
+    "revision": "e7b4848151377395b1693d326d1cda3fcd61c2d9",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/llama.cpp-next-src",
+    "revision": "bbeb89d76c41bc250f16e4a6fefcc9b530d6e3f3",
+    "untracked": [
+      ".marathon/llama.cpp-next-patched/"
+    ]
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/llama.cpp-patched",
+    "revision": "39fb81f8756208d79dd12ad89359f3b31675e20d",
+    "patch": "llama.cpp-patched.patch",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/qwen38-base-972",
+    "revision": "9723942adc518b43c4b95dc4dce6906903eb5e09",
+    "untracked": []
+  },
+  {
+    "path": "/home/deforest/Documents/DEV/Marathon/.marathon/qwen38-patched-check",
+    "revision": "9723942adc518b43c4b95dc4dce6906903eb5e09",
+    "patch": "qwen38-patched-check.patch",
+    "untracked": []
+  }
+]

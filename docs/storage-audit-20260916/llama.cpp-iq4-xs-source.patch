@@ -1,0 +1,140 @@
+diff --git a/ggml/src/ggml-cuda/fattn-mma-f16.cuh b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+index 4fe2cb5de..0307ccd1b 100644
+--- a/ggml/src/ggml-cuda/fattn-mma-f16.cuh
++++ b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+@@ -619,9 +619,12 @@ static __device__ __forceinline__ void flash_attn_ext_load_tile_V_q8_0(
+             __hmul2(make_half2(q8[0], q8[1]), d2),
+             __hmul2(make_half2(q8[2], q8[3]), d2),
+         };
+-        char * const dst = swz ?
+-            (char *) tile_V + ggml_cuda_fattn_smem_swizzle::bytes_rc<stride_tile>(i, 2*kq) :
+-            (char *) (tile_V + i*stride_tile + 2*kq);
++        char * dst;
++        if constexpr (swz) {
++            dst = (char *) tile_V + ggml_cuda_fattn_smem_swizzle::bytes_rc<stride_tile>(i, 2*kq);
++        } else {
++            dst = (char *) (tile_V + i*stride_tile + 2*kq);
++        }
+         ggml_cuda_memcpy_1<sizeof(values)>(dst, values);
+     }
+ #else
+@@ -2270,30 +2273,35 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
+ #endif // defined(GGML_USE_HIP)
+     fattn_kernel_t fattn_kernel;
+     bool use_q8_K = false;
++    bool use_q8_V = false;
+     if constexpr (DKQ == 256 && DV == 256 && !V_is_K_view) {
++        static const bool short_q8_V = getenv("GGML_CUDA_Q8_V_SHORT") != nullptr;
+         constexpr int64_t q8_K_min_context = 16384;
+         use_q8_K = cc == 860 && KQV->src[1]->type == GGML_TYPE_Q8_0 && KQV->src[2]->type == GGML_TYPE_Q8_0 &&
+             KQV->src[1]->ne[1] >= q8_K_min_context;
++        use_q8_V = (use_q8_K || short_q8_V) && cc == 860 && KQV->src[1]->type == GGML_TYPE_Q8_0 && KQV->src[2]->type == GGML_TYPE_Q8_0 &&
++            KQV->src[0]->ne[1] <= 64;
+     }
+     // DFlash verifies at most seven tokens. Keep other small decode batches
+     // on the same direct path, while 256-row prefill ubatches stage V once
+     // instead of repeating inline dequantization for every query tile.
+-    const bool use_q8_V = use_q8_K && KQV->src[0]->ne[1] <= 64;
+     if (logit_softcap == 0.0f) {
+         constexpr bool use_logit_softcap = false;
+         if constexpr (DKQ == 256 && DV == 256 && !V_is_K_view) {
+-            fattn_kernel = use_q8_V ?
+-                flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, true, true> :
+-                use_q8_K ?
+-                flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, true, false> :
+-                flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, false, false>;
++            fattn_kernel = use_q8_K ?
++                (use_q8_V ?
++                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, true, true> :
++                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, true, false>) :
++                (use_q8_V ?
++                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, false, true> :
++                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, false, false>);
+         } else {
+             fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, false, false>;
+         }
+ 
+ #if !defined(GGML_USE_MUSA)
+-        const int q8_mode = int(use_q8_K) + int(use_q8_V);
+-        static bool shared_memory_limit_raised[3][GGML_CUDA_MAX_DEVICES] = {{false}};
++        const int q8_mode = 2*int(use_q8_K) + int(use_q8_V);
++        static bool shared_memory_limit_raised[4][GGML_CUDA_MAX_DEVICES] = {{false}};
+         if (!shared_memory_limit_raised[q8_mode][id]) {
+             CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared_total));
+             shared_memory_limit_raised[q8_mode][id] = true;
+@@ -2302,18 +2310,20 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
+     } else {
+         constexpr bool use_logit_softcap = true;
+         if constexpr (DKQ == 256 && DV == 256 && !V_is_K_view) {
+-            fattn_kernel = use_q8_V ?
+-                flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, true, true> :
+-                use_q8_K ?
+-                flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, true, false> :
+-                flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, false, false>;
++            fattn_kernel = use_q8_K ?
++                (use_q8_V ?
++                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, true, true> :
++                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, true, false>) :
++                (use_q8_V ?
++                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, false, true> :
++                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, false, false>);
+         } else {
+             fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, false, false>;
+         }
+ 
+ #if !defined(GGML_USE_MUSA)
+-        const int q8_mode = int(use_q8_K) + int(use_q8_V);
+-        static bool shared_memory_limit_raised[3][GGML_CUDA_MAX_DEVICES] = {{false}};
++        const int q8_mode = 2*int(use_q8_K) + int(use_q8_V);
++        static bool shared_memory_limit_raised[4][GGML_CUDA_MAX_DEVICES] = {{false}};
+         if (!shared_memory_limit_raised[q8_mode][id]) {
+             CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared_total));
+             shared_memory_limit_raised[q8_mode][id] = true;
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index c978b4421..22ce589b8 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -1407,6 +1407,18 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
+     CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, J, false>), nbytes_shared);
+     CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, J,  true>), nbytes_shared);
+ 
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++    if constexpr ((type == GGML_TYPE_IQ4_XS || type == GGML_TYPE_Q4_K ||
++                   type == GGML_TYPE_Q5_K || type == GGML_TYPE_Q6_K) && (J == 8 || J == 64)) {
++        static bool cache_preference_set[GGML_CUDA_MAX_DEVICES] = { false };
++        if (!cache_preference_set[id]) {
++            CUDA_CHECK(cudaFuncSetCacheConfig((mul_mat_q<type, J, false>), cudaFuncCachePreferL1));
++            CUDA_CHECK(cudaFuncSetCacheConfig((mul_mat_q<type, J,  true>), cudaFuncCachePreferL1));
++            cache_preference_set[id] = true;
++        }
++    }
++#endif
++
+     const int nty  = (args.nrows_x   + config.I - 1) / config.I;
+     const int ntx  = (args.ncols_max + config.J - 1) / config.J;
+     const int ntzw = args.nchannels_y * args.nsamples_y;
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 49c24b608..391ec1a9f 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -599,10 +599,16 @@ void llama_context::sched_reserve() {
+ 
+     LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
+ 
+-    gf_res_prev.reset(new llm_graph_result(max_nodes));
+-    gf_res_reserve.reset(new llm_graph_result(max_nodes));
+-
+-    sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
++    static const bool reuse_scheduler = getenv("LLAMA_REUSE_SCHEDULER") != nullptr;
++    if (reuse_scheduler && sched && gf_res_prev && gf_res_prev->get_max_nodes() == (int64_t) max_nodes) {
++        ggml_backend_sched_reset(sched.get());
++        gf_res_prev->reset();
++        gf_res_reserve->reset();
++    } else {
++        gf_res_prev.reset(new llm_graph_result(max_nodes));
++        gf_res_reserve.reset(new llm_graph_result(max_nodes));
++        sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
++    }
+ 
+     llama_memory_context_ptr mctx;
+     if (memory) {

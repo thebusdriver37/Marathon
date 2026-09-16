@@ -1,0 +1,37 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 0f2f3a4..c73a6cd 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1464,7 +1464,7 @@ private:
+         res->truncated           = slot.truncated;
+         res->n_decoded           = slot.n_decoded;
+         res->n_prompt_tokens     = slot.task->n_tokens();
+-        res->n_tokens_cached     = slot.prompt.n_tokens();
++        res->n_tokens_cached     = slot.n_prompt_tokens_cache;
+         res->has_new_line        = slot.has_new_line;
+         res->stopping_word       = slot.stopping_word;
+         res->stop                = slot.stop;
+diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
+index a137427..22213af 100644
+--- a/tools/server/server-task.cpp
++++ b/tools/server/server-task.cpp
+@@ -886,6 +886,9 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp() {
+         {"status",       "completed"},
+         {"usage",        json {
+             {"input_tokens",  n_prompt_tokens},
++            {"input_tokens_details", json {
++                {"cached_tokens", n_tokens_cached},
++            }},
+             {"output_tokens", n_decoded},
+             {"total_tokens",  n_decoded + n_prompt_tokens},
+         }},
+@@ -995,6 +998,9 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp_stream() {
+                 {"output",     output},
+                 {"usage",      json {
+                     {"input_tokens",  n_prompt_tokens},
++                    {"input_tokens_details", json {
++                        {"cached_tokens", n_tokens_cached},
++                    }},
+                     {"output_tokens", n_decoded},
+                     {"total_tokens",  n_decoded + n_prompt_tokens}
+                 }}
