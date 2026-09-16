@@ -1239,7 +1239,41 @@ context = 32768
         )
         self.assertEqual(normalized["input"][0]["type"], "function_call_output")
 
-    def test_malformed_replayed_tool_pair_is_omitted(self) -> None:
+    def test_malformed_tool_recovery_generates_once_then_replays_reconnect(self):
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=1)
+        state.telemetry = mock.Mock()
+        broken = {"type": "function_call", "name": "exec_command",
+                  "call_id": "broken", "arguments": '{"cmd":"unfinished'}
+        failed = {"type": "function_call_output", "call_id": "broken",
+                  "output": "failed to parse function arguments"}
+        answer = {"type": "message", "role": "assistant", "phase": "final_answer",
+                  "content": [{"type": "output_text", "text": "Recovered."}]}
+        state._request_json = mock.AsyncMock(side_effect=[
+            {"output": [broken]}, {"output": [answer]},
+        ])
+        initial = {"input": [{"type": "message", "role": "user",
+                              "content": [{"type": "input_text", "text": "Work."}]}]}
+        followup = {"input": initial["input"] + [broken, failed]}
+
+        async def run(request):
+            return await state._run_responses_loop(
+                profile=fixture_profile(),
+                forward_request=router_module.normalize_responses_request(copy.deepcopy(request)),
+                web_search_enabled=True,
+            )
+
+        asyncio.run(run(initial))
+        recovered = asyncio.run(run(followup))
+        reconnected = asyncio.run(run(followup))
+        self.assertEqual(state._request_json.await_count, 2)
+        self.assertEqual(recovered[1], [answer])
+        self.assertEqual(reconnected[1], [answer])
+        forwarded = state._request_json.await_args.args[3]["input"]
+        self.assertIn("invalid JSON", json.dumps(forwarded))
+        self.assertNotIn(broken, forwarded)
+
+    def test_malformed_replayed_tool_pair_preserves_failure_feedback(self) -> None:
         malformed_call = {
             "type": "function_call",
             "name": "exec_command",
@@ -1280,9 +1314,10 @@ context = 32768
         )
 
         self.assertEqual(
-            [item.get("call_id") for item in normalized["input"][:2]],
+            [item.get("call_id") for item in normalized["input"][1:3]],
             ["valid_call", "valid_call"],
         )
+        self.assertIn("broken_call", normalized["input"][0]["content"][0]["text"])
         self.assertEqual(normalized["_marathon_malformed_tool_replay_drops"], 2)
 
     def test_completed_message_stays_commentary_when_tool_precedes_it(self) -> None:

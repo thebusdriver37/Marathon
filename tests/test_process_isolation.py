@@ -40,7 +40,10 @@ class ProcessIsolationTests(unittest.TestCase):
             sentinel.stdin.close()
             try:
                 with mock.patch.dict(os.environ, {'MARATHON_CODEX_BIN': BINARY}):
-                    command = codex_command(runtime, ['sandbox', '--', 'python3', '-c', script])
+                    # Pin workspace-write because Marathon now defaults to full access.
+                    command = codex_command(
+                        runtime, ['-c', 'sandbox_mode="workspace-write"', 'sandbox', '--',
+                                  'python3', '-c', script])
                 # The standalone sandbox does not need an inference catalog.
                 catalog_index = next(i for i, arg in enumerate(command)
                                      if arg.startswith('model_catalog_json='))

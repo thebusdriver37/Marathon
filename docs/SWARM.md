@@ -19,10 +19,9 @@ marathon swarm exec "Split this task between two helpers, integrate their work, 
 Run these commands from the project you want to work on.
 The lead assigns disjoint files or separate Git worktrees before parallel edits.
 Worktrees are not created automatically, so this is still a shared-workspace experiment unless the agents explicitly create them.
-Marathon defaults to Codex's workspace-write sandbox with network access enabled.
-On Linux, each shell command runs in a separate PID namespace, so broad process-name kills cannot reach the frontend, supervisor, or another command's processes.
+Marathon defaults to full access, so each shell command can read and write anywhere, including the network.
+When you explicitly enable a sandbox, each shell command runs in a separate Linux PID namespace, so broad process-name kills cannot reach the frontend, supervisor, or another command's processes.
 Run from your project directory and use Codex's additional writable directories when needed.
-Explicitly disabling the sandbox also disables this process protection.
 
 To compare the same three-agent workflow on one GPU, or try it while only one pool lease is free:
 

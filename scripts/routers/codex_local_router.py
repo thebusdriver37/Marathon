@@ -2128,6 +2128,17 @@ def normalize_responses_request(
             item.get("type") == "function_call_output"
             and item.get("call_id") in malformed_call_keys
         ):
+            # Preserve the failed attempt without sending invalid tool JSON upstream.
+            # Dropping both sides makes the completion cache replay the broken call.
+            normalized_input.append({
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": f"Tool call {item['call_id']} was rejected because its arguments "
+                    "were invalid JSON. The tool did not run. Retry with a valid JSON object.",
+                }],
+            })
             input_changed = True
             malformed_tool_replay_drops += 1
             continue

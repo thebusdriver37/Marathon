@@ -133,10 +133,9 @@ def codex_command(
         "-m", runtime.model.alias,
         "-c", f"model_catalog_json={json.dumps(str(runtime.catalog_file))}",
         "-c", 'web_search="cached"',
-        # Native Linux command sandboxes also isolate PIDs. Host-wide pkill
-        # must not be the default just because stock Codex used full access.
-        "-c", 'sandbox_mode="workspace-write"',
-        "-c", 'sandbox_workspace_write.network_access=true',
+        # Marathon defaults to full access; an explicit --sandbox override
+        # restores Codex's Linux PID namespaces for process isolation.
+        "-c", 'sandbox_mode="danger-full-access"',
         "-c", 'tui.terminal_title=["app-name","status","current-dir"]',
     ]
     if shared_profile:
