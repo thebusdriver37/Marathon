@@ -1,5 +1,9 @@
 # Custom DFlash2 fine-tuning, 2026-09-14
 
+The [2026-09-16 reconciliation](DRAFTER_EVALUATION_RECONCILIATION_2026-09-16.md) reproduces the structured-agent serving gain and the separate broad-workload null result.
+Those findings are compatible: the gain is workload-specific.
+Offline `block_size=7` already matches six serving proposals, and offline accepted length includes one anchor token that server accepted-proposal counters exclude.
+
 The initial targeted pilots did not improve accepted block length, and their exported candidate was 1.22% slower in aggregate request latency.
 A broader rank-16 LoRA run improved decode throughput by 5.9% on matched synthetic tool prompts, but showed no gain on plain coding or completed Marathon tasks.
 A later rank-32 mixed-workload checkpoint improved held-out agent-state accepted block length by 26.02% and matched serving decode throughput by 27.15%.

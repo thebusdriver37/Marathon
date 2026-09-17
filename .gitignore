@@ -10,3 +10,4 @@ __pycache__/
 /llama-lab/
 /docker/searxng/for ngl in 999; do.sh
 /install-nvidia-250w-power-limit.sh
+/.env
