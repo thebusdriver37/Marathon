@@ -154,6 +154,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 DEFAULT_STALLED_RESPONSE_RECOVERIES = 1
 DEFAULT_TOOL_PROTOCOL_RECOVERIES = 1
 DEFAULT_TOOL_ARGUMENT_MAX_CHARS = 24_576
+DEFAULT_POOL_EXTERNAL_UNLOAD_GRACE_SECONDS = 30.0
 MARATHON_RUNTIME_INSTRUCTIONS = (
     "Never use pattern-based termination for inference processes. Never stop, restart, "
     "signal, or replace Marathon or its supervised backend from inside a Marathon session, "
@@ -2265,6 +2266,22 @@ class RouterState:
         self.pool_handle = None
         self.pool_model = None
         self.pool_request_lock = asyncio.Lock()
+        try:
+            self.pool_external_unload_grace_seconds = max(
+                0.0,
+                float(
+                    os.getenv(
+                        "MARATHON_POOL_EXTERNAL_UNLOAD_GRACE_SECONDS",
+                        str(DEFAULT_POOL_EXTERNAL_UNLOAD_GRACE_SECONDS),
+                    )
+                ),
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "MARATHON_POOL_EXTERNAL_UNLOAD_GRACE_SECONDS must be a number"
+            ) from exc
+        self.pool_release_task: asyncio.Task[Any] | None = None
+        self.pool_release_unloading = False
         self.available_profiles: dict[str, ModelProfile] = {}
         self._refresh_profiles()
         if not self.available_profiles:
@@ -2632,6 +2649,7 @@ class RouterState:
 
     async def close(self) -> None:
         self._closing = True
+        await self._cancel_pool_release()
         starter_tasks = list(self.starter_prewarm_tasks.values())
         self.starter_prewarm_tasks.clear()
         for task in starter_tasks:
@@ -2909,34 +2927,114 @@ class RouterState:
             return
         async with self.pool_request_lock:
             profile = self.resolve_model(requested_model)
-            if profile.slug in self.pool_slugs and self.pool_handle is None:
-                try:
-                    self.pool_handle, self.pool_model = acquire_pool_worker(
-                        self.pool_backend, Path(os.environ["MARATHON_POOL_RUNTIME_DIR"]),
-                        os.getenv("MARATHON_INSTANCE") or None,
-                    )
-                except RuntimeError:
-                    if generate:
-                        raise
-                    # Frontend warmup is best effort: a full local pool must not
-                    # prevent opening the UI and selecting an external model.
-                    yield
-                    return
-                self._refresh_profiles()
-                self.telemetry.emit("router.pool.acquired", {"worker": self.pool_model})
-            elif profile.slug not in self.pool_slugs and self.pool_handle is not None:
-                # Finish or cancel background slot operations before releasing their worker.
+            if profile.slug in self.pool_slugs:
+                await self._cancel_pool_release()
+                if self.pool_handle is None:
+                    try:
+                        self.pool_handle, self.pool_model = acquire_pool_worker(
+                            self.pool_backend, Path(os.environ["MARATHON_POOL_RUNTIME_DIR"]),
+                            os.getenv("MARATHON_INSTANCE") or None,
+                        )
+                    except RuntimeError:
+                        if generate:
+                            raise
+                        # Frontend warmup is best effort: a full local pool must not
+                        # prevent opening the UI and selecting an external model.
+                        yield
+                        return
+                    self._refresh_profiles()
+                    self.telemetry.emit("router.pool.acquired", {"worker": self.pool_model})
+            elif self.pool_handle is not None:
+                # Prefix prewarming is no longer useful, but the live slot and worker
+                # remain available until the external-switch grace period expires.
                 tasks = list(self.starter_prewarm_tasks.values())
                 for task in tasks:
                     task.cancel()
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
-                await self.flush_conversation_checkpoints()
-                async with self.backend_lock:
-                    for slug in self.pool_slugs:
-                        self._clear_live_slot(slug)
-                    self._release_pool_worker()
+                self._schedule_pool_release()
             yield
+
+    def _schedule_pool_release(self) -> None:
+        if self.pool_handle is None or self.pool_release_task is not None:
+            return
+        worker = self.pool_model
+        self.telemetry.emit(
+            "router.pool.release_scheduled",
+            {
+                "worker": worker,
+                "grace_seconds": self.pool_external_unload_grace_seconds,
+            },
+        )
+        self.pool_release_task = asyncio.create_task(
+            self._release_pool_worker_after_grace(worker),
+            name=f"marathon-pool-release-{worker or 'unknown'}",
+        )
+
+    async def _cancel_pool_release(self) -> None:
+        task = self.pool_release_task
+        if task is None:
+            return
+        worker = self.pool_model
+        if self.pool_release_unloading:
+            await asyncio.gather(task, return_exceptions=True)
+            return
+        self.pool_release_task = None
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self.telemetry.emit("router.pool.release_canceled", {"worker": worker})
+
+    async def _release_pool_worker_after_grace(self, worker: str | None) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self.pool_external_unload_grace_seconds)
+            self.pool_release_unloading = True
+            try:
+                await self.flush_conversation_checkpoints()
+            except Exception as exc:
+                self.telemetry.emit(
+                    "router.pool.checkpoint_flush_failed",
+                    {"worker": worker, "error": str(exc)},
+                    level="error",
+                )
+            async with self.backend_lock:
+                for slug in self.pool_slugs:
+                    self._clear_live_slot(slug)
+                try:
+                    await self._unload_pool_worker(worker)
+                except Exception as exc:
+                    self.telemetry.emit(
+                        "router.pool.unload_failed",
+                        {"worker": worker, "error": str(exc)},
+                        level="error",
+                    )
+                finally:
+                    if self.pool_model == worker:
+                        self._release_pool_worker()
+        finally:
+            self.pool_release_unloading = False
+            if self.pool_release_task is current_task:
+                self.pool_release_task = None
+
+    async def _unload_pool_worker(self, worker: str | None) -> None:
+        if not worker or self.pool_backend is None:
+            return
+        profile = self.available_profiles.get(self.pool_slug)
+        if profile is None:
+            raise RuntimeError("pooled model profile is unavailable")
+        broker_profile = replace(
+            profile,
+            target=self.pool_backend.proxy,
+            api_key_env=self.pool_backend.api_key_env,
+            api_key_file=self.pool_backend.api_key_file,
+        )
+        await self._request_json(
+            broker_profile,
+            "POST",
+            f"/api/models/unload/{quote(worker, safe='')}",
+        )
+        self.telemetry.emit("router.pool.unloaded", {"worker": worker})
 
     def _release_pool_worker(self) -> None:
         if getattr(self, "pool_handle", None) is not None:

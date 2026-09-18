@@ -21,7 +21,11 @@ Opening additional terminals is independent of local GPU capacity.
 For broker pool profiles, the frontend's default-model warmup reserves a free local worker and warms it in the background after the frontend starts.
 If the local pool is full, that optional warmup is skipped so you can still open `/model` and select Spark or another external model.
 An actual local inference request still requires a free local worker and reports `No free local worker` when the pool is full.
-Sending a request to an external model releases that session's local reservation after pending slot operations finish; the broker's normal idle policy controls unloading.
+Sending a request to an external model starts a 30-second grace period while the session retains its local worker and live slot.
+Switching back during that grace period cancels the pending unload and reuses the same worker.
+When the grace period expires, Marathon saves pending conversation checkpoints, asks llama-swap to unload that specific worker, and releases the reservation after unloading finishes.
+`MARATHON_POOL_EXTERNAL_UNLOAD_GRACE_SECONDS` changes the grace period, and `0` requests immediate unloading.
+The broker's longer idle policy remains a fallback for interrupted sessions and unload failures.
 Switching back to a local model acquires an available worker again.
 Existing sessions must be reopened to pick up this routing change.
 This also applies to headless `marathon exec` and `marathon fork <ID>`.
