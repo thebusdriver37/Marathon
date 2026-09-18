@@ -190,7 +190,10 @@ class PoolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.state.pool_release_task)
 
     def test_automatic_names_continue_past_three_and_reuse_free_names(self):
-        with mock.patch.object(runtime, "RUNTIME_DIR", self.root):
+        with (
+            mock.patch.object(runtime, "RUNTIME_DIR", self.root),
+            mock.patch.object(runtime, "LOCK_FILE", self.root / "runtime.lock"),
+        ):
             handles = []
             try:
                 for name in (None, "second", "third", "instance-4"):

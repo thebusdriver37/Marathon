@@ -24,6 +24,7 @@ from .router_security import open_api_request
 from .runtime_setup import missing_runtime_tools
 
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
 MARATHON_STATUS_LINE = [
     "model-with-reasoning",
     "run-state",
@@ -40,6 +41,9 @@ def _codex_binary() -> str:
     configured = os.environ.get("MARATHON_CODEX_BIN")
     if configured:
         return configured
+    packaged = ROOT_DIR / "bin" / "codex"
+    if packaged.is_file() and os.access(packaged, os.X_OK):
+        return str(packaged)
     data_home = Path(
         os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
     ).expanduser()

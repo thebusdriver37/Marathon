@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86-64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out Marathon
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check release version
+        run: |
+          version="$(sed -n 's/^__version__ = "\([^"]*\)"$/\1/p' marathon_app/__init__.py)"
+          test "$GITHUB_REF_NAME" = "v$version"
+
+      - name: Install system build dependencies
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap cmake libssl-dev pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Marathon dependencies
+        run: python -m pip install -r scripts/requirements.txt
+
+      - name: Test Marathon
+        run: |
+          for script in bin/marathon scripts/*.sh scripts/ops/*.sh scripts/lib/*.sh; do
+            bash -n "$script"
+          done
+          python -m unittest discover -s tests -v
+
+      - name: Build patched frontend
+        env:
+          MARATHON_CODEX_BIN: ${{ runner.temp }}/marathon-frontend/codex
+        run: ./scripts/build_codex.sh
+
+      - name: Package release
+        env:
+          MARATHON_CODEX_BIN: ${{ runner.temp }}/marathon-frontend/codex
+        run: ./scripts/package_release.sh dist "$MARATHON_CODEX_BIN"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

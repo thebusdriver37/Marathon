@@ -6,8 +6,9 @@ This page is for troubleshooting, not a second installation procedure.
 ## First launch
 
 Marathon prepares its private Python environment, offers model selection, and offers to build missing inference and frontend binaries.
-Downloads and builds can take a while; subsequent launches reuse them.
-Prebuilt installers are not published yet, so the current installation requires build tools.
+Downloads and backend builds can take a while; subsequent launches reuse them.
+Tagged releases include the patched frontend for Linux x86_64, so release users do not need Rust or Cargo.
+Source installations still require build tools when the frontend has not been installed.
 Source builds also need the platform's OpenSSL development headers and libraries.
 On Ubuntu, install `build-essential cmake pkg-config libssl-dev bubblewrap`; install Rust with rustup and the CUDA toolkit separately for NVIDIA acceleration.
 Linux also needs working user namespaces whenever the tool sandbox is explicitly enabled; restrictive containers may block them even with bubblewrap installed.
@@ -58,7 +59,7 @@ Model file size alone is not a memory-fit guarantee.
 | Models, backends, and caches | `~/AI/` |
 | Personal configuration | `~/.config/marathon/` |
 | Operational logs and reports | `~/.local/state/marathon/` |
-| Isolated Codex sessions | `.marathon/codex-home/` inside the checkout |
+| Isolated Codex sessions | `.marathon/codex-home/`, linked to stable user data for release installs |
 
 Set `MARATHON_AI_ROOT` before setup to use another disk.
 Leave your personal paths and credentials out of the repository.

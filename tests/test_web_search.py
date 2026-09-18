@@ -84,6 +84,23 @@ class WebSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
         output = await web_search._extract_to_markdown(body, "text/html", "https://example.org/other/index.html", 20000)
         self.assertIn("https://example.org/reference/tasks.html?view=full#errors", output)
 
+    async def test_fetch_preserves_reference_when_extractor_drops_link_markup(self):
+        body = b'''<html><head><base href="https://example.org/reference/"></head>
+        <body><main><p>Read the <a href="tasks.html#errors">task error reference</a>
+        for details about task failures and cleanup.</p></main></body></html>'''
+        extracted = "Read the task error reference for details about task failures and cleanup."
+        with mock.patch("trafilatura.extract", return_value=extracted):
+            output = await web_search._extract_to_markdown(
+                body,
+                "text/html",
+                "https://example.org/other/index.html",
+                20000,
+            )
+        self.assertIn(
+            "[task error reference](https://example.org/reference/tasks.html#errors)",
+            output,
+        )
+
     async def test_fetch_resolves_relative_links_against_redirect_destination(self):
         async def redirect(request):
             raise web.HTTPFound("/docs/guide/page.html")

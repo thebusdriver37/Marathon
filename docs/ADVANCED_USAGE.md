@@ -442,6 +442,20 @@ Fetch blocks loopback and private-network targets unless `MARATHON_WEB_FETCH_ALL
 
 ## Updating Codex
 
+Normal users update all of Marathon with a verified prebuilt release:
+
+```bash
+marathon update
+```
+
+Marathon reads cached update information during startup and refreshes it in the background at most once per day.
+The network check never delays startup.
+Use `marathon update --check` to check immediately, `marathon update --skip` to dismiss one version, or `marathon update --off` to disable automatic checks.
+An update is prepared in a versioned directory and activated atomically for new launches, while running sessions keep using their current version.
+Use `marathon update --rollback` to return new launches to the previous installed release.
+
+The command below is for Marathon developers updating the patched upstream Codex source:
+
 Run this command to fetch the stable Codex tag recorded in `config/codex.ref`, preflight Marathon's patches, run regression tests, build a release binary, and install it atomically:
 
 ```bash

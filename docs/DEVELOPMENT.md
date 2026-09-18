@@ -12,6 +12,12 @@ Machine-specific overrides belong in `~/.config/marathon/catalog.toml`, not in t
 
 The CI workflow runs shell syntax checks and the Python suite on Python 3.10 and 3.12.
 Set `MARATHON_NETWORK_TESTS=1` to also test real pip bootstrap and interrupted-environment recovery; CI enables this check.
+
+## Releases
+
+Set `marathon_app.__version__` to the release version, commit it, and push the matching `vX.Y.Z` tag.
+The release workflow tests Marathon, builds the patched Codex frontend on Linux x86_64, packages both together, and publishes the archive with its SHA-256 checksum.
+Do not create the tag until the ordinary CI workflow is green.
 Native runtime patching and GPU benchmarks have separate requirements described in [runtime packaging](RUNTIME.md).
 Python test success alone does not establish GPU correctness or speed.
 Normal frontend installation builds and smoke-tests the binary without requiring developer test runners.

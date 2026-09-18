@@ -25,8 +25,8 @@ After setup, open a new terminal and run `marathon` from the project you want to
 - On Linux: bubblewrap for sandboxed tools.
 - For NVIDIA acceleration: a working driver and CUDA toolkit with `nvcc`.
 
-**Prebuilt installers are not published yet.**
-Setup can build the missing runtimes, but it cannot install system drivers or eliminate the source-build requirements.
+Tagged releases include a prebuilt Linux x86_64 frontend, so normal updates do not compile Rust locally.
+Source checkouts can still build the frontend when developing Marathon.
 See [setup help](docs/SETUP.md) if a prerequisite is missing.
 
 ## Models and hardware
@@ -57,7 +57,9 @@ See [runtime details and reproducibility](docs/RUNTIME.md).
 ## Local by default
 
 Inference runs locally unless you explicitly configure a remote model.
-The hardened frontend disables background cloud telemetry, announcements, and update checks.
+The hardened frontend disables Codex cloud telemetry and announcements.
+Marathon performs its own optional, cached GitHub release check at most once per day.
+Run `marathon update --off` to disable it.
 Downloading models and source code requires internet access; explicitly enabled web tools can also use the internet.
 This is application-level hardening, not an operating-system network sandbox.
 
@@ -71,6 +73,7 @@ This is application-level hardening, not an operating-system network sandbox.
 | `marathon dashboard` | Open advanced controls |
 | `marathon doctor` | Diagnose setup problems |
 | `marathon report` | Show measured performance |
+| `marathon update` | Install a verified prebuilt update for the next launch |
 
 The footer reports backend decode speed separately from first-output latency.
 Speed depends on context, workload, hardware, and speculative acceptance; there is no single guaranteed tok/s number.

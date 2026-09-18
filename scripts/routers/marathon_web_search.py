@@ -1061,8 +1061,34 @@ def _html_to_markdown(html: str, url: str) -> str:
         with_metadata=False,
     )
     if extracted and extracted.strip():
-        return extracted
-    return _html_fallback(html)
+        return _preserve_reference_links(extracted, document)
+    return _preserve_reference_links(_html_fallback(html), document)
+
+
+def _preserve_reference_links(markdown: str, document: Any) -> str:
+    """Keep visible references when an extractor version drops link targets."""
+
+    references: list[str] = []
+    seen: set[str] = set()
+    for anchor in document.iter("a"):
+        href = str(anchor.get("href") or "").strip()
+        label = " ".join("".join(anchor.itertext()).split())
+        if (
+            not href
+            or not label
+            or href in markdown
+            or label not in markdown
+            or href in seen
+            or urlsplit(href).scheme not in {"http", "https"}
+        ):
+            continue
+        seen.add(href)
+        references.append(f"- [{label}]({href})")
+        if len(references) == 32:
+            break
+    if not references:
+        return markdown
+    return markdown.rstrip() + "\n\n## References\n\n" + "\n".join(references)
 
 
 def _html_fallback(html: str) -> str:

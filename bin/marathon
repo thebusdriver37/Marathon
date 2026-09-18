@@ -37,6 +37,7 @@ Commands:
   fork [ID]       Fork a Marathon session or open its session picker
   exec            Run headless Codex exec against the default local model
   install         Install the marathon command into ~/.local/bin
+  update          Check for or install a prebuilt Marathon update
   search <sub>    Manage SearXNG (up | down | status | check | logs | url | restart | pull)
   setup-deps      Create .marathon/venv and install router Python dependencies
   build           Build patched Marathon binaries
@@ -76,7 +77,26 @@ run_app() {
     echo "First run: preparing Marathon's private Python environment..." >&2
     "$ROOT_DIR/scripts/ops/setup_python_env.sh"
   fi
+  case " ${*:-} " in
+    *" codex "*|*" dashboard "*|*" resume "*|*" fork "*)
+      PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        timeout --kill-after=1s 1s "$python" -m marathon_app.updates startup || true
+      ;;
+  esac
   PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" exec "$python" -m marathon_app "$@"
+}
+
+run_update() {
+  local python="$ROOT_DIR/.marathon/venv/bin/python3"
+  local requirements="$ROOT_DIR/scripts/requirements.txt"
+  local marker="$ROOT_DIR/.marathon/venv/.marathon-requirements"
+  local expected
+  expected="$(cksum "$requirements")"
+  if [[ ! -x "$python" || ! -f "$marker" || "$(cat "$marker")" != "$expected" ]]; then
+    "$ROOT_DIR/scripts/ops/setup_python_env.sh"
+  fi
+  PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    exec "$python" -m marathon_app.updates "$@"
 }
 
 instance_args=()
@@ -173,6 +193,9 @@ USAGE
     ;;
   install)
     exec "$ROOT_DIR/scripts/ops/install_cli.sh" "$@"
+    ;;
+  update)
+    run_update "$@"
     ;;
   search)
     exec "$ROOT_DIR/scripts/ops/searxng.sh" "$@"
