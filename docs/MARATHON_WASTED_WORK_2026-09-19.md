@@ -80,3 +80,69 @@ This probe deliberately concentrates on the reproducible output-loss defect inst
 
 Review also corrected the earlier graph report: the merge fixed the CLI's 49-versus-48 service discrepancy before its timeout.
 Independent execution of the saved final CLI reports 48, so that discrepancy is no longer an unresolved final-code failure.
+
+## Second pass: mixed web and frontend tool ordering
+
+Four fresh merge-only real CLI sessions tested official-documentation lookup with local execution: two Node assertion questions and two Python TaskGroup debugging questions.
+The earlier detour through shell web utilities did not recur in this screen; managed web tools were available and used.
+Instead, the mixed-tool sessions exposed a router sequencing defect.
+When a model response requested both a router-managed web action and a frontend-executed shell command, `_run_responses_loop` executed the web action and continued inference before the frontend's shell result could enter the next model request.
+Streaming could show a completed shell command to the user while the model still lacked its result.
+The first Python session issued six shell calls before their results appeared in its rollout, repeatedly asking to read the same file and claiming output was missing.
+That session ultimately used ten shell calls; the second Python session used six.
+The two Node sessions used four and two shell calls.
+All four eventually completed with the core answers correct, so this is avoidable recovery work rather than four failed tasks.
+
+The Python router now completes managed web actions and yields to the frontend whenever that response also contains frontend work.
+It does not request another model response until the frontend returns its tool results through the normal continuation path.
+The same rule applies when the web budget is exhausted; budget handling must not force a premature final answer while shell results remain pending.
+Web-only continuation, bounded web retries, and reconnect caching remain in place.
+No tool permissions, sampling settings, model weights, or native frontend code were changed in this pass.
+
+The new regression test failed in all four streaming/non-streaming and normal/exhausted-budget combinations before the fix.
+It now verifies that no premature inference occurs, completed web results and frontend calls survive reconnect replay, and the subsequent request contains both web evidence and the actual local result.
+All 140 router tests pass; the complete Python suite ran 431 tests successfully with 10 optional checks skipped.
+Artifacts, exact prompts, actual CLI transcripts, web results, and router hashes are retained under `/home/deforest/AI/experiments/marathon-web-discovery-20260919/`.
+
+Four matched fresh post-fix sessions all completed and answered the core questions correctly, with unchanged repository fixtures and no extra repository files.
+The Node task used one shell call in each repetition, down from four and two.
+The Python task used two shell calls in each repetition, down from ten and six.
+Each post-fix rollout had at most one pending shell result, compared with peaks of two, two, six, and three before the fix.
+The repeated file-read recovery sequence did not recur.
+Post-fix times were 49.1/31.0 seconds for Node and 37.0/24.0 seconds for Python, compared with 113.1/56.1 and 136.2/47.1 before.
+These are small unseeded samples with live network retrieval, differing documentation-fetch choices, and cold-start overhead; they do not establish a universal speedup percentage.
+
+One post-fix answer included an inaccurate extra explanation saying ValueError is an Exception but not a BaseException.
+It inherits from both; the answer correctly identified ExceptionGroup as the container for the tested ValueError scenario.
+This isolated wording error remains a model-quality observation, not a demonstrated recurring defect or justification for training.
+
+The production GPU configuration remained unchanged, the isolated merge worker was unloaded, and disposable experiment snapshots were removed while retaining the evidence.
+New Marathon router processes load this Python fix; existing running routers need a restart to use it.
+
+## Whole-router review: four reproduced transport/recovery defects
+
+`tests/test_router_transport.py` uses real local HTTP/WebSocket sockets, the actual router handlers, and a scripted upstream instead of GPU inference.
+Before implementation, each defect reproduced in two different scenarios, each repeated with fresh servers twice: 16 failing subcases in total.
+These prove reachable router failures, not their frequency with the Swift merge or a model-quality improvement.
+
+| Defect | Independent scenarios | Fix |
+| --- | --- | --- |
+| Recovery published calls it subsequently forgot | Valid shell then malformed patch; valid patch then malformed patch | Hold executable tool events until the backend attempt completes and passes protocol validation; continue streaming text/reasoning. |
+| Recovery kept forcing tools after success | Empty response recovery; malformed patch recovery, both followed by a successful web fetch | Restore the caller's original tool choice after the requested recovery action succeeds. |
+| HTTP fallback lost web execution and patch translation | Non-streaming JSON; streaming SSE | Route Responses through the shared generation/tool/history implementation and translate buffered patches too. |
+| Keepalives corrupted upstream SSE | Pause inside a JSON string; pause between two data lines of one event | Buffer incomplete upstream frames and insert keepalives only between complete frames. |
+
+All 16 subcases pass after the fixes.
+The installed Marathon native CLI was additionally tested over HTTP in two isolated temporary workspaces, with its normal model catalog/tool definitions and workspace-write sandbox.
+Both sessions fetched controlled web evidence, successfully created the requested file through native apply_patch, and returned the patch result on the subsequent model request.
+This exposed a related HTTP history problem: the frontend strips web-item IDs when replaying its full history.
+The router now restores matching managed-web evidence from its existing model/thread-scoped lineage.
+ID-less markers are restored only when the action identifies an unambiguous result; ambiguous or foreign-thread history is never guessed.
+Both native CLI tests also assert that the next model request retains the fetched evidence.
+
+Header-based HTTP compaction, string input, and thread-isolated history restoration have additional regression coverage.
+All 147 router tests pass with installed-CLI coverage enabled.
+The complete Python suite runs 438 tests successfully with 10 unrelated optional checks skipped.
+To repeat the router checks, run `MARATHON_ROUTER_TEST_BIN=/home/deforest/.local/share/marathon/bin/codex .marathon/venv/bin/python -m unittest discover -s tests -p 'test_router*.py'`.
+No GPU services, model weights, sandbox permissions, or native binaries were changed.
+Restart an existing Marathon session to load the Python fixes; a frontend rebuild is unnecessary.

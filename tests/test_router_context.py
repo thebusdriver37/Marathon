@@ -38,6 +38,60 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_mixed_web_and_frontend_calls_wait_for_frontend_results(self):
+        for streaming in (False, True):
+            for exhausted in (False, True):
+                with self.subTest(streaming=streaming, exhausted=exhausted):
+                    state = object.__new__(router_module.RouterState)
+                    state.web_search_settings = SimpleNamespace(max_iterations=1)
+                    state.telemetry = mock.Mock()
+                    web = {"type": "function_call", "name": "web_fetch",
+                           "call_id": "web", "arguments": '{"url":"https://example.org/docs"}'}
+                    shell = {"type": "function_call", "name": "exec_command",
+                             "call_id": "shell", "arguments": '{"cmd":"cat example.py"}'}
+                    responses = [{"output": [web, shell]}]
+                    if exhausted:
+                        first = dict(web, call_id="first", arguments='{"url":"https://example.org/intro"}')
+                        responses.insert(0, {"output": [first]})
+                    state._request_json = mock.AsyncMock(side_effect=copy.deepcopy(responses))
+                    state._request_responses_stream = mock.AsyncMock(side_effect=copy.deepcopy(responses))
+                    state._execute_managed_call = mock.AsyncMock(return_value={
+                        "type": "function_call_output", "call_id": "first" if exhausted else "web",
+                        "output": "Documentation evidence"})
+                    request = {"input": [{"role": "user", "content": "Check code and docs"}],
+                               "tools": [router_module.web_fetch_function_tool(),
+                                         {"type": "function", "name": "exec_command"}]}
+                    async def sink(event):
+                        return True
+                    async def scenario():
+                        options = dict(profile=fixture_profile(), forward_request=request,
+                                       web_search_enabled=True, event_sink=sink if streaming else None)
+                        first_result = await state._run_responses_loop(**options)
+                        replay = await state._run_responses_loop(**options)
+                        return first_result, replay
+                    first_result, replay = asyncio.run(scenario())
+                    items = first_result[1]
+                    self.assertIn(shell, items)
+                    self.assertTrue(any(item.get("call_id") == "web" and
+                                        item.get("type") == "function_call_output" for item in items))
+                    self.assertEqual(items, replay[1])
+                    requester = state._request_responses_stream if streaming else state._request_json
+                    self.assertEqual(requester.await_count, len(responses))
+                    state._execute_managed_call.assert_awaited_once()
+                    local_result = {"type": "function_call_output", "call_id": "shell",
+                                    "output": "Actual local file contents"}
+                    requester.side_effect = None
+                    requester.return_value = {"output": [{"type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Verified both sources."}]}]}
+                    next_request = dict(request, input=request['input'] + items + [local_result])
+                    asyncio.run(state._run_responses_loop(
+                        profile=fixture_profile(), forward_request=next_request,
+                        web_search_enabled=True, event_sink=sink if streaming else None))
+                    sent = requester.await_args.args[1 if streaming else 3]['input']
+                    self.assertIn(local_result, sent)
+                    self.assertTrue(any(item.get('call_id') == 'web' and
+                                        item.get('type') == 'function_call_output' for item in sent))
+
     def test_session_derived_prompt_cache_key_uses_stable_thread_id(self) -> None:
         request = {"prompt_cache_key": "resume-session"}
 
@@ -3906,10 +3960,12 @@ context = 32768
         state.telemetry = mock.Mock()
         state.trace_request = mock.Mock()
         state.ensure_model_async = mock.AsyncMock(return_value=profile)
-        state.defer_compaction_checkpoint = mock.Mock(
-            return_value={"status": "skipped"}
-        )
-        state.http_client = None
+        state.http_client = mock.Mock()
+        state.mint_response_id = mock.Mock(return_value="resp_compact")
+        state._process_websocket_create = mock.AsyncMock(return_value={
+            "response_id": "resp_compact", "backend_response": {},
+            "output_items": [], "usage": {}, "streamed": False,
+        })
 
         class Request:
             app = {"state": state}
@@ -3936,13 +3992,10 @@ context = 32768
 
         response = asyncio.run(router_module.handle_http_proxy(Request()))
 
-        self.assertEqual(response.status, 500)
-        state.defer_compaction_checkpoint.assert_called_once_with(
-            profile,
-            "synthetic-session",
-            context_tokens=0,
-            transport="http",
-        )
+        self.assertEqual(response.status, 200)
+        forwarded = state._process_websocket_create.await_args.args[0]
+        self.assertEqual(router_module._codex_request_kind(forwarded), "compaction")
+        self.assertEqual(forwarded["prompt_cache_key"], "synthetic-session")
 
     def test_output_budget_scales_and_is_profile_overrideable(self) -> None:
         self.assertEqual(router_module._max_output_tokens(fixture_profile(32_768)), 4_096)

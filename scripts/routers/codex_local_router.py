@@ -106,7 +106,6 @@ DEFAULT_USAGE = {
     "total_tokens": 0,
 }
 
-MANAGED_WEB_TOOL_NAMES = {WEB_SEARCH_TOOL_NAME, WEB_FETCH_TOOL_NAME, WEB_BROWSE_TOOL_NAME}
 APPLY_PATCH_TOOL_NAME = "apply_patch"
 
 BACKEND_UNSUPPORTED_CONTEXT_ITEM_TYPES = {
@@ -1592,20 +1591,6 @@ def _input_relation(
     }
 
 
-def _strip_managed_web_tools(tools: Any) -> list[Any]:
-    if not isinstance(tools, list):
-        return []
-    return [
-        tool
-        for tool in tools
-        if not (
-            isinstance(tool, dict)
-            and tool.get("type") == "function"
-            and tool.get("name") in MANAGED_WEB_TOOL_NAMES
-        )
-    ]
-
-
 def _apply_patch_function_tool() -> dict[str, Any]:
     return {
         "type": "function",
@@ -2609,6 +2594,56 @@ class RouterState:
         request["tool_choice"] = "none"
         return source
 
+    def _restore_managed_web_input(
+        self, profile: ModelProfile, request: dict[str, Any]
+    ) -> None:
+        """Rehydrate UI-only web markers on full-history HTTP/reconnect replay."""
+        items = request.get("input")
+        prompt_key = request.get("prompt_cache_key")
+        if not isinstance(items, list) or not prompt_key:
+            return
+        markers = [item for item in items if isinstance(item, dict)
+                   and item.get("type") == "web_search_call"]
+        if not markers:
+            return
+        calls: dict[str, dict[str, Any]] = {}
+        outputs: dict[str, dict[str, Any]] = {}
+        for snapshot in self.lineage.values():
+            if snapshot.profile_slug != profile.slug or snapshot.prompt_cache_key != prompt_key:
+                continue
+            # Pruning folds ancestor output into a surviving root's input.
+            for item in (*snapshot.input_items, *snapshot.output_items):
+                call_id = item.get("call_id")
+                if not call_id:
+                    continue
+                if collect_managed_calls([item]):
+                    calls[call_id] = item
+                elif item.get("type") == "function_call_output":
+                    outputs[call_id] = item
+        actions: dict[str, list[str]] = {}
+        for key, item in calls.items():
+            if key in outputs:
+                action = externalize_for_codex([item])[0].get("action")
+                actions.setdefault(_stable_json(action), []).append(key)
+        restored = []
+        for item in items:
+            key = item.get("id") if isinstance(item, dict) else None
+            if isinstance(item, dict) and item.get("type") == "web_search_call" and not key:
+                # HTTP clients strip item IDs. Recover only an unambiguous
+                # action from this thread; never guess among different results.
+                matches = actions.get(_stable_json(item.get("action")), [])
+                if len(matches) == 1:
+                    key = matches[0]
+            if (isinstance(item, dict) and item.get("type") == "web_search_call"
+                    and key in calls and key in outputs):
+                # Codex may serialize an unfamiliar display action as "other".
+                # Identity comes from the call ID within this model/thread,
+                # never from lossy UI action metadata.
+                restored.extend([copy.deepcopy(calls[key]), copy.deepcopy(outputs[key])])
+            else:
+                restored.append(item)
+        request["input"] = restored
+
     def _store_response_snapshot(self, snapshot: ResponseSnapshot) -> None:
         if not isinstance(self.lineage, OrderedDict):
             self.lineage = OrderedDict(self.lineage)
@@ -3199,9 +3234,20 @@ class RouterState:
         first_generation_at: float | None = None
         generation_events = 0
         stream_completed_at: float | None = None
+        pending_tool_events: list[dict[str, Any]] = []
 
         async def send_event(event: dict[str, Any]) -> None:
             if event_sink is None:
+                return
+            # A later malformed call can reject this entire backend attempt.
+            # Do not let Codex execute an earlier call that recovery will forget.
+            # Text/reasoning still stream normally; executable calls commit only
+            # after the complete response has passed protocol validation.
+            if _starts_followup_work(event.get("item")) or event.get("type") in {
+                "response.custom_tool_call_input.delta",
+                "response.function_call_arguments.delta",
+            }:
+                pending_tool_events.append(copy.deepcopy(event))
                 return
             if not await event_sink(event):
                 raise ConnectionError("websocket client disconnected")
@@ -3480,6 +3526,13 @@ class RouterState:
             backend_response["output"] = []
         if "usage" not in backend_response:
             backend_response["usage"] = copy.deepcopy(DEFAULT_USAGE)
+        protocol_error = _response_tool_protocol_error(backend_response, tool_argument_limit)
+        if protocol_error:
+            raise ToolProtocolError(protocol_error)
+        if event_sink is not None:
+            for event in pending_tool_events:
+                if not await event_sink(event):
+                    raise ConnectionError("websocket client disconnected")
         return backend_response
 
     async def _slot_action(self, profile: ModelProfile, action: str, filename: str | None = None) -> dict[str, Any]:
@@ -4723,6 +4776,11 @@ class RouterState:
         replayable_reasoning: bool = False,
     ) -> dict[str, Any]:
         sanitized = copy.deepcopy(item)
+        if _is_apply_patch_function_call(sanitized):
+            # Buffered/non-streaming responses need the same translation as SSE.
+            sanitized = _apply_patch_function_to_custom_call(sanitized)
+            if isinstance(item.get("arguments"), str):
+                sanitized[_BACKEND_ARGUMENTS_KEY] = item["arguments"]
         sanitized.pop("status", None)
         # Codex deliberately omits plaintext reasoning content when serializing
         # history. Carry a compressed local capsule in its preserved opaque
@@ -5008,6 +5066,7 @@ class RouterState:
         stalled_recoveries = 0
         tool_protocol_recoveries = 0
         compaction_recoveries = 0
+        recovery_tool_choice = False
         is_compaction = _codex_request_kind(request) == "compaction"
         max_stalled_recoveries = max(
             0,
@@ -5172,6 +5231,7 @@ class RouterState:
                 request["input"] = list(request.get("input") or []) + recovery_items
                 request_suffix.extend(copy.deepcopy(recovery_items))
                 request["tool_choice"] = "required"
+                recovery_tool_choice = True
                 request["max_output_tokens"] = min(attempt_output_limit, 4_096)
                 persist_progress()
                 continue
@@ -5192,6 +5252,10 @@ class RouterState:
             ]
             pending_calls = collect_managed_calls(iter_items)
             has_actionable_output = _response_has_actionable_output(iter_items)
+            frontend_work_pending = any(
+                _starts_followup_work(item) and item not in pending_calls
+                for item in iter_items
+            )
             stalled_at_output_limit = _response_stalled_at_output_limit(
                 response,
                 iter_items,
@@ -5251,6 +5315,16 @@ class RouterState:
                             raise ConnectionError("websocket client disconnected")
                 break
 
+            if recovery_tool_choice and (frontend_work_pending or pending_calls):
+                # The recovery instruction requested one concrete action, not
+                # mandatory calls for every subsequent managed-web iteration.
+                request = dict(request)
+                if "tool_choice" in forward_request:
+                    request["tool_choice"] = copy.deepcopy(forward_request["tool_choice"])
+                else:
+                    request.pop("tool_choice", None)
+                recovery_tool_choice = False
+
             needs_stalled_recovery = (
                 not has_actionable_output or stalled_at_output_limit
             )
@@ -5299,6 +5373,7 @@ class RouterState:
                 request["chat_template_kwargs"] = template_kwargs
                 if tools_available:
                     request["tool_choice"] = "required"
+                    recovery_tool_choice = True
                     request["max_output_tokens"] = min(attempt_output_limit, 4_096)
                 else:
                     if request.get("tools"):
@@ -5382,6 +5457,11 @@ class RouterState:
                 appended_items = copy.deepcopy(iter_items) + copy.deepcopy(tool_outputs)
                 request["input"] = list(request.get("input") or []) + appended_items
                 request_suffix.extend(copy.deepcopy(appended_items))
+                if frontend_work_pending:
+                    # Even at the web budget limit, return external calls to
+                    # Codex before asking the model to reason about their results.
+                    persist_progress()
+                    break
                 request["tool_choice"] = "none"
                 finalizing = True
                 persist_progress()
@@ -5410,6 +5490,11 @@ class RouterState:
                 for item in externalize_for_codex(copy.deepcopy(pending_calls)):
                     if not await event_sink({"type": "response.output_item.done", "item": item}):
                         raise ConnectionError("websocket client disconnected")
+            if frontend_work_pending:
+                # Managed web calls execute here, but shell/patch/etc. calls
+                # execute in Codex. Continuing inference now would expose calls
+                # without their results and can induce redundant retries.
+                break
 
         last_response = copy.deepcopy(last_response)
         accounting.apply(last_response)
@@ -5500,6 +5585,7 @@ class RouterState:
         request["model"] = profile.alias
         if profile.temperature is not None:
             request["temperature"] = profile.temperature
+        self._restore_managed_web_input(profile, request)
         request = normalize_responses_request(request, profile)
         request["model"] = profile.alias
         compaction_source = self._compaction_tool_scaffold(profile, request)
@@ -6176,10 +6262,12 @@ async def _iter_proxy_content(
     content: Any,
     *,
     keepalive_interval_seconds: float,
+    frame_sse: bool = False,
 ) -> AsyncIterator[bytes | None]:
     """Read one upstream body without treating healthy SSE silence as a disconnect."""
 
     pending: asyncio.Task[bytes] | None = None
+    buffer = b""
     try:
         while True:
             pending = asyncio.create_task(content.read(8192))
@@ -6195,7 +6283,21 @@ async def _iter_proxy_content(
             pending = None
             if not chunk:
                 break
-            yield chunk
+            if not frame_sse:
+                yield chunk
+                continue
+            # Upstream reads can end inside a data line, or between data lines
+            # belonging to one event. Keepalives are safe only between frames.
+            buffer += chunk
+            while True:
+                frame, remainder = _pop_sse_frame(buffer)
+                if frame is None:
+                    break
+                consumed = len(buffer) - len(remainder)
+                yield buffer[:consumed]
+                buffer = remainder
+        if buffer:
+            yield buffer
     finally:
         if pending is not None and not pending.done():
             pending.cancel()
@@ -6213,6 +6315,87 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
             return await _handle_http_proxy(request)
     except Exception as exc:
         return web.json_response({"error": {"message": str(exc)}}, status=502)
+
+
+async def _handle_http_responses(
+    request: web.Request,
+    payload: dict[str, Any],
+    profile: ModelProfile,
+    request_kind: str | None,
+) -> web.StreamResponse:
+    """Use the same generation, tool, and lineage path on HTTP and WebSocket."""
+    state: RouterState = request.app["state"]
+    payload = copy.deepcopy(payload)
+    _stabilize_codex_prompt_cache_key(payload, request.headers)
+    if request_kind is not None:
+        metadata = dict(payload.get("client_metadata") or {})
+        metadata["x-codex-turn-metadata"] = json.dumps({"request_kind": request_kind})
+        payload["client_metadata"] = metadata
+    if isinstance(payload.get("input"), str):
+        payload["input"] = [{"type": "message", "role": "user", "content": payload["input"]}]
+    payload.setdefault("input", [])
+    try:
+        # Reject unsupported efforts before committing streaming HTTP headers.
+        _apply_reasoning_effort(dict(payload), profile, request_kind=request_kind)
+    except ValueError as exc:
+        return web.json_response(
+            {"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400
+        )
+    if state.http_client is None:
+        return web.json_response({"error": {"message": "router HTTP client session is not open"}}, status=500)
+
+    response_id = state.mint_response_id("warm" if payload.get("generate") is False else "resp")
+    streaming = payload.get("stream") is True
+    response = web.StreamResponse(headers={"Content-Type": "text/event-stream"}) if streaming else None
+    task: asyncio.Task[Any] | None = None
+
+    async def send(event: dict[str, Any]) -> bool:
+        assert response is not None
+        await response.write(f"data: {json.dumps(event)}\n\n".encode())
+        return True
+
+    try:
+        if response is not None:
+            await response.prepare(request)
+            await send({"type": "response.created", "response": {"id": response_id}})
+        # The HTTP wrapper already owns pool_request; do not acquire it twice.
+        task = asyncio.create_task(state._process_websocket_create(
+            payload, preset_response_id=response_id, event_sink=send if streaming else None
+        ))
+        while not task.done():
+            done, _ = await asyncio.wait(
+                {task}, timeout=HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS
+                if streaming and HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS > 0 else None,
+            )
+            if not done and response is not None:
+                await response.write(b": marathon-keepalive\n\n")
+        result = task.result()
+        completed = dict(result["backend_response"])
+        completed.update(id=result["response_id"], object="response", status="completed",
+                         output=result["output_items"], usage=result["usage"])
+        if response is None:
+            return web.json_response(completed)
+        if not result.get("streamed"):
+            for item in result["output_items"]:
+                await send({"type": "response.output_item.done", "item": item})
+        await send({"type": "response.completed", "response": completed})
+        await response.write_eof()
+        return response
+    except Exception as exc:
+        if response is None:
+            return web.json_response({"error": {"message": str(exc)}}, status=502)
+        if not _is_client_disconnect(exc):
+            try:
+                await send({"type": "response.failed", "response": {
+                    "id": response_id, "status": "failed", "error": {"message": str(exc)}}})
+                await response.write_eof()
+            except (ConnectionError, RuntimeError):
+                pass
+        return response
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 async def _handle_http_proxy(request: web.Request) -> web.StreamResponse:
@@ -6270,9 +6453,11 @@ async def _handle_http_proxy(request: web.Request) -> web.StreamResponse:
         )
         return web.json_response({"error": {"message": str(exc)}}, status=502)
 
+    if path == "/v1/responses" and data is not None:
+        return await _handle_http_responses(request, data, profile, request_kind)
+
     body = raw_body
     if data is not None:
-        raw_snapshot = data
         data = dict(data)
         if _stabilize_codex_prompt_cache_key(data, request.headers):
             state.telemetry.emit(
@@ -6282,80 +6467,7 @@ async def _handle_http_proxy(request: web.Request) -> web.StreamResponse:
         data["model"] = profile.alias
         if profile.temperature is not None:
             data["temperature"] = profile.temperature
-        if path == "/v1/responses":
-            try:
-                data = normalize_responses_request(data, profile, request_kind=request_kind)
-            except ValueError as exc:
-                state.telemetry.emit(
-                    "router.http.rejected",
-                    {"path": path, "phase": "request", "error": str(exc)},
-                    level="warning",
-                )
-                return web.json_response(
-                    {
-                        "error": {
-                            "message": str(exc),
-                            "type": "invalid_request_error",
-                        }
-                    },
-                    status=400,
-                )
-            if data.pop("_marathon_web_search_enabled", False):
-                # The managed web-tool loop is only implemented on the
-                # WebSocket Responses path. Keep HTTP/SSE fallback from
-                # leaking router-private fields or unmanaged web functions to
-                # llama.cpp.
-                data["tools"] = _strip_managed_web_tools(data.get("tools"))
-            data.pop("_marathon_instruction_base_hash", None)
-            tool_output_truncations = int(
-                data.pop("_marathon_tool_output_truncations", 0) or 0
-            )
-            malformed_tool_replay_drops = int(
-                data.pop("_marathon_malformed_tool_replay_drops", 0) or 0
-            )
-            if tool_output_truncations:
-                state.telemetry.emit(
-                    "router.tool_output.truncated",
-                    {
-                        "count": tool_output_truncations,
-                        "limit_chars": max(
-                            1,
-                            _env_int(
-                                "MARATHON_TOOL_OUTPUT_MAX_CHARS",
-                                DEFAULT_TOOL_OUTPUT_MAX_CHARS,
-                            ),
-                        ),
-                        "transport": "http",
-                    },
-                )
-            if malformed_tool_replay_drops:
-                state.telemetry.emit(
-                    "router.tool_history.sanitized",
-                    {
-                        "dropped_items": malformed_tool_replay_drops,
-                        "transport": "http",
-                    },
-                    level="warning",
-                )
-            if request_kind == "compaction":
-                state.defer_compaction_checkpoint(
-                    profile,
-                    str(data.get("prompt_cache_key") or ""),
-                    context_tokens=0,
-                    transport="http",
-                )
         body = json.dumps(data, separators=(",", ":")).encode()
-        if path == "/v1/responses":
-            state.trace_request(
-                requested_model=requested_model,
-                profile=profile,
-                raw_request=raw_snapshot,
-                normalized_request=data,
-                path=path,
-                method=request.method,
-                raw_body_bytes=len(raw_body),
-                normalized_body_bytes=len(body),
-            )
 
     if state.http_client is None:
         return web.json_response({"error": {"message": "router HTTP client session is not open"}}, status=500)
@@ -6391,6 +6503,7 @@ async def _handle_http_proxy(request: web.Request) -> web.StreamResponse:
             async for chunk in _iter_proxy_content(
                 upstream.content,
                 keepalive_interval_seconds=keepalive_interval,
+                frame_sse=content_type.startswith("text/event-stream"),
             ):
                 if chunk is None:
                     keepalive = b": marathon-keepalive\n\n"

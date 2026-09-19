@@ -98,7 +98,7 @@ def main():
     parser.add_argument('variant', choices=['baseline', 'swift'])
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--repeats', type=int, default=1)
-    parser.add_argument('--tasks', nargs='+', choices=['graph', 'count', 'patch', 'parser', 'diagnostics'], default=['graph', 'count'])
+    parser.add_argument('--tasks', nargs='+', choices=['graph', 'count', 'patch', 'parser', 'diagnostics', 'research', 'research-debug'], default=['graph', 'count'])
     parser.add_argument('--timeout', type=int, default=300)
     parser.add_argument('--frontend-bin', type=Path, help='Explicit candidate frontend for before/after native-patch checks')
     args = parser.parse_args()
@@ -209,6 +209,13 @@ def main():
                     workspace.mkdir(parents=True)
                     (workspace / 'settings.py').write_text('FIRST = 1\nKEEP = "unchanged"\nLAST = 3\n')
                     prompt = 'Using one apply_patch tool call with two small replace operations, change FIRST from 1 to 2 and LAST from 3 to 4 in settings.py. Preserve KEEP exactly. Verify the result. Do not commit or create other files.'
+                elif task in {'research', 'research-debug'}:
+                    workspace.mkdir(parents=True)
+                    if task == 'research':
+                        prompt = 'Consult the official Node.js documentation online at https://nodejs.org/api/assert.html and explain whether assert.throws(() => { throw new Error("hello") }, /^hello$/) passes. Verify your explanation against the documentation and a tiny local execution. Give a concise answer with the supporting documentation link. Do not install packages, edit files, or commit.'
+                    else:
+                        (workspace / 'example.py').write_text('import asyncio\n\nasync def main():\n    async with asyncio.TaskGroup() as group:\n        group.create_task(asyncio.sleep(0.01))\n\nasyncio.run(main())\n')
+                        prompt = 'Review example.py and research Python asyncio.TaskGroup in the official online documentation. If a child task raises ValueError, do sibling tasks keep running, and what exception does the caller receive? Verify with a small local execution and cite the documentation supporting your answer. Do not edit files, install packages, or commit. Keep the final answer concise.'
                 elif task == 'diagnostics':
                     workspace.mkdir(parents=True)
                     (workspace / 'arithmetic.test.cjs').write_text(
@@ -275,6 +282,12 @@ def main():
                         result['answer_error'] = str(exc)
                 elif task == 'patch':
                     result['correct_file'] = (workspace / 'settings.py').read_text() == 'FIRST = 2\nKEEP = "unchanged"\nLAST = 4\n'
+                elif task in {'research', 'research-debug'}:
+                    result['workspace_diff'] = check(['git', 'diff'], workspace)
+                    result['unexpected_files'] = subprocess.check_output(
+                        ['git', 'ls-files', '--others', '--exclude-standard'], cwd=workspace, text=True).splitlines()
+                    if (trial / 'answer.md').exists():
+                        result['answer'] = (trial / 'answer.md').read_text()
                 elif task == 'diagnostics':
                     result['independent_tests'] = check(['node', '--test', 'arithmetic.test.cjs'], workspace)
                     result['fixture_preserved'] = all((workspace / p).is_file() and
