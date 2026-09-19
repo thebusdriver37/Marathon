@@ -98,8 +98,9 @@ def main():
     parser.add_argument('variant', choices=['baseline', 'swift'])
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--repeats', type=int, default=1)
-    parser.add_argument('--tasks', nargs='+', choices=['graph', 'count', 'patch', 'parser'], default=['graph', 'count'])
+    parser.add_argument('--tasks', nargs='+', choices=['graph', 'count', 'patch', 'parser', 'diagnostics'], default=['graph', 'count'])
     parser.add_argument('--timeout', type=int, default=300)
+    parser.add_argument('--frontend-bin', type=Path, help='Explicit candidate frontend for before/after native-patch checks')
     args = parser.parse_args()
     out = args.output.resolve() / args.variant
     out.mkdir(parents=True, exist_ok=False)
@@ -139,6 +140,8 @@ def main():
                MARATHON_SLOT_SNAPSHOTS_ENABLED='0',
                XDG_CONFIG_HOME=str(out / 'config'), XDG_STATE_HOME=str(out / 'state'),
                CODEX_LLAMA_DEBUG='1', PYTHONDONTWRITEBYTECODE='1')
+    if args.frontend_bin:
+        env['MARATHON_CODEX_BIN'] = str(args.frontend_bin.resolve(strict=True))
     instance = 'failure-probe-' + args.variant
     save(out / 'config/marathon/instances' / instance / 'selection.json',
          {'schema': 1, 'model': 'qwen3.8-27b-iq4-xs', 'profile': 'one-gpu-196k-uncensored',
@@ -169,6 +172,7 @@ def main():
          'backend_entry': entry, 'production_config_sha256': hashlib.sha256(original_config).hexdigest(),
          'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
          'repeats': args.repeats, 'tasks': args.tasks, 'timeout_s': args.timeout,
+         'frontend_bin_override': env.get('MARATHON_CODEX_BIN'),
          'temperature': 1.0, 'seed': 'not pinned; independent repetitions',
          'reasoning': 'medium', 'interface': 'installed marathon exec, no instruction override',
          'administrative_changes': 'isolated homes/catalog/logs; workspace-write sandbox; disk slot snapshots disabled',
@@ -205,6 +209,15 @@ def main():
                     workspace.mkdir(parents=True)
                     (workspace / 'settings.py').write_text('FIRST = 1\nKEEP = "unchanged"\nLAST = 3\n')
                     prompt = 'Using one apply_patch tool call with two small replace operations, change FIRST from 1 to 2 and LAST from 3 to 4 in settings.py. Preserve KEEP exactly. Verify the result. Do not commit or create other files.'
+                elif task == 'diagnostics':
+                    workspace.mkdir(parents=True)
+                    (workspace / 'arithmetic.test.cjs').write_text(
+                        "const test = require('node:test');\n"
+                        "const assert = require('node:assert/strict');\n"
+                        "test('addition', () => assert.equal(2 + 2, 4));\n"
+                        "test('invoice total', () => assert.equal(7 * 6, 43));\n"
+                        "test('subtraction', () => assert.equal(9 - 3, 6));\n")
+                    prompt = 'Run the existing Node test suite and diagnose its failure. Report the individual passing and failing test counts, failing test name, and exact actual and expected values. Do not edit files, fix the deliberately incorrect test, install packages, or commit. Finish once you have verified those facts.'
                 else:
                     (workspace / 'src').mkdir(parents=True)
                     original = Path('/home/deforest/AI/experiments/marathon-failure-probe-20260919/baseline/graph-1/workspace')
@@ -216,7 +229,8 @@ def main():
                 subprocess.run(['git', 'init', '-q', str(workspace)], check=True)
                 subprocess.run(['git', 'add', '.'], cwd=workspace, check=True)
                 protected = {str(p.relative_to(workspace)): hashlib.sha256(p.read_bytes()).hexdigest()
-                             for p in workspace.rglob('*') if p.is_file() and 'test' in p.relative_to(workspace).parts}
+                             for p in workspace.rglob('*') if p.is_file() and '.git' not in p.relative_to(workspace).parts
+                             and ('test' in p.relative_to(workspace).parts or task == 'diagnostics')}
                 current_env = dict(env, MARATHON_CODEX_HOME=str(trial / 'codex-home'),
                                    MARATHON_WEB_TRACE_FILE=str(trial / 'web-trace.jsonl'))
                 command = ['/home/deforest/.local/bin/marathon', '--instance', instance, 'exec', '--json',
@@ -261,15 +275,35 @@ def main():
                         result['answer_error'] = str(exc)
                 elif task == 'patch':
                     result['correct_file'] = (workspace / 'settings.py').read_text() == 'FIRST = 2\nKEEP = "unchanged"\nLAST = 4\n'
+                elif task == 'diagnostics':
+                    result['independent_tests'] = check(['node', '--test', 'arithmetic.test.cjs'], workspace)
+                    result['fixture_preserved'] = all((workspace / p).is_file() and
+                        hashlib.sha256((workspace / p).read_bytes()).hexdigest() == digest
+                        for p, digest in protected.items())
+                    result['unexpected_files'] = subprocess.check_output(
+                        ['git', 'ls-files', '--others', '--exclude-standard'], cwd=workspace, text=True).splitlines()
+                    if (trial / 'answer.md').exists():
+                        result['answer'] = (trial / 'answer.md').read_text()
                 else:
                     (workspace / 'test').mkdir(exist_ok=True)
                     shutil.copy2(FIXTURES / 'hidden_tests/planner.hidden.test.js', workspace / 'test/planner.hidden.test.js')
                     result['hidden'] = check(['node', '--test', 'test/planner.hidden.test.js'], workspace)
                 result['diff_check'] = check(['git', 'diff', '--check'], workspace)
+                completed_items = []
+                result['invalid_event_lines'] = 0
+                for line in (trial / 'events.jsonl').read_text().splitlines():
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        result['invalid_event_lines'] += 1
+                        continue
+                    if event.get('type') == 'item.completed':
+                        completed_items.append(event['item'])
+                result['command_calls'] = sum(item.get('type') == 'command_execution' for item in completed_items)
                 save(trial / 'result.json', result)
                 results.append(result)
                 save(out / 'results.json', results)
-                print(json.dumps({k: v for k, v in result.items() if k not in {'audit', 'visible', 'hidden', 'diff_check', 'verification_script'}}), flush=True)
+                print(json.dumps({k: v for k, v in result.items() if k not in {'audit', 'visible', 'hidden', 'diff_check', 'verification_script', 'independent_tests', 'answer'}}), flush=True)
                 # Archive real router diagnostics without introducing an alternate request path.
                 logs = out / 'state/marathon/instances' / instance / 'logs'
                 if logs.exists():

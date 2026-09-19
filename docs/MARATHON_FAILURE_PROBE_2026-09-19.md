@@ -53,7 +53,9 @@ The strict-mode requirement for semantic errors to include a field name remained
 
 The baseline graph miss was strict parsing silently skipping an invalid duration instead of raising a source/line/field error.
 The merge's timeout is an evaluation limit, not a demonstrated model defect or a completed full-session success.
-Its generated CLI still printed 49 services while its audit correctly reported 48, a cross-file integration discrepancy worth revisiting without the cutoff.
+Its first CLI validation printed 49 services while its audit correctly reported 48, exposing a cross-file integration discrepancy.
+Follow-up transcript review found that the merge noticed and repaired this before the cutoff; independent execution of the retained final CLI now reports 48.
+The session still timed out before a final answer, but the discrepancy should not be listed as an unresolved defect in its final code snapshot.
 The merge also spent effort trying shell commands named `search` and `browse`; do not infer a router web-tool failure solely from those attempts.
 
 The counting oracle was independently verified by exhaustive enumeration and subset dynamic programming before grading.

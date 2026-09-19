@@ -82,13 +82,17 @@ fi
 
 (
   cd "$BUILD_CODEX_DIR/codex-rs"
-  cargo build --locked --profile "$BUILD_PROFILE" -p codex-cli
+  cargo build --locked --profile "$BUILD_PROFILE" -p codex-cli --bin codex
 )
 
 candidate="$CARGO_TARGET_DIR/$BUILD_PROFILE/codex"
 "$candidate" --version
 "$candidate" --help >/dev/null
 "$candidate" exec --help >/dev/null
+if [[ "${MARATHON_CODEX_RUN_TESTS:-0}" == "1" ]]; then
+  MARATHON_SANDBOX_TEST_BIN="$candidate" python3 -m unittest discover \
+    -s "$ROOT_DIR/tests" -p test_sandbox_diagnostics.py -v
+fi
 
 install_dir="$(dirname "$INSTALL_BIN")"
 mkdir -p "$install_dir"
