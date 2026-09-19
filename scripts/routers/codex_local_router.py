@@ -1774,7 +1774,8 @@ def _web_final_response_has_answer(response: dict[str, Any]) -> bool:
 def _structured_patch_to_input(operations: Any) -> str:
     if not isinstance(operations, list) or not operations:
         return ""
-    result = ["*** Begin Patch"]
+    sections: dict[str, list[str]] = {}
+    actions: dict[str, str] = {}
     for operation in operations:
         if not isinstance(operation, dict):
             return ""
@@ -1788,14 +1789,18 @@ def _structured_patch_to_input(operations: Any) -> str:
         ):
             return ""
         path = path.strip()
+        # Codex permits several update hunks, but only one file section per path.
+        # Preserve replacement order while grouping even interleaved file edits.
+        if path in actions and (action != "replace" or actions[path] != "replace"):
+            return ""
+        actions[path] = action
         if action == "add":
             content = operation.get("content")
             if not isinstance(content, str) or _contains_patch_envelope(content):
                 return ""
-            result.append(f"*** Add File: {path}")
-            result.extend(_patch_lines(content, "+"))
+            sections[path] = [f"*** Add File: {path}", *_patch_lines(content, "+")]
         elif action == "delete":
-            result.append(f"*** Delete File: {path}")
+            sections[path] = [f"*** Delete File: {path}"]
         elif action == "replace":
             old_text = operation.get("old_text")
             new_text = operation.get("new_text")
@@ -1807,11 +1812,15 @@ def _structured_patch_to_input(operations: Any) -> str:
                 or _contains_patch_envelope(new_text)
             ):
                 return ""
-            result.extend([f"*** Update File: {path}", "@@"])
-            result.extend(_patch_lines(old_text, "-"))
-            result.extend(_patch_lines(new_text, "+"))
+            section = sections.setdefault(path, [f"*** Update File: {path}"])
+            section.append("@@")
+            section.extend(_patch_lines(old_text, "-"))
+            section.extend(_patch_lines(new_text, "+"))
         else:
             return ""
+    result = ["*** Begin Patch"]
+    for section in sections.values():
+        result.extend(section)
     result.append("*** End Patch")
     return "\n".join(result)
 

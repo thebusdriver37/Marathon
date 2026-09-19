@@ -1150,6 +1150,31 @@ context = 32768
             ],
         )
 
+    def test_structured_patch_groups_replacements_for_the_same_file(self) -> None:
+        compiled = router_module._structured_patch_to_input([
+            {"action": "replace", "path": "main.py", "old_text": "first = 1", "new_text": "first = 2"},
+            {"action": "replace", "path": "main.py", "old_text": "last = 3", "new_text": "last = 4"},
+        ])
+        self.assertEqual(compiled, "*** Begin Patch\n*** Update File: main.py\n@@\n-first = 1\n+first = 2\n@@\n-last = 3\n+last = 4\n*** End Patch")
+
+    def test_structured_patch_groups_interleaved_file_replacements(self) -> None:
+        compiled = router_module._structured_patch_to_input([
+            {"action": "replace", "path": "main.py", "old_text": "a", "new_text": "b"},
+            {"action": "add", "path": "new.txt", "content": "keep"},
+            {"action": "replace", "path": "main.py", "old_text": "c", "new_text": "d"},
+        ])
+        self.assertEqual(compiled.count("*** Update File: main.py"), 1)
+        self.assertIn("@@\n-a\n+b\n@@\n-c\n+d\n*** Add File: new.txt", compiled)
+
+    def test_structured_patch_rejects_conflicting_file_actions(self) -> None:
+        replace = {"action": "replace", "path": "main.py", "old_text": "a", "new_text": "b"}
+        add = {"action": "add", "path": "main.py", "content": "new"}
+        delete = {"action": "delete", "path": "main.py"}
+        for operations in ([add, add], [delete, delete], [add, delete], [delete, add],
+                           [replace, delete], [delete, replace], [replace, add], [add, replace]):
+            with self.subTest(operations=operations):
+                self.assertEqual(router_module._structured_patch_to_input(operations), "")
+
     def test_structured_patch_rejects_embedded_patch_envelopes(self) -> None:
         compiled = router_module._structured_patch_to_input(
             [
