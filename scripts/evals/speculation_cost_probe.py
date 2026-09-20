@@ -49,7 +49,15 @@ def main():
     p.add_argument('--media-screen', action='store_true', help='Reproduce image-history speculation behavior with a synthetic image.')
     p.add_argument('--media-padding-records', type=int, choices=[0, 2800], default=0)
     p.add_argument('--neural-only', action='store_true', help='Disable lookup in the isolated mixed-copy worker for diagnosis.')
+    p.add_argument('--draft-model', type=Path, help='Alternative GGUF mounted read-only in the isolated worker.')
+    p.add_argument('--draft-width', type=int, choices=range(1, 32), help='Startup neural proposal width for the isolated worker.')
+    p.add_argument('--cuda-module-loading', choices=['EAGER', 'LAZY'], help='Diagnose CUDA module allocation timing.')
+    p.add_argument('--ubatch-size', type=int, choices=[32, 64, 128, 256], help='Isolated compute scratch-memory diagnostic.')
+    p.add_argument('--draft-kind', choices=['draft-dflash', 'draft-dspark'], help='Explicit alternative draft architecture.')
+    p.add_argument('--llama-library', type=Path, help='Isolated model graph library overlay.')
     a = p.parse_args()
+    if (a.draft_model or a.draft_width or a.cuda_module_loading or a.ubatch_size or a.draft_kind or a.llama_library) and a.mode not in ('phase-cost', 'wide-copy', 'mixed-copy'):
+        p.error('Draft overrides require an isolated neural diagnostic worker.')
     if a.conversation_screen and a.mode != 'mixed-copy':
         p.error('Conversation screening requires isolated mixed-copy mode.')
     if (a.media_screen or a.neural_only) and a.mode != 'mixed-copy':
@@ -105,6 +113,8 @@ def main():
             'order':([copy_width]*3 if a.conversation_screen else ([6,0,0,6] if a.mode == 'paired' else [copy_width,copy_width])), 'mode':a.mode,
             'sampling':{'reasoning':'medium','temperature':([0,0.7] if a.quality else (0.7 if a.app_smoke or a.conversation_screen else a.copy_temperature))},
             'conversation_screen':a.conversation_screen,
+            'neural_width_override':a.draft_width, 'ubatch_override':a.ubatch_size,
+            'draft_kind_override':a.draft_kind,
             'quality_suite':a.quality, 'long_quality':a.long_quality,
             'copy_fixture':a.copy_fixture,
             'copy_temperature':a.copy_temperature,
@@ -150,6 +160,23 @@ def main():
                 argv[argv.index('--spec-ngram-map-k-size-m')+1]=str(copy_width)
             if a.neural_only:
                 argv[argv.index('--spec-type')+1]='draft-dflash'
+            if a.draft_model:
+                draft=a.draft_model.resolve(strict=True)
+                argv[2:2]=['--volume',str(draft)+':/candidate.gguf:ro']
+                argv[argv.index('--spec-draft-model')+1]='/candidate.gguf'
+                save('draft-model.json',{'path':str(draft),'sha256':hashlib.file_digest(draft.open('rb'),'sha256').hexdigest()})
+            if a.draft_width:
+                argv[argv.index('--spec-draft-n-max')+1]=str(a.draft_width)
+            if a.cuda_module_loading:
+                argv[2:2]=['--env','CUDA_MODULE_LOADING='+a.cuda_module_loading]
+            if a.ubatch_size:
+                argv[argv.index('--ubatch-size')+1]=str(a.ubatch_size)
+            if a.draft_kind:
+                argv[argv.index('--spec-type')+1]=('' if a.neural_only else 'ngram-map-k,')+a.draft_kind
+            if a.llama_library:
+                library=a.llama_library.resolve(strict=True)
+                argv[2:2]=['--volume',str(library)+':/app/libllama.so.0.3.0:ro']
+                save('llama-library.json',{'path':str(library),'sha256':hashlib.file_digest(library.open('rb'),'sha256').hexdigest()})
             save('scratch-command.json',argv)
             # The registered worker is unloaded and leased; only one copy runs.
             subprocess.run(argv,check=True,stdout=subprocess.DEVNULL)
