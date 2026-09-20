@@ -30,7 +30,7 @@ from marathon_app.pool import acquire_pool_worker
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--gpu', type=int, choices=[1, 2], default=1)
+    p.add_argument('--gpu', type=int, choices=[1, 2, 3], default=1)
     p.add_argument('--mode', choices=['paired', 'copy-peak', 'phase-cost', 'wide-copy', 'lookup-copy', 'mixed-copy'], default='paired')
     p.add_argument('--lookup-width', type=int, choices=[6, 7, 15, 31, 63, 127, 255], default=15,
                    help='Proposal length for lookup-copy; six isolates drafter removal.')
@@ -38,12 +38,24 @@ def main():
     p.add_argument('--long-quality', action='store_true', help='Run the synthetic near-capacity retrieval screen.')
     p.add_argument('--quality-case', choices=['merge_intervals'], help='Rerun a selected quality case with the recorded prompt.')
     p.add_argument('--server-library', type=Path, help='Isolated server library overlay; never alters the runtime image.')
+    p.add_argument('--common-library', type=Path, help='Isolated common library overlay for media compatibility diagnosis.')
+    p.add_argument('--legacy-media-snapshot', type=Path, help='An explicitly selected synthetic snapshot whose old version must be rejected.')
     p.add_argument('--copy-fixture', choices=['registry', 'varied'], default='registry')
     p.add_argument('--copy-temperature', type=float, default=0.0)
     p.add_argument('--copy-padding-records', type=int, choices=[0, 7000], default=0,
                    help='Synthetic unrelated archive after the file, to exercise long-context lookup.')
     p.add_argument('--app-smoke', action='store_true', help='Run a fresh real-Marathon coding task against the diagnostic worker.')
+    p.add_argument('--conversation-screen', action='store_true', help='Measure fixed-budget synthetic conversation with the selected startup lookup width.')
+    p.add_argument('--media-screen', action='store_true', help='Reproduce image-history speculation behavior with a synthetic image.')
+    p.add_argument('--media-padding-records', type=int, choices=[0, 2800], default=0)
+    p.add_argument('--neural-only', action='store_true', help='Disable lookup in the isolated mixed-copy worker for diagnosis.')
     a = p.parse_args()
+    if a.conversation_screen and a.mode != 'mixed-copy':
+        p.error('Conversation screening requires isolated mixed-copy mode.')
+    if (a.media_screen or a.neural_only) and a.mode != 'mixed-copy':
+        p.error('Media diagnosis requires isolated mixed-copy mode.')
+    if a.common_library and a.mode != 'mixed-copy':
+        p.error('Common library overlays require isolated mixed-copy mode.')
     if not 0 <= a.copy_temperature <= 2:
         p.error('Copy temperature must be between zero and two.')
     copy_width = a.lookup_width if a.mode in ('lookup-copy', 'mixed-copy') else (7 if a.mode == 'wide-copy' else 6)
@@ -90,8 +102,9 @@ def main():
         digest = hashlib.sha256(config.read_bytes()).hexdigest()
         save('protocol.json', {'model': model, 'gpu': a.gpu, 'power_w':float(power),
             'config_sha256':digest, 'context_capacity':196000, 'privacy':'new synthetic fixtures only',
-            'order':[6,0,0,6] if a.mode == 'paired' else [copy_width,copy_width], 'mode':a.mode,
-            'sampling':{'reasoning':'medium','temperature':([0,0.7] if a.quality else (0.7 if a.app_smoke else a.copy_temperature))},
+            'order':([copy_width]*3 if a.conversation_screen else ([6,0,0,6] if a.mode == 'paired' else [copy_width,copy_width])), 'mode':a.mode,
+            'sampling':{'reasoning':'medium','temperature':([0,0.7] if a.quality else (0.7 if a.app_smoke or a.conversation_screen else a.copy_temperature))},
+            'conversation_screen':a.conversation_screen,
             'quality_suite':a.quality, 'long_quality':a.long_quality,
             'copy_fixture':a.copy_fixture,
             'copy_temperature':a.copy_temperature,
@@ -110,10 +123,19 @@ def main():
                 if value.endswith(':/cache'):
                     argv[i]=str(cache)+':/cache'
             argv.insert(2,'--detach')
+            if a.legacy_media_snapshot:
+                legacy=a.legacy_media_snapshot.resolve(strict=True)
+                assert legacy.is_relative_to(ROOT/'.marathon/diagnostics') and legacy.name=='synthetic-media-check.bin'
+                for path in legacy.parent.glob(legacy.name+'*'):
+                    argv[2:2]=['--volume',str(path)+':/cache/legacy-media.bin'+path.name[len(legacy.name):]+':ro']
             if a.server_library:
                 library=a.server_library.resolve(strict=True)
                 argv[2:2]=['--volume',str(library)+':/app/libllama-server-impl.so:ro']
                 save('server-library.json',{'path':str(library),'sha256':hashlib.sha256(library.read_bytes()).hexdigest()})
+            if a.common_library:
+                library=a.common_library.resolve(strict=True)
+                argv[2:2]=['--volume',str(library)+':/app/libllama-common.so.0.3.0:ro']
+                save('common-library.json',{'path':str(library),'sha256':hashlib.sha256(library.read_bytes()).hexdigest()})
             argv.remove('--rm')  # Keep startup failure logs until our cleanup.
             argv+=['--log-verbosity','4' if a.mode == 'phase-cost' else '3']
             if a.mode in ('wide-copy', 'lookup-copy'):
@@ -126,6 +148,8 @@ def main():
                     del argv[index:index+2]
             if a.mode == 'mixed-copy':
                 argv[argv.index('--spec-ngram-map-k-size-m')+1]=str(copy_width)
+            if a.neural_only:
+                argv[argv.index('--spec-type')+1]='draft-dflash'
             save('scratch-command.json',argv)
             # The registered worker is unloaded and leased; only one copy runs.
             subprocess.run(argv,check=True,stdout=subprocess.DEVNULL)
@@ -146,6 +170,99 @@ def main():
         else:
             owned = True
         request('/v1/chat/completions', {'model':model,'messages':[{'role':'user','content':'Reply READY.'}], 'max_tokens':8})
+        if a.legacy_media_snapshot:
+            try:
+                request('/slots/0?action=restore',{'filename':'legacy-media.bin'})
+            except urllib.error.HTTPError as error:
+                message=error.read().decode()
+                assert error.code==400 and 'speculative decoder slot state' in message
+                save('legacy-snapshot-rejection.json',{'status':error.code,'message':message})
+            else:
+                raise RuntimeError('Old speculative state was unexpectedly accepted')
+        if a.media_screen:
+            import base64
+            import io
+            from PIL import Image, ImageDraw
+            picture=Image.new('RGB',(384,256),'white')
+            draw=ImageDraw.Draw(picture)
+            draw.rectangle((32,32,160,160),fill='red')
+            draw.ellipse((220,80,340,200),fill='blue')
+            buf=io.BytesIO();picture.save(buf,format='PNG')
+            url='data:image/png;base64,'+base64.b64encode(buf.getvalue()).decode()
+            messages=[{'role':'user','content':[
+                {'type':'text','text':'Describe the two colored shapes and their relative positions accurately, then explain in about 200 words how to recreate the picture.'},
+                {'type':'image_url','image_url':{'url':url}}]}]
+            if a.media_padding_records:
+                archive='\n'.join(f'Archive record {i:04d}: region=blue; revision=2; code=obsolete-{i:04d}.' for i in range(a.media_padding_records))
+                messages[0]['content'].insert(0,{'type':'text','text':'Unrelated archive, do not reproduce:\n'+archive})
+            for stage in range(2):
+                body={'model':model,'messages':messages,'max_tokens':384,'temperature':0,
+                    'seed':8123,'cache_prompt':True,'chat_template_kwargs':{'enable_thinking':False}}
+                data=request('/v1/chat/completions',body)
+                save(f'media-{stage}-response.json',data)
+                message=data['choices'][0]['message'];content=message.get('content') or ''
+                row={'stage':stage,'neural_only':a.neural_only,'timings':data.get('timings'),
+                     'usage':data.get('usage'),'finish_reason':data['choices'][0]['finish_reason'],
+                     'mentions_expected_colors':all(c in content.lower() for c in ('red','blue')),
+                     'message_sha256':hashlib.sha256(json.dumps(message,sort_keys=True).encode()).hexdigest()}
+                save(f'media-{stage}-summary.json',row);print(json.dumps(row),flush=True)
+                messages += [message,{'role':'user','content':'Now explain the difference between the two shapes and how their positions compare, in about 200 words.'}]
+            records={f'station_{i:03d}':{'quota':100+i,'enabled':True} for i in range(48)}
+            source='REGISTRY = '+repr(records)
+            expected=json.loads(json.dumps(records));expected['station_025']['quota']=999
+            messages[-1]={'role':'user','content':'Return only this Python assignment, changing station_025 quota to999 and preserving everything else. No explanation.\n'+source}
+            body={'model':model,'messages':messages,'max_tokens':4096,'temperature':0,'seed':8123,
+                'cache_prompt':True,'chat_template_kwargs':{'enable_thinking':False}}
+            copies=[]
+            for stage in range(2):
+                data=request('/v1/chat/completions',body)
+                save(f'media-copy-{stage}-response.json',data)
+                content=data['choices'][0]['message'].get('content') or ''
+                blocks=re.findall(r'```(?:python)?\s*\n(.*?)```',content,re.S)
+                tree=ast.parse(blocks[-1] if blocks else content)
+                passed=len(tree.body)==1 and isinstance(tree.body[0],ast.Assign) and ast.literal_eval(tree.body[0].value)==expected
+                row={'stage':stage,'exact_copy_pass':passed,'timings':data.get('timings'),
+                     'message_sha256':hashlib.sha256(content.encode()).hexdigest()}
+                save(f'media-copy-{stage}-summary.json',row);print(json.dumps(row),flush=True)
+                assert passed,'Image-history lookup copy changed required output'
+                copies.append(row)
+                if stage==0:
+                    saved=request('/slots/0?action=save',{'filename':'synthetic-media-check.bin'})
+                    restored=request('/slots/0?action=restore',{'filename':'synthetic-media-check.bin'})
+                    save('media-snapshot-roundtrip.json',{'save':saved,'restore':restored})
+            assert copies[0]['message_sha256']==copies[1]['message_sha256']
+            assert hashlib.sha256(config.read_bytes()).hexdigest()==digest
+            return
+        if a.conversation_screen:
+            fixtures = {
+                'explanation': 'Explain to a curious beginner how a refrigerator moves heat out of its inside. Use an everyday analogy, then explain where the analogy breaks down. Write about 350 words.',
+                'planning': 'I keep starting too many hobby projects and finishing none. Help me choose what to work on this weekend without turning my free time into a second job. Give a thoughtful, practical answer of about 350 words.',
+                'fiction': 'Write a 350-word fictional scene about a night-shift archivist discovering that a shipment manifest lists tomorrow as its departure date. Use natural dialogue and an ambiguous ending. Do not explain the story.',
+            }
+            save('conversation-fixtures.json', fixtures)
+            for case, prompt in fixtures.items():
+                body = {'model':model, 'messages':[{'role':'user','content':prompt}],
+                    'max_tokens':768, 'temperature':0.7, 'seed':8123, 'stream':False,
+                    'cache_prompt':True, 'speculative.n_max':copy_width,
+                    'chat_template_kwargs':{'enable_thinking':True,'reasoning_effort':'medium'}}
+                # Warm the exact prompt and graph before measuring decode.
+                request('/v1/chat/completions', dict(body, max_tokens=32))
+                before=metrics(); start=time.monotonic()
+                data=request('/v1/chat/completions',body)
+                elapsed=time.monotonic()-start; after=metrics()
+                save(f'{case}-response.json',data)
+                row={'case':case,'width':copy_width,'wall_s':elapsed,
+                    'timings':data.get('timings'),'usage':data.get('usage'),
+                    'finish_reason':data['choices'][0]['finish_reason'],
+                    'message_sha256':hashlib.sha256(json.dumps(data['choices'][0]['message'],sort_keys=True).encode()).hexdigest(),
+                    'metrics':{k:after[k]-before.get(k,0) for k in after if 'spec_' in k},
+                    'gpu':subprocess.check_output(['nvidia-smi','-i',str(a.gpu),
+                        '--query-gpu=temperature.gpu,power.draw,power.limit,clocks.sm,clocks.mem',
+                        '--format=csv,noheader,nounits'],text=True).strip()}
+                with (a.output/'results.jsonl').open('a') as f:f.write(json.dumps(row)+'\n')
+                print(json.dumps({k:v for k,v in row.items() if k != 'metrics'}),flush=True)
+            assert hashlib.sha256(config.read_bytes()).hexdigest()==digest
+            return
         if a.app_smoke:
             from speculation_quality_cases import run_app
             run_app(a.output,base,save)
