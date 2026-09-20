@@ -92,8 +92,10 @@ WEB_FETCH_TOOL_DESCRIPTION = (
 
 WEB_BROWSE_TOOL_DESCRIPTION = (
     "Render a single URL in a browser-backed extractor and return its main "
-    "content as Markdown. Use this only when web_fetch fails, returns mostly "
+    "content as Markdown. Use this when web_fetch returns mostly "
     "navigation/empty content, or the page is known to depend on JavaScript. "
+    "For HTTP 404/410 or DNS failures, search for a valid URL instead of "
+    "retrying the same address in a browser. "
     "This tool is slower and heavier than web_fetch."
 )
 
@@ -1015,13 +1017,20 @@ async def _crawl4ai_fetch(
     try:
         coro = crawler.arun(url, bypass_cache=True)
         result = await asyncio.wait_for(coro, timeout=timeout_s) if timeout_s else await coro
+        # Rendering an error page can succeed even when the HTTP request failed.
+        status = getattr(result, "status_code", None)
+        if isinstance(status, int) and status >= 400:
+            raise RuntimeError(f"HTTP {status} fetching {url}")
+        if getattr(result, "success", None) is False:
+            detail = getattr(result, "error_message", None) or "browser extraction failed"
+            raise RuntimeError(str(detail))
         # Best-effort redirect safety check: validate any final URL Crawl4AI reports
         # before returning content. This does not prevent the browser from making
         # the request, but it prevents leaking private-network content back to the
         # model unless the user explicitly opts in.
         if not allow_private_networks:
             final_url: str | None = None
-            for attr in ("final_url", "url", "finalUrl"):
+            for attr in ("redirected_url", "final_url", "finalUrl", "url"):
                 value = getattr(result, attr, None)
                 if isinstance(value, str) and value.strip():
                     final_url = value.strip()

@@ -134,6 +134,25 @@ class WebSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("truncated to 500 chars", text)
         self.assertEqual(len(text.split("\n\n", 1)[1]), 500)
 
+    async def test_browser_rejects_http_error_pages_and_failed_extractions(self):
+        executor = web_search.WebFetchExecutor(replace(
+            web_search.WebFetchSettings.from_env(), allow_private_networks=True,
+        ))
+        for status, success, detail, expected in (
+            (404, True, None, "HTTP 404"),
+            (503, True, None, "HTTP 503"),
+            (200, False, "navigation failed", "navigation failed"),
+        ):
+            with self.subTest(status=status, success=success):
+                crawler = mock.Mock()
+                crawler.arun = mock.AsyncMock(return_value=mock.Mock(
+                    status_code=status, success=success, error_message=detail,
+                    markdown="Rendered content from an unsuccessful request",
+                ))
+                with mock.patch.object(executor, "_ensure_crawl4ai", mock.AsyncMock(return_value=crawler)):
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        await executor.browse("https://example.test/article")
+
     async def test_explicit_bing_preserves_full_query_and_default_mix(self):
         client = SequenceClient(FakeResponse({"results": []}), FakeResponse({"results": []}))
         executor = web_search.WebSearchExecutor(settings(), http_client=client)
