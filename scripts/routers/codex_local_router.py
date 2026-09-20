@@ -45,6 +45,7 @@ from aiohttp import web
 
 from marathon_app.local_history import normalize_local_history
 from marathon_app.catalog import external_models, backends
+from marathon_app.model_identity import pool_identity
 from marathon_app.pool import acquire_pool_worker
 from marathon_app.checkpoints import RollingCheckpointStore
 from marathon_app.checkpoints import SNAPSHOT_SIDECAR_SUFFIXES
@@ -2802,7 +2803,16 @@ class RouterState:
         instructions = _base_instructions()
         models = []
         data = []
+        pool = getattr(self, "pool_backend", None)
+        identity = pool_identity(backends().get(pool.id, pool)) if pool else None
+        pool_slugs = getattr(self, "pool_slugs", set())
+        primary = getattr(self, "pool_slug", None)
         for profile in self.available_profiles.values():
+            if profile.slug in pool_slugs and identity:
+                profile = replace(profile, display_name=identity[0], description=identity[1])
+            # Keep aliases routable for old conversations, but do not present
+            # the same worker pool as two different models in the picker.
+            duplicate = profile.slug in pool_slugs and primary in self.available_profiles and profile.slug != primary
             models.append(
                 {
                     "slug": profile.slug,
@@ -2814,7 +2824,7 @@ class RouterState:
                         for effort, description in profile.supported_reasoning_levels
                     ],
                     "shell_type": "shell_command",
-                    "visibility": "list",
+                    "visibility": "hide" if duplicate else "list",
                     "supported_in_api": True,
                     "priority": 0,
                     "additional_speed_tiers": [],

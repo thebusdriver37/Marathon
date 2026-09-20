@@ -86,6 +86,7 @@ class Backend:
     api_key_file: str | None = None
     slot_save_root: Path | None = None
     cache_id: str = ""
+    identity_config: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -593,6 +594,8 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
                 else None
             ),
             cache_id=str(raw.get("cache_id", "")).strip(),
+            identity_config=(Path(str(raw["identity_config"])).expanduser()
+                             if raw.get("identity_config") else None),
         )
     return result
 

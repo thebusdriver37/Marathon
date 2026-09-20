@@ -13,6 +13,9 @@ trafilatura>=2.0,<3.0
 # HTTP server/client used by the local router and web tools.
 aiohttp>=3.9,<4.0
 
+# Read optional machine-local llama-swap model identities without starting workers.
+PyYAML>=6.0,<7.0
+
 # Colorful, SSH-friendly terminal dashboard without a browser or global install.
 rich>=13,<15
 
