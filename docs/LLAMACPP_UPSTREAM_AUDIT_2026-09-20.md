@@ -1,5 +1,8 @@
 # Bounded llama.cpp upstream compatibility audit
 
+Subsequent work completed a separate candidate build and a small real-Marathon comparison; see [the comparison report](LLAMACPP_MARATHON_COMPARISON_2026-09-20.md).
+The statements below describe the earlier audit stage.
+
 Production remains unchanged.
 The upstream review and patch-compatibility probe are complete; no updated runtime was built or deployed.
 A full port needs manual CUDA and server conflict resolution, which exceeds the requested short audit.
