@@ -1,0 +1,28 @@
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -9,6 +9,12 @@
+ #include <map>
+ 
+ class llama_memory_hybrid_idx_context;
++
++// Qwen-family GDN uses x * rsqrt(sum(x*x) + eps), upstream PR #28068.
++static inline ggml_tensor * build_gdn_l2_norm(ggml_context * ctx, ggml_tensor * x, float eps) {
++    const float n = x->ne[0];
++    return ggml_scale(ctx, ggml_rms_norm(ctx, x, eps/n), 1.0f/sqrtf(n));
++}
+ 
+ //
+ // base classes
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -429,8 +429,8 @@
+ 
+     const float eps_norm = hparams.f_norm_rms_eps;
+ 
+-    q_conv = ggml_l2_norm(ctx0, q_conv, eps_norm);
+-    k_conv = ggml_l2_norm(ctx0, k_conv, eps_norm);
++    q_conv = build_gdn_l2_norm(ctx0, q_conv, eps_norm);
++    k_conv = build_gdn_l2_norm(ctx0, k_conv, eps_norm);
+ 
+     //q_conv = ggml_cont_4d(ctx0, q_conv, head_k_dim, num_k_heads, n_seq_tokens, n_seqs);
+     //k_conv = ggml_cont_4d(ctx0, k_conv, head_k_dim, num_k_heads, n_seq_tokens, n_seqs);
