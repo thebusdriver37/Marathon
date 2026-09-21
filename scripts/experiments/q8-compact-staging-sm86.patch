@@ -1,0 +1,100 @@
+--- a/ggml/src/ggml-cuda/fattn-mma-f16.cuh
++++ b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+@@ -535,6 +535,20 @@
+                 ggml_cuda_memcpy_1<sizeof(half2)>(tile_mask + j_sram*(nbatch_fa + 8) + i, mask_h + int64_t(j_vram)*stride_mask + i);
+             }
+         }
++    }
++}
++
++// Diagnostic SM86 256-wide, 8x8 Q8/Q8 decode staging.
++// Packed 272-byte rows preserve the original quantized bytes and arithmetic.
++template<int nthreads, int nrows>
++static __device__ __forceinline__ void q8_raw_stage(char * dst, const char * src, int stride) {
++    constexpr int row_bytes = 272;
++    const unsigned int base = ggml_cuda_cvta_generic_to_shared(dst);
++    const int tid = threadIdx.y * WARP_SIZE + threadIdx.x;
++    for (int c = tid; c < nrows * (row_bytes/16); c += nthreads) {
++        const int row = c / (row_bytes/16);
++        const int off = (c % (row_bytes/16))*16;
++        cp_async_cg_16<0>(base + row*row_bytes + off, src + int64_t(row)*stride + off);
+     }
+ }
+ 
+@@ -684,6 +698,9 @@
+ 
+     constexpr int stride_tile_V = V_is_K_view ? stride_tile_K : (swz_V ? nbatch_V2 : nbatch_V2 + 4);
+ 
++    constexpr bool raw_stage = DKQ == 256 && DV == 256 && ncols1 == 8 && ncols2 == 8 && use_q8_K && use_q8_V;
++    char * raw_K = (char *) (tile_mask + ncols1*(nbatch_fa + 8));
++    char * raw_V = raw_K;
+     const int k_VKQ_0 = kb0 * nbatch_fa;
+ #if defined(TURING_MMA_AVAILABLE)
+     T_C_KQ KQ_C[nbatch_fa/(np*(cols_per_warp == 8 ? T_C_KQ::I : T_C_KQ::J))];
+@@ -702,7 +719,11 @@
+         __syncthreads();
+         if constexpr (use_q8_V) {
+             flash_attn_ext_load_tile_V_q8_0<DV, stride_tile_V, swz_V, nwarps, nbatch_fa, oob_check>
+-                (V_data + int64_t(k_VKQ_0)*stride_V, tile_V, stride_V, k_VKQ_sup);
++                (raw_stage ? raw_V : V_data + int64_t(k_VKQ_0)*stride_V, tile_V, raw_stage ? 272 : stride_V, k_VKQ_sup);
++            if constexpr (raw_stage && !last_iter) {
++                __syncthreads(); // All warps must finish consuming V before reusing its raw buffer for K.
++                q8_raw_stage<nwarps*warp_size, nbatch_fa>(raw_K, K_data + int64_t(k_VKQ_0 + nbatch_fa)*stride_K, stride_K);
++            }
+         } else {
+             flash_attn_ext_f16_load_tile<stride_tile_V, swz_V, nwarps, nbatch_fa, use_cp_async, oob_check>
+                 ((const half2 *) V_data + int64_t(k_VKQ_0)*stride_V, tile_V, nbatch_V2, stride_V, k_VKQ_sup);
+@@ -1132,8 +1153,11 @@
+             }
+             if constexpr (use_q8_K) {
+                 flash_attn_ext_load_tile_q8_0<DKQ, nwarps, nbatch_fa, oob_check>
+-                    (K_data + int64_t(k_VKQ_0 + nbatch_fa)*stride_K, tile_K, stride_K, k_VKQ_sup);
++                    (raw_stage ? raw_K : K_data + int64_t(k_VKQ_0 + nbatch_fa)*stride_K, tile_K, raw_stage ? 272 : stride_K, k_VKQ_sup);
+                 __syncthreads();
++                if constexpr (raw_stage) {
++                    q8_raw_stage<nwarps*warp_size, nbatch_fa>(raw_V, V_data + int64_t(k_VKQ_0 + nbatch_fa)*stride_V, stride_V);
++                }
+             } else {
+                 const half2 * const K_h2 = (const half2 *) K_data;
+                 flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check>
+@@ -1579,9 +1603,20 @@
+                 (mask_h + kb0*nbatch_fa, tile_mask, stride_mask, k_VKQ_sup, jt*ncols1, ne01);
+         }
+         if constexpr (use_q8_K) {
++            constexpr bool raw_stage = DKQ == 256 && DV == 256 && ncols1 == 8 && ncols2 == 8 && use_q8_V;
++            char * raw_K = (char *) (tile_mask + ncols1*(nbatch_fa + 8));
++            char * raw_V = raw_K;
++            if constexpr (raw_stage) {
++                q8_raw_stage<nwarps*warp_size, nbatch_fa>(raw_K, K_data + int64_t(kb0)*nbatch_fa*stride_K, stride_K);
++                cp_async_wait_all();
++                __syncthreads();
++            }
+             flash_attn_ext_load_tile_q8_0<DKQ, nwarps, nbatch_fa, oob_check>
+-                (K_data + int64_t(kb0)*nbatch_fa*stride_K, tile_K, stride_K, k_VKQ_sup);
++                (raw_stage ? raw_K : K_data + int64_t(kb0)*nbatch_fa*stride_K, tile_K, raw_stage ? 272 : stride_K, k_VKQ_sup);
+             __syncthreads();
++            if constexpr (raw_stage) {
++                q8_raw_stage<nwarps*warp_size, nbatch_fa>(raw_V, V_data + int64_t(kb0)*nbatch_fa*stride_V, stride_V);
++            }
+         } else {
+             const half2 * const K_h2 = (const half2 *) K_data;
+             flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check>
+@@ -2259,7 +2294,7 @@
+ 
+     const size_t nbytes_shared_KV = nstages <= 1 ? nbytes_shared_KV_1stage : nbytes_shared_KV_2stage;
+ 
+-    const size_t nbytes_shared_total = std::max(nbytes_shared_combine, Q_in_reg ?
++    size_t nbytes_shared_total = std::max(nbytes_shared_combine, Q_in_reg ?
+         std::max(nbytes_shared_Q,  nbytes_shared_KV + nbytes_shared_mask) :
+                  nbytes_shared_Q + nbytes_shared_KV + nbytes_shared_mask);
+ 
+@@ -2282,6 +2317,9 @@
+         use_q8_V = (use_q8_K || short_q8_V) && cc == 860 && KQV->src[1]->type == GGML_TYPE_Q8_0 && KQV->src[2]->type == GGML_TYPE_Q8_0 &&
+             KQV->src[0]->ne[1] <= 64;
+     }
++    if constexpr (DKQ == 256 && DV == 256 && ncols1 == 8 && ncols2 == 8) {
++        if (use_q8_K && use_q8_V) nbytes_shared_total += nbatch_fa*272;
++    }
+     // DFlash verifies at most seven tokens. Keep other small decode batches
+     // on the same direct path, while 256-row prefill ubatches stage V once
+     // instead of repeating inline dequantization for every query tile.
