@@ -39,6 +39,10 @@ def prompts():
         )
     )
     original = base + "\n\n" + runtime
+    # Preserve the historical ablation baseline after production removed this clause.
+    # Otherwise the removal and replacement variants silently become identical.
+    if "Minimize thinking." not in original:
+        original += "\n\nMinimize thinking."
     old_patch = next(
         line
         for line in base.splitlines()

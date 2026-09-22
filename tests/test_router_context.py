@@ -226,7 +226,7 @@ class RouterContextTests(unittest.TestCase):
             "Upstream Codex prompt.\n\n"
             + router_module.MARATHON_RUNTIME_INSTRUCTIONS,
         )
-        self.assertIn("Minimize thinking.", instructions)
+        self.assertNotIn("Minimize thinking.", instructions)
 
     def test_web_search_cache_signature_normalizes_but_distinguishes_time_range(self) -> None:
         def call(query: str, time_range: str) -> dict[str, object]:

@@ -109,3 +109,11 @@ The production `Minimize thinking.` clause is still present.
 
 These results do not justify adding the phrase to every user prompt for speed or quality.
 They also do not establish whether the Swift merge benefits from the phrase at all; answering that requires an otherwise matched no-phrase control.
+
+## Subsequent user-directed removal, September 22
+
+After reviewing these results and the [September 12 phrase evaluation](PHRASE_EVALUATION_2026-09-12.md), the user chose to remove `Minimize thinking.` from Marathon's default runtime instructions.
+The earlier evaluation found no reproducible overall winner across 360 trials; this decision removes an instruction without an established consistent benefit, rather than claiming the experiments proved zero effect.
+The runtime clause and its test expectation were updated, while the historical prompt-ablation evaluator explicitly retains its old baseline so its variants remain distinct.
+All 122 router-context tests passed, and a direct check confirmed the assembled default instructions omit the clause.
+Already running Marathon processes were not restarted; relaunch Marathon to load the updated runtime defaults.
