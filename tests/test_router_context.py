@@ -2469,6 +2469,10 @@ context = 32768
                 state.starter_cache_max_bytes = 1024 * 1024
                 state.backend_cache_id = "backend-v1"
                 state.slot_save_root = slot_root
+                state.slot_checkpoint_store = router_module.RollingCheckpointStore(
+                    slot_root, slot_root, max_count=8,
+                    max_bytes=1024 * 1024, ttl_seconds=172800,
+                )
                 state.slot_id = 0
                 state.erase_slot = mock.AsyncMock(return_value={"status": "erased"})
                 state.restore_slot = mock.AsyncMock(return_value={"status": "restored"})

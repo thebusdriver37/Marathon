@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import time
@@ -11,6 +12,72 @@ from marathon_app import checkpoints
 
 
 class RollingCheckpointStoreTests(unittest.TestCase):
+    def test_recent_starter_survives_without_metadata_and_symlinks_are_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self.make_store(root / 'cache')
+            store.local_root.mkdir(parents=True)
+            starter = store.local_root / 'starter__model__abc.bin'
+            starter.write_bytes(b'fresh')
+            external = root / 'outside.bin'
+            external.write_bytes(b'keep')
+            (store.local_root / 'starter__model__link.bin').symlink_to(external)
+            self.assertEqual(store.prune()['deleted_count'], 0)
+            self.assertTrue(starter.exists())
+            self.assertEqual(external.read_bytes(), b'keep')
+
+    def test_pruning_waits_for_slot_io_and_cancellation_releases_lock(self):
+        async def exercise(root):
+            store = self.make_store(root)
+            async with store.lock_io():
+                task = asyncio.create_task(asyncio.to_thread(store.prune))
+                await asyncio.sleep(0.03)
+                self.assertFalse(task.done())
+                waiter = asyncio.create_task(wait_for_lock(store))
+                await asyncio.sleep(0.03)
+                waiter.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await waiter
+            await asyncio.wait_for(task, 2)
+            async with store.lock_io():
+                pass
+
+        async def wait_for_lock(store):
+            async with store.lock_io():
+                self.fail('acquired a held lock')
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(exercise(Path(directory)))
+
+    def test_expired_starters_from_other_models_are_pruned_as_bundles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self.make_store(root, ttl_seconds=2)
+            for model in ('retired-a', 'retired-b'):
+                folder = root / model / 'profile'
+                folder.mkdir(parents=True)
+                snapshot = folder / 'starter__profile__abc.bin'
+                snapshot.write_bytes(b'synthetic')
+                Path(f'{snapshot}.draft').write_bytes(b'draft')
+                (folder / 'transcript.jsonl').write_text('untouched fixture')
+            with mock.patch.object(checkpoints.time, 'time', return_value=time.time() + 10):
+                result = store.prune()
+            self.assertEqual(result['deleted_count'], 2)
+            self.assertEqual(list(root.rglob('*.bin*')), [])
+            self.assertEqual(len(list(root.rglob('transcript.jsonl'))), 2)
+
+    def test_starters_share_budget_with_conversations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self.make_store(root, max_bytes=10)
+            folder = root / 'retired' / 'profile'
+            folder.mkdir(parents=True)
+            starter = folder / 'starter__profile__abc.bin'
+            starter.write_bytes(b'123456')
+            self.commit(store, key='new', response_id='one', content=b'abcdef')
+            self.assertFalse(starter.exists())
+            self.assertEqual(len(list(root.rglob('conversation__*.bin'))), 1)
+
     def make_store(
         self,
         root: Path,

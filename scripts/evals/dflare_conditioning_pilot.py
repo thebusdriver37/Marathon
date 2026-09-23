@@ -23,7 +23,7 @@ from safetensors.torch import load_file, save_file
 import gguf
 
 DRAFT = Path('/home/deforest/AI/models/gguf/qwen3.8-27b-dflash2/Qwen3.8-27B-DFlash2-Marathon-R32-Q4_K_M.gguf')
-TARGET = Path('/home/deforest/AI/experiments/swift-uncensored/Swift-Qwen3.8-27B-Uncensored-Merge-IQ4_XS.gguf')
+TARGET = Path('/home/deforest/AI/models/gguf/swift-qwen3.8-27b-uncensored-merge/Swift-Qwen3.8-27B-Uncensored-Merge-IQ4_XS.gguf')
 
 
 def save(path, data):

@@ -1,5 +1,8 @@
 # 262K context on the current Swift merge and one 24 GB GPU
 
+Follow-up: the [local Q5 probe](262K_Q5_PROBE_2026-09-22.md) allocated 262144 successfully, but both Q5 formats lost approximately 30-32% decode throughput at matched 128K input.
+Neither was deployed; the research and proposed probe below describe the earlier hypothesis.
+
 Research found credible ways to allocate 262144 context on a 3090-class card, but no matched demonstration preserving our exact Swift merge, drafter, Marathon capabilities, long-context accuracy, and speed.
 The strongest next candidate is Q5 target KV with correctly compiled CUDA attention, retaining the existing weights and DFlash2 drafter.
 This is a research conclusion and memory estimate, not a validated configuration or deployment.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import fcntl
 import hashlib
@@ -22,6 +23,7 @@ from typing import Iterator
 # Older schemas cannot safely validate the reusable prompt prefix.
 CHECKPOINT_SCHEMA = 7
 CHECKPOINT_PREFIX = "conversation__"
+STARTER_PREFIX = "starter__"
 # Optional recurrent rewind state is tracked in schema 7 like the draft sidecars.
 # Older schema 7 bundles without it remain loadable, but cannot rewind after restore.
 SNAPSHOT_SIDECAR_SUFFIXES = (".draft", ".spec", ".checkpoints")
@@ -170,6 +172,23 @@ class RollingCheckpointStore:
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
+    @contextlib.asynccontextmanager
+    async def lock_io(self):
+        """Cancellation-safe shared retention lock for asynchronous slot I/O."""
+        self.budget_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with (self.budget_root / '.conversation-checkpoints.lock').open('a+') as lock:
+            os.chmod(lock.name, 0o600)
+            try:
+                while True:
+                    try:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        await asyncio.sleep(0.05)
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     @staticmethod
     def _metadata_path(snapshot_path: Path) -> Path:
         return snapshot_path.with_suffix(".json")
@@ -212,7 +231,10 @@ class RollingCheckpointStore:
         if not snapshot_path.is_file() or stat.st_size <= 0:
             return None
         metadata_path = cls._metadata_path(snapshot_path)
-        metadata = CheckpointMetadata.from_path(metadata_path)
+        metadata = (
+            None if snapshot_path.name.startswith(STARTER_PREFIX)
+            else CheckpointMetadata.from_path(metadata_path)
+        )
         sidecar_paths = tuple(
             cls._sidecar_path(snapshot_path, suffix)
             for suffix in SNAPSHOT_SIDECAR_SUFFIXES
@@ -265,9 +287,15 @@ class RollingCheckpointStore:
         records: list[CheckpointRecord] = []
         if not self.budget_root.is_dir():
             return records
-        for snapshot_path in self.budget_root.rglob(
-            f"{CHECKPOINT_PREFIX}*.bin"
-        ):
+        for snapshot_path in self.budget_root.rglob("*.bin"):
+            if not snapshot_path.name.startswith((CHECKPOINT_PREFIX, STARTER_PREFIX)):
+                continue
+            # Never follow an externally linked file or directory during cleanup.
+            if snapshot_path.is_symlink():
+                continue
+            if any(parent.is_symlink() for parent in snapshot_path.parents
+                   if parent != self.budget_root and self.budget_root in parent.parents):
+                continue
             if snapshot_path.name.endswith(".pending.bin"):
                 continue
             record = self._record(snapshot_path)
@@ -308,7 +336,10 @@ class RollingCheckpointStore:
         for record in self._budget_records():
             if record.snapshot_path == protected_path:
                 continue
-            if record.last_used_at < cutoff or record.metadata is None:
+            if record.last_used_at < cutoff or (
+                record.metadata is None
+                and record.snapshot_path.name.startswith(CHECKPOINT_PREFIX)
+            ):
                 deleted_bytes += self._unlink_record(record)
                 deleted.append(str(record.snapshot_path))
 

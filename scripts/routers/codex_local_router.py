@@ -3547,13 +3547,22 @@ class RouterState:
 
     async def _slot_action(self, profile: ModelProfile, action: str, filename: str | None = None) -> dict[str, Any]:
         payload = {"filename": filename} if filename is not None else None
-        return await self._request_json(
-            profile,
-            "POST",
-            f"/slots/{self.slot_id}?action={action}",
-            payload,
-            retry_connection_error=True,
-        )
+        # Serialize on-disk save/restore with cross-model retention cleanup.
+        async with self.slot_checkpoint_store.lock_io():
+            result = await self._request_json(
+                profile,
+                "POST",
+                f"/slots/{self.slot_id}?action={action}",
+                payload,
+                retry_connection_error=True,
+            )
+            if action == "restore" and filename:
+                for member in self._snapshot_bundle_paths(self._slot_save_dir(profile) / filename):
+                    try:
+                        os.utime(member, None)
+                    except OSError:
+                        pass
+            return result
 
     async def erase_slot(self, profile: ModelProfile) -> dict[str, Any]:
         return await self._slot_action(profile, "erase")
@@ -3795,10 +3804,14 @@ class RouterState:
             saved = await self.save_slot(profile, filename)
             if not self._snapshot_ready(snapshot_path):
                 raise RuntimeError("llama.cpp produced an empty starter snapshot")
-            pruned = await asyncio.to_thread(
-                self._prune_starter_cache_sync,
-                profile,
-                filename,
+            async with self.slot_checkpoint_store.lock_io():
+                pruned = await asyncio.to_thread(
+                    self._prune_starter_cache_sync,
+                    profile,
+                    filename,
+                )
+            pruned["shared"] = await asyncio.to_thread(
+                self.slot_checkpoint_store.prune, snapshot_path,
             )
             return {
                 "mode": "build-starter-cache",

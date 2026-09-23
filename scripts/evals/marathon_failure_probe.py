@@ -23,6 +23,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 GPU = ROOT.parent / 'gpu-control'
 SOURCE = Path('/home/deforest/AI/experiments/swift-uncensored')
+MODEL_SOURCE = Path('/home/deforest/AI/models/gguf/swift-qwen3.8-27b-uncensored-merge')
 FIXTURES = SOURCE / 'marathon-validation/templates/graph'
 POOL = 'llama-swap-qwen3.8-uncensored-pool'
 
@@ -162,7 +163,7 @@ def main():
             if value.endswith(':/cache'):
                 command[i] = str(out / 'slots/qwen3.8-27b-iq4-xs') + ':/cache'
         (out / 'slots/qwen3.8-27b-iq4-xs').mkdir(parents=True)
-        command[2:2] = ['--volume', str(SOURCE) + ':/candidate:ro']
+        command[2:2] = ['--volume', str(MODEL_SOURCE) + ':/candidate:ro']
         entry.update(cmd=shlex.join(command), cmdStop='docker stop --timeout 60 ' + container)
         entry.pop('macros', None)
         private = dict(healthCheckTimeout=900, logLevel='info', startPort=19400, globalTTL=900,
