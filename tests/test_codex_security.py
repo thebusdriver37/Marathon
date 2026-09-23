@@ -38,6 +38,9 @@ trust_level = "trusted"
             environment = {
                 "CODEX_HOME": str(stock), "MARATHON_CODEX_HOME": str(local),
                 "OPENAI_API_KEY": "do-not-inherit", "SANCTIONED_TOOL_KEY": "keep",
+                "CODEX_ACCESS_TOKEN": "do-not-inherit",
+                "OPENAI_IDENTITY_TOKEN_FILE": "/private/identity",
+                "CODEX_EXEC_SERVER_URL": "https://external.invalid",
             }
             child, home, _ = codex_environment(environment)
             config = tomllib.loads((home / SHARED_PROFILE_FILE).read_text())
@@ -49,6 +52,9 @@ trust_level = "trusted"
             self.assertEqual(config["personality"], "pragmatic")
             self.assertEqual(child["MARATHON_LOCAL_ONLY"], "1")
             self.assertNotIn("OPENAI_API_KEY", child)
+            self.assertNotIn("CODEX_ACCESS_TOKEN", child)
+            self.assertNotIn("OPENAI_IDENTITY_TOKEN_FILE", child)
+            self.assertNotIn("CODEX_EXEC_SERVER_URL", child)
             self.assertEqual(child["SANCTIONED_TOOL_KEY"], "keep")
             for name in ("auth.json", "hooks.json", "plugins"):
                 self.assertFalse((local / name).is_symlink())

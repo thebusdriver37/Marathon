@@ -26,6 +26,27 @@ Both runtime patchers preserve upstream sources and existing worktree edits, and
 
 ## Cached frontend builds
 
+The Codex baseline is pinned by both `config/codex.ref` and the `codex` submodule.
+The current baseline is `rust-v0.156.1` (`b412ff32c417f855c2b2d1581b77058eed87c84b`).
+Its patch rebase preserves per-step model usage accounting, the newer turn lifecycle,
+and provider-filtered session lookup. Protocol export bundles must be regenerated
+when Marathon's response metrics schema changes. Native patch tests use synthetic
+fixtures and temporary homes, not personal conversation history.
+
+Marathon builds bake in a loopback-only frontend transport boundary. Cloud login,
+shared Codex daemons, remote-control attachment, feedback and telemetry are disabled;
+unsetting `MARATHON_LOCAL_ONLY` cannot re-enable them in shipped binaries. The launcher
+also strips inherited cloud credentials and remote-executor settings. The local
+router still reaches explicitly configured inference backends, including LAN servers.
+This frontend boundary is not an OS firewall for shell tools or MCP subprocesses:
+their network access follows their sandbox policy.
+
+Before promoting an upstream update, run `scripts/test_local_security.py` against
+the candidate binary using Marathon's Python environment. It traces startup, a
+synthetic tool turn and resume inside an offline network namespace, rejecting any
+non-loopback connection attempt. It uses fixture configuration and a temporary home,
+never personal conversations or account files.
+
 `marathon build-codex` reuses a managed source directory for each upstream revision and stores Cargo artifacts in `.marathon/codex-target-cache` by default.
 Patch changes update only affected files, preserving unchanged dependencies and their timestamps.
 The first managed build adopts the existing patched directory when possible.

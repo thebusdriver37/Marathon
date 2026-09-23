@@ -1,9 +1,9 @@
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index e9536ed60f..5cdfea9679 100644
+index 70e02030d6..4506f0542e 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -101,9 +101,21 @@ impl ChatWidget {
-                 self.handle_item_started_notification(notification, replay_kind.is_some());
+@@ -127,9 +127,21 @@ impl ChatWidget {
+                 self.handle_item_started_notification(notification, replay_kind);
              }
              ServerNotification::ItemCompleted(notification) => {
 -                if !from_replay && let ThreadItem::FileChange { id, .. } = &notification.item {
@@ -28,10 +28,10 @@ index e9536ed60f..5cdfea9679 100644
                  self.handle_item_completed_notification(notification, replay_kind);
              }
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index 173c2d915d..bd8c157db4 100644
+index 8a77a7295d..a10ba849ec 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -413,6 +413,15 @@ impl ChatWidget {
+@@ -450,6 +450,15 @@ impl ChatWidget {
  
      pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
          if let Some(stage) = self.turn_throughput.generation_stage() {
@@ -48,10 +48,10 @@ index 173c2d915d..bd8c157db4 100644
                  stage,
                  GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index b9918505a6..7b297a410e 100644
+index cacfbe9289..06dbd3bab1 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3056,6 +3056,13 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3095,6 +3095,13 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
          "reasoning delta should identify thinking"
      );
  

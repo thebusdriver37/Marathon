@@ -1,7 +1,8 @@
 diff --git a/codex-rs/linux-sandbox/src/landlock.rs b/codex-rs/linux-sandbox/src/landlock.rs
+index 140daaf8af..be1286aa77 100644
 --- a/codex-rs/linux-sandbox/src/landlock.rs
 +++ b/codex-rs/linux-sandbox/src/landlock.rs
-@@ -193,7 +193,10 @@
+@@ -206,7 +206,10 @@ fn install_network_seccomp_filter_on_current_thread(
              deny_syscall(&mut rules, libc::SYS_bind);
              deny_syscall(&mut rules, libc::SYS_listen);
              deny_syscall(&mut rules, libc::SYS_getpeername);
@@ -13,7 +14,8 @@ diff --git a/codex-rs/linux-sandbox/src/landlock.rs b/codex-rs/linux-sandbox/src
              deny_syscall(&mut rules, libc::SYS_shutdown);
              deny_syscall(&mut rules, libc::SYS_sendto);
              deny_syscall(&mut rules, libc::SYS_sendmmsg);
-@@ -204,7 +207,25 @@
+@@ -215,7 +218,25 @@ fn install_network_seccomp_filter_on_current_thread(
+             // management.
              // deny_syscall(&mut rules, libc::SYS_recvfrom);
              deny_syscall(&mut rules, libc::SYS_recvmmsg);
 -            deny_syscall(&mut rules, libc::SYS_getsockopt);
@@ -39,4 +41,3 @@ diff --git a/codex-rs/linux-sandbox/src/landlock.rs b/codex-rs/linux-sandbox/src
              deny_syscall(&mut rules, libc::SYS_setsockopt);
  
              // For `socket` we allow AF_UNIX (arg0 == AF_UNIX) and deny
-             // everything else.

@@ -1,28 +1,28 @@
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index f24261732a..41d70d0163 100644
+index c4b9796ef8..d66d64bdbd 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -442,6 +442,7 @@ use self::transcript::TranscriptState;
- mod turn_lifecycle;
+@@ -459,6 +459,7 @@ mod turn_lifecycle;
  mod turn_runtime;
  use self::turn_lifecycle::TurnLifecycleState;
  mod turn_throughput;
 +use self::turn_throughput::GENERATION_ACTIVITY_INTERVAL;
  use self::turn_throughput::GenerationStage;
  use self::turn_throughput::TurnThroughput;
-@@ -1209,6 +1210,7 @@ impl ChatWidget {
-     pub(crate) fn pre_draw_tick(&mut self) {
-         self.update_due_hook_visibility();
-         self.schedule_hook_timer_if_needed();
-         self.bottom_pane.pre_draw_tick();
+ mod usage;
+@@ -1232,6 +1233,7 @@ impl ChatWidget {
+             self.refresh_terminal_title();
+         }
+         self.refresh_status_line_if_workspace_headline_due();
 +        self.refresh_active_generation_status_line();
-         if let Some(pet) = self.ambient_pet.as_ref() {
-             pet.schedule_next_frame();
+         self.refresh_thread_usage_if_settlement_due();
+     }
+ 
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index 45a4b5c8a1..293fe6f820 100644
+index b5b0ab1283..1c23e244f5 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -413,12 +413,23 @@ impl ChatWidget {
+@@ -450,12 +450,23 @@ impl ChatWidget {
  
      pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
          if let Some(stage) = self.turn_throughput.generation_stage() {
@@ -47,7 +47,7 @@ index 45a4b5c8a1..293fe6f820 100644
                  if progress.line_count > 0 {
                      let unit = if progress.line_count == 1 {
                          "line"
-@@ -430,17 +438,17 @@ impl ChatWidget {
+@@ -466,16 +477,16 @@ impl ChatWidget {
                  }
                  label.push_str(&format!(
                      " · {}",
@@ -68,8 +68,7 @@ index 45a4b5c8a1..293fe6f820 100644
              });
          }
  
-         let elapsed = self.turn_throughput.elapsed(Instant::now())?;
-@@ -461,6 +469,23 @@ impl ChatWidget {
+@@ -496,6 +507,23 @@ impl ChatWidget {
          Some(label)
      }
  
@@ -94,10 +93,10 @@ index 45a4b5c8a1..293fe6f820 100644
          &self,
          window: Option<&RateLimitWindowDisplay>,
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index e9f4ec7765..53ac8777b1 100644
+index 4cf0f8dfb5..0dd59e492e 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3049,30 +3049,87 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3088,27 +3088,84 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
      handle_turn_started(&mut chat, "turn-stage");
      chat.refresh_status_line();
      assert!(
@@ -154,9 +153,9 @@ index e9f4ec7765..53ac8777b1 100644
 +                    .is_some_and(is_generation_spinner_frame)
 +        }),
 +        "answer delta should identify generation with animated activity"
-     );
- }
- 
++    );
++}
++
 +fn is_generation_spinner_frame(frame: char) -> bool {
 +    matches!(
 +        frame,
@@ -188,13 +187,10 @@ index e9f4ec7765..53ac8777b1 100644
 +    assert!(
 +        frame_rx.try_recv().is_err(),
 +        "finished turns should stop animating"
-+    );
-+}
-+
- #[tokio::test]
- async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
-     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-@@ -3099,7 +3136,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+     );
+ }
+ 
+@@ -3138,7 +3195,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
  
      let drafting = status_line_text(&chat).expect("drafting status");
      assert!(
@@ -203,7 +199,7 @@ index e9f4ec7765..53ac8777b1 100644
          "unexpected drafting status: {drafting}"
      );
  
-@@ -3121,7 +3158,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3157,7 +3214,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
      );
      assert!(
          status_line_text(&chat).is_some_and(|status| {
@@ -212,7 +208,7 @@ index e9f4ec7765..53ac8777b1 100644
          }),
          "patch application should replace the drafting stage"
      );
-@@ -3137,7 +3175,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3176,8 +3233,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
          None,
      );
      assert!(
@@ -222,11 +218,12 @@ index e9f4ec7765..53ac8777b1 100644
 +        "the next model request should retain animated elapsed feedback"
      );
  }
+ 
 diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
-index a6994b74ff..fa8bcf6132 100644
+index a6994b74ff..ed71a1dbcc 100644
 --- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
-@@ -4,6 +4,9 @@ use std::time::Instant;
+@@ -5,6 +5,9 @@ use std::time::Instant;
  use codex_app_server_protocol::FileUpdateChange;
  use codex_app_server_protocol::MarathonResponseMetrics;
  
@@ -236,7 +233,7 @@ index a6994b74ff..fa8bcf6132 100644
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
  pub(super) enum GenerationStage {
      Prefill,
-@@ -107,6 +112,17 @@ impl TurnThroughput {
+@@ -131,6 +134,17 @@ impl TurnThroughput {
          self.generation_stage
      }
  
@@ -255,18 +252,18 @@ index a6994b74ff..fa8bcf6132 100644
          self.time_to_first_output
      }
 diff --git a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
-index 485fc273ba..4b66ab3891 100644
+index 65e789f471..129c79d6c7 100644
 --- a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
-@@ -5,6 +5,7 @@ use codex_app_server_protocol::MarathonResponseMetrics;
+@@ -4,6 +4,7 @@ use std::time::Instant;
+ use codex_app_server_protocol::MarathonResponseMetrics;
  use pretty_assertions::assert_eq;
  
 +use super::GENERATION_ACTIVITY_INTERVAL;
  use super::GenerationStage;
  use super::ThroughputSample;
  use super::TurnThroughput;
- 
-@@ -167,6 +168,29 @@ fn first_output_is_recorded_once_and_stage_tracks_the_stream() {
+@@ -173,6 +174,29 @@ fn first_output_is_recorded_once_and_stage_tracks_the_stream() {
      assert_eq!(throughput.generation_stage(), None);
  }
  

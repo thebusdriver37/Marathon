@@ -9,10 +9,10 @@ index 7ac2c08c29..2ad47cfcb6 100644
 -"  21.0 tok/s                                    "
 +"  21 tok/s avg · first token 2.5s               "
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index f348d6a431..a5d0e1f5d4 100644
+index 481eb60d23..98fbf681e4 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -412,15 +412,18 @@ impl ChatWidget {
+@@ -449,15 +449,18 @@ impl ChatWidget {
      }
  
      pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
@@ -39,7 +39,7 @@ index f348d6a431..a5d0e1f5d4 100644
      }
  
      pub(super) fn status_line_limit_display(
-@@ -443,3 +446,12 @@ impl ChatWidget {
+@@ -480,3 +483,12 @@ impl ChatWidget {
          }
      }
  }
@@ -53,10 +53,10 @@ index f348d6a431..a5d0e1f5d4 100644
 +    }
 +}
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 7ef3481161..6397dde18e 100644
+index 130f1d3fa9..d90f13450b 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -2899,7 +2899,8 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3000,7 +3000,8 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      chat.show_welcome_banner = false;
      chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
      let started_at = Instant::now() - Duration::from_secs(200);
@@ -66,7 +66,7 @@ index 7ef3481161..6397dde18e 100644
      chat.turn_throughput.record_output_delta(
          "streamed response",
          GenerationStage::Answering,
-@@ -2920,7 +2921,10 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3021,7 +3022,10 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      );
      chat.refresh_status_line();
  
@@ -78,7 +78,7 @@ index 7ef3481161..6397dde18e 100644
  
      let width = 48;
      let height = chat.desired_height(width);
-@@ -2945,13 +2949,13 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3046,13 +3050,13 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
  
      handle_agent_reasoning_delta(&mut chat, "thinking");
      assert!(
@@ -95,10 +95,10 @@ index 7ef3481161..6397dde18e 100644
      );
  }
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index e1976c9766..b8073d563f 100644
+index 706667b169..a6667578f9 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-@@ -71,7 +71,7 @@ impl ChatWidget {
+@@ -79,7 +79,7 @@ impl ChatWidget {
          self.input_queue.user_turn_pending_start = false;
          self.reset_safety_buffering_for_turn_start();
          self.turn_lifecycle.start(Instant::now());
@@ -107,7 +107,7 @@ index e1976c9766..b8073d563f 100644
          self.transcript.reset_turn_flags();
          self.adaptive_chunking.reset();
          if self.plan_stream_controller.take().is_some() {
-@@ -107,9 +107,12 @@ impl ChatWidget {
+@@ -119,9 +119,12 @@ impl ChatWidget {
          delta: &str,
          generation_stage: GenerationStage,
      ) {

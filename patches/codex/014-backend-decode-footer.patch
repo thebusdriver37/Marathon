@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 42c7c14..576dad0 100644
+index 1e4ae6061b..342750e689 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -32,9 +32,6 @@ impl ChatWidget {
+@@ -45,9 +45,6 @@ impl ChatWidget {
          }
          match notification {
              ServerNotification::ThreadTokenUsageUpdated(notification) => {
@@ -12,7 +12,7 @@ index 42c7c14..576dad0 100644
                  self.set_token_info(Some(token_usage_info_from_app_server(
                      notification.token_usage,
                  )));
-@@ -287,7 +284,11 @@ impl ChatWidget {
+@@ -412,7 +409,11 @@ impl ChatWidget {
              ServerNotification::RawResponseCompleted(notification) => {
                  if !from_replay {
                      self.complete_turn_response(
@@ -26,7 +26,7 @@ index 42c7c14..576dad0 100644
                  }
              }
 diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
-index 2ad47cf..8558e4e 100644
+index 2ad47cfcb6..8558e4e83e 100644
 --- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
 +++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_tokens_per_second_footer.snap
 @@ -1,10 +1,10 @@
@@ -47,10 +47,10 @@ index 2ad47cf..8558e4e 100644
 +"                                                                        "
 +"  60 tok/s decode · first output 2.5s · total 202s                      "
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index a5d0e1f..301ad8a 100644
+index 98fbf681e4..f658fd74c7 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -416,14 +416,16 @@ impl ChatWidget {
+@@ -453,14 +453,16 @@ impl ChatWidget {
              return Some(stage.label().to_string());
          }
  
@@ -76,10 +76,10 @@ index a5d0e1f..301ad8a 100644
  
      pub(super) fn status_line_limit_display(
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 6397dde..9ed3250 100644
+index d90f13450b..8340b19598 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -2906,6 +2906,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3007,6 +3007,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
          GenerationStage::Answering,
          started_at,
      );
@@ -108,7 +108,7 @@ index 6397dde..9ed3250 100644
      let response_usage = TokenUsage {
          total_tokens: 4_200,
          output_tokens: 4_200,
-@@ -2919,14 +2941,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3020,14 +3042,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
              model_context_window: Some(131_072),
          }),
      );
@@ -128,16 +128,15 @@ index 6397dde..9ed3250 100644
      let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
      terminal
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index b8073d5..0b336e2 100644
+index a6667578f9..3832839aad 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-@@ -115,9 +115,12 @@ impl ChatWidget {
+@@ -127,8 +127,12 @@ impl ChatWidget {
          }
      }
  
 -    pub(super) fn complete_turn_response(&mut self, output_tokens: Option<i64>) {
--        self.turn_throughput
--            .complete_response(output_tokens, Instant::now());
+-        self.turn_throughput.complete_response(output_tokens, Instant::now());
 +    pub(super) fn complete_turn_response(
 +        &mut self,
 +        response_id: &str,
@@ -148,7 +147,7 @@ index b8073d5..0b336e2 100644
      }
  
 diff --git a/codex-rs/tui/src/chatwidget/turn_throughput.rs b/codex-rs/tui/src/chatwidget/turn_throughput.rs
-index 8397e6e..01c045c 100644
+index 8397e6eecd..01c045c543 100644
 --- a/codex-rs/tui/src/chatwidget/turn_throughput.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_throughput.rs
 @@ -1,11 +1,8 @@
@@ -330,7 +329,7 @@ index 8397e6e..01c045c 100644
  
  #[cfg(test)]
 diff --git a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
-index 88d3a8f..b0645d8 100644
+index 88d3a8f11d..b0645d8ff1 100644
 --- a/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_throughput_tests.rs
 @@ -1,157 +1,160 @@

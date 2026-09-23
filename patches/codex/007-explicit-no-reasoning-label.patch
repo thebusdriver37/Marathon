@@ -1,7 +1,8 @@
 diff --git a/codex-rs/tui/src/app/config_persistence.rs b/codex-rs/tui/src/app/config_persistence.rs
+index e6d4136046..a286797389 100644
 --- a/codex-rs/tui/src/app/config_persistence.rs
 +++ b/codex-rs/tui/src/app/config_persistence.rs
-@@ -744,7 +744,8 @@ impl App {
+@@ -939,7 +939,8 @@ impl App {
  
      pub(super) fn reasoning_label(reasoning_effort: Option<&ReasoningEffortConfig>) -> String {
          match reasoning_effort {
@@ -11,7 +12,7 @@ diff --git a/codex-rs/tui/src/app/config_persistence.rs b/codex-rs/tui/src/app/c
              Some(reasoning_effort) => reasoning_effort.as_str().to_string(),
          }
      }
-@@ -1180,6 +1181,15 @@ mod tests {
+@@ -1345,6 +1346,15 @@ mod tests {
      use pretty_assertions::assert_eq;
      use tempfile::tempdir;
  
@@ -28,9 +29,10 @@ diff --git a/codex-rs/tui/src/app/config_persistence.rs b/codex-rs/tui/src/app/c
      async fn update_reasoning_effort_updates_collaboration_mode() {
          let mut app = make_test_app().await;
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index e14ca79d4f..ef1476c327 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -418,7 +418,8 @@ impl ChatWidget {
+@@ -469,7 +469,8 @@ impl ChatWidget {
          effort: Option<&ReasoningEffortConfig>,
      ) -> String {
          match effort {
@@ -41,9 +43,10 @@ diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/c
          }
      }
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
+index 1e153683d3..9f240f903f 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3882,6 +3882,22 @@ async fn status_line_and_terminal_title_reasoning_render_only_effort() {
+@@ -4111,6 +4111,22 @@ async fn status_line_and_terminal_title_reasoning_render_only_effort() {
      assert_eq!(chat.last_terminal_title, Some("xhigh".to_string()));
  }
  

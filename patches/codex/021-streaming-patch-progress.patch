@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/turn_start.rs b/codex-rs/app-server/tests/suite/v2/turn_start.rs
-index c46830d190..fb579cc690 100644
+index 896d27a302..ea6451b335 100644
 --- a/codex-rs/app-server/tests/suite/v2/turn_start.rs
 +++ b/codex-rs/app-server/tests/suite/v2/turn_start.rs
-@@ -3972,7 +3972,6 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
+@@ -4247,7 +4247,6 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
      ];
      let server = create_mock_responses_server_sequence(responses).await;
      MockResponsesConfig::new(&server.uri())
@@ -11,10 +11,10 @@ index c46830d190..fb579cc690 100644
          .disable_feature(Feature::RemoteModels)
          .disable_feature(Feature::ShellSnapshot)
 diff --git a/codex-rs/core/tests/suite/apply_patch_cli.rs b/codex-rs/core/tests/suite/apply_patch_cli.rs
-index b5dda68de7..c14e52dc5f 100644
+index aba4a3b3c8..6195a0553d 100644
 --- a/codex-rs/core/tests/suite/apply_patch_cli.rs
 +++ b/codex-rs/core/tests/suite/apply_patch_cli.rs
-@@ -1513,15 +1513,7 @@ async fn apply_patch_cli_can_use_exec_command_output_as_patch_input() -> Result<
+@@ -1723,15 +1723,7 @@ async fn apply_patch_cli_can_use_exec_command_output_as_patch_input() -> Result<
  async fn apply_patch_custom_tool_streaming_emits_updated_changes() -> Result<()> {
      skip_if_no_network!(Ok(()));
  
@@ -32,10 +32,10 @@ index b5dda68de7..c14e52dc5f 100644
      let codex = test.codex.clone();
      let call_id = "apply-patch-streaming";
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index fdeae5c6f5..6d1e2ae18c 100644
+index 30318ae47b..3f8f034364 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -1120,8 +1120,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1188,8 +1188,8 @@ pub const FEATURES: &[FeatureSpec] = &[
      FeatureSpec {
          id: Feature::ApplyPatchStreamingEvents,
          key: "apply_patch_streaming_events",
@@ -47,10 +47,10 @@ index fdeae5c6f5..6d1e2ae18c 100644
      FeatureSpec {
          id: Feature::ApplyPatchPreserveLineEndings,
 diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
-index 5ad5132a2e..6bde15c5e2 100644
+index da6cb3c822..5d353abf97 100644
 --- a/codex-rs/features/src/tests.rs
 +++ b/codex-rs/features/src/tests.rs
-@@ -730,15 +730,12 @@ server_names = ["history", "notes"]
+@@ -812,15 +812,12 @@ server_names = ["history", "notes"]
  #[test]
  fn unstable_warning_event_only_mentions_enabled_under_development_features() {
      let mut configured_features = Table::new();
@@ -59,7 +59,7 @@ index 5ad5132a2e..6bde15c5e2 100644
 -        TomlValue::Boolean(true),
 -    );
 +    configured_features.insert("artifact".to_string(), TomlValue::Boolean(true));
-     configured_features.insert("personality".to_string(), TomlValue::Boolean(true));
+     configured_features.insert("fast_mode".to_string(), TomlValue::Boolean(true));
      configured_features.insert("unknown".to_string(), TomlValue::Boolean(true));
  
      let mut features = Features::with_defaults();
@@ -68,20 +68,20 @@ index 5ad5132a2e..6bde15c5e2 100644
  
      let warning = unstable_features_warning_event(
          Some(&configured_features),
-@@ -751,7 +748,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
+@@ -833,7 +830,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
      let EventMsg::Warning(WarningEvent { message }) = warning.msg else {
          panic!("expected warning event");
      };
 -    assert!(message.contains("apply_patch_streaming_events"));
 +    assert!(message.contains("artifact"));
-     assert!(!message.contains("personality"));
+     assert!(!message.contains("fast_mode"));
      assert!(message.contains("/tmp/config.toml"));
  }
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index d74f9afefb..e9536ed60f 100644
+index 5fd8671a7a..70e02030d6 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -82,8 +82,12 @@ impl ChatWidget {
+@@ -108,8 +108,12 @@ impl ChatWidget {
                                  .set_generation_stage(GenerationStage::Answering);
                              self.refresh_status_line();
                          }
@@ -95,8 +95,8 @@ index d74f9afefb..e9536ed60f 100644
                          | ThreadItem::McpToolCall { .. }
                          | ThreadItem::DynamicToolCall { .. }
                          | ThreadItem::WebSearch { .. }
-@@ -97,6 +101,10 @@ impl ChatWidget {
-                 self.handle_item_started_notification(notification, replay_kind.is_some());
+@@ -123,6 +127,10 @@ impl ChatWidget {
+                 self.handle_item_started_notification(notification, replay_kind);
              }
              ServerNotification::ItemCompleted(notification) => {
 +                if !from_replay && let ThreadItem::FileChange { id, .. } = &notification.item {
@@ -106,7 +106,7 @@ index d74f9afefb..e9536ed60f 100644
                  self.handle_item_completed_notification(notification, replay_kind);
              }
              ServerNotification::AgentMessageDelta(notification) => {
-@@ -135,6 +143,16 @@ impl ChatWidget {
+@@ -193,6 +201,16 @@ impl ChatWidget {
              ServerNotification::FileChangeOutputDelta(notification) => {
                  self.on_patch_apply_output_delta(notification.item_id, notification.delta);
              }
@@ -123,7 +123,7 @@ index d74f9afefb..e9536ed60f 100644
              ServerNotification::TurnDiffUpdated(notification) => {
                  self.on_turn_diff(notification.diff)
              }
-@@ -268,7 +286,6 @@ impl ChatWidget {
+@@ -391,7 +409,6 @@ impl ChatWidget {
              | ServerNotification::ProcessOutputDelta(_)
              | ServerNotification::ProcessExited(_)
              | ServerNotification::McpServerEventStream(_)
@@ -132,10 +132,10 @@ index d74f9afefb..e9536ed60f 100644
              | ServerNotification::McpServerOauthLoginCompleted(_)
              | ServerNotification::AppListUpdated(_)
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index 940ecdbf96..173c2d915d 100644
+index 77db28f48b..8a77a7295d 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -413,6 +413,26 @@ impl ChatWidget {
+@@ -450,6 +450,26 @@ impl ChatWidget {
  
      pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
          if let Some(stage) = self.turn_throughput.generation_stage() {
@@ -163,10 +163,10 @@ index 940ecdbf96..173c2d915d 100644
          }
  
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 40ef628ff6..b9918505a6 100644
+index 6144988492..cacfbe9289 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3063,6 +3063,72 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3102,6 +3102,72 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
      );
  }
  

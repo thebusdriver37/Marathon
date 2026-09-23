@@ -82,7 +82,9 @@ fi
 
 (
   cd "$BUILD_CODEX_DIR/codex-rs"
-  cargo build --locked --profile "$BUILD_PROFILE" -p codex-cli --bin codex
+  # Bake the boundary into shipped binaries; unsetting a launcher variable must
+  # never turn Marathon back into a cloud-connected Codex client.
+  MARATHON_BUILD_LOCAL_ONLY=1 cargo build --locked --profile "$BUILD_PROFILE" -p codex-cli --bin codex
 )
 
 candidate="$CARGO_TARGET_DIR/$BUILD_PROFILE/codex"

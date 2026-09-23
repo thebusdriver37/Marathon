@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index 7b424a3592..0d0a16ad82 100644
+index 6a98475899..d0861426cc 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -440,6 +440,7 @@ mod turn_lifecycle;
+@@ -459,6 +459,7 @@ mod turn_lifecycle;
  mod turn_runtime;
  use self::turn_lifecycle::TurnLifecycleState;
  mod turn_throughput;
@@ -11,10 +11,10 @@ index 7b424a3592..0d0a16ad82 100644
  mod usage;
  mod user_messages;
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index a4c3f699c8..42c7c1407d 100644
+index 7df96a5658..1e4ae6061b 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -73,6 +73,21 @@ impl ChatWidget {
+@@ -99,6 +99,21 @@ impl ChatWidget {
                  self.handle_turn_completed_notification(notification, replay_kind);
              }
              ServerNotification::ItemStarted(notification) => {
@@ -33,23 +33,26 @@ index a4c3f699c8..42c7c1407d 100644
 +                        _ => {}
 +                    }
 +                }
-                 self.handle_item_started_notification(notification, replay_kind.is_some());
+                 self.handle_item_started_notification(notification, replay_kind);
              }
              ServerNotification::ItemCompleted(notification) => {
-@@ -80,25 +95,25 @@ impl ChatWidget {
+@@ -106,7 +121,7 @@ impl ChatWidget {
              }
              ServerNotification::AgentMessageDelta(notification) => {
                  if !from_replay {
 -                    self.record_turn_output_delta(&notification.delta);
 +                    self.record_turn_output_delta(&notification.delta, GenerationStage::Answering);
                  }
-                 self.on_agent_message_delta(notification.delta);
+                 self.restore_realtime_transcripts_before_turn(&notification.turn_id);
+                 if !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
+@@ -121,14 +136,14 @@ impl ChatWidget {
              }
              ServerNotification::PlanDelta(notification) => {
                  if !from_replay {
 -                    self.record_turn_output_delta(&notification.delta);
 +                    self.record_turn_output_delta(&notification.delta, GenerationStage::Answering);
                  }
+                 self.restore_realtime_transcripts_before_turn(&notification.turn_id);
                  self.on_plan_delta(notification.delta);
              }
              ServerNotification::ReasoningSummaryTextDelta(notification) => {
@@ -57,20 +60,22 @@ index a4c3f699c8..42c7c1407d 100644
 -                    self.record_turn_output_delta(&notification.delta);
 +                    self.record_turn_output_delta(&notification.delta, GenerationStage::Thinking);
                  }
-                 self.on_agent_reasoning_delta(notification.delta);
+                 if !self.is_realtime_delegated_reasoning_item(
+                     &notification.turn_id,
+@@ -141,7 +156,7 @@ impl ChatWidget {
              }
              ServerNotification::ReasoningTextDelta(notification) => {
                  if !from_replay {
 -                    self.record_turn_output_delta(&notification.delta);
 +                    self.record_turn_output_delta(&notification.delta, GenerationStage::Thinking);
                  }
-                 if self.config.show_raw_agent_reasoning {
-                     self.on_agent_reasoning_delta(notification.delta);
+                 if self.config.show_raw_agent_reasoning
+                     && !self.is_realtime_delegated_reasoning_item(
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index 5821a5a68b..f348d6a431 100644
+index ef1476c327..481eb60d23 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -412,10 +412,15 @@ impl ChatWidget {
+@@ -449,10 +449,15 @@ impl ChatWidget {
      }
  
      pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
@@ -89,10 +94,10 @@ index 5821a5a68b..f348d6a431 100644
  
      pub(super) fn status_line_limit_display(
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 3e58c85c3c..7ef3481161 100644
+index 9f240f903f..130f1d3fa9 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -2900,8 +2900,11 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3001,8 +3001,11 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
      let started_at = Instant::now() - Duration::from_secs(200);
      chat.turn_throughput.start_turn();
@@ -106,7 +111,7 @@ index 3e58c85c3c..7ef3481161 100644
      let response_usage = TokenUsage {
          total_tokens: 4_200,
          output_tokens: 4_200,
-@@ -2931,6 +2934,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3032,6 +3035,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      );
  }
  
@@ -136,21 +141,21 @@ index 3e58c85c3c..7ef3481161 100644
  async fn status_line_legacy_context_usage_renders_context_used_percent() {
      let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index d7e4851483..e1976c9766 100644
+index fe84d7460e..706667b169 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-@@ -102,9 +102,13 @@ impl ChatWidget {
+@@ -114,8 +114,13 @@ impl ChatWidget {
          self.request_redraw();
      }
  
 -    pub(super) fn record_turn_output_delta(&mut self, delta: &str) {
+-        self.turn_throughput.record_output_delta(delta, Instant::now());
 +    pub(super) fn record_turn_output_delta(
 +        &mut self,
 +        delta: &str,
 +        generation_stage: GenerationStage,
 +    ) {
-         self.turn_throughput
--            .record_output_delta(delta, Instant::now());
++        self.turn_throughput
 +            .record_output_delta(delta, generation_stage, Instant::now());
          self.refresh_status_line();
      }

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# IDE socket fixtures must satisfy upstream's private-directory checks even
+# when the invoking shell uses a group-writable umask.
+umask 077
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -z "${MARATHON_PATCHED_CODEX_DIR:-}" ]]; then
   source "$ROOT_DIR/scripts/apply_codex_patches.sh"
@@ -49,6 +53,7 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
     just test -p codex-http-client --lib
   just test -p codex-http-client --test ca_env
   just test -p codex-core --lib local_runtime
+  just test -p codex-cli marathon_rejects_cloud_and_shared_server_commands
   just test -p codex-utils-cli
   just test -p codex-protocol \
     token_usage_percentage_uses_the_full_runtime_window
@@ -69,7 +74,7 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-tui turn_throughput
   just test -p codex-tui --lib thread_title
   env -u NO_COLOR just test -p codex-tui --lib \
-    -E 'test(session_header) | test(status_snapshot) | test(onboarding::welcome) | test(terminal_title) | test(completed_global_chord) | test(pending_token_activity_refresh)'
+    -E 'test(session_header) | test(status_snapshot) | test(onboarding::welcome) | test(terminal_title) | test(completed_global_chord)'
   just test -p codex-app-server --test all \
     -E 'test(turn_start_emits_raw_response_completed_with_upstream_usage) | test(thread_compact_start_triggers_compaction_and_returns_empty_response)'
   just test -p codex-app-server --test all \
@@ -83,7 +88,7 @@ export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
   just test -p codex-tui \
     status_line_stays_stable_during_streaming_patch_lifecycle
   just test -p codex-tui distinguishes_unset_from_disabled
-  just test -p codex-tui ignores_sqlite_candidate_from_another_provider
+  just test -p codex-tui resolves_name_and_preview_from_server_list
   just test -p codex-state \
     sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics
 )

@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/app/thread_title.rs b/codex-rs/tui/src/app/thread_title.rs
-index 72abb5810b..afcf675840 100644
+index 8898221192..05ac85a580 100644
 --- a/codex-rs/tui/src/app/thread_title.rs
 +++ b/codex-rs/tui/src/app/thread_title.rs
-@@ -39,6 +39,14 @@ impl App {
+@@ -78,6 +78,14 @@ impl App {
          destination: ThreadTitleDestination,
          prompt: String,
      ) {
@@ -14,49 +14,27 @@ index 72abb5810b..afcf675840 100644
 +        {
 +            return;
 +        }
-         let request_handle = app_server.request_handle();
-         let model = if self.chat_widget.config_ref().model_provider_id == "openai"
-             && self.chat_widget.has_chatgpt_account()
+         let std::collections::hash_map::Entry::Vacant(entry) =
+             self.pending_thread_titles.entry((thread_id, destination))
+         else {
 diff --git a/codex-rs/tui/src/app/thread_title_tests.rs b/codex-rs/tui/src/app/thread_title_tests.rs
-index 6044fd82a1..820340936a 100644
+index e9b10fbb85..e49b6e1a98 100644
 --- a/codex-rs/tui/src/app/thread_title_tests.rs
 +++ b/codex-rs/tui/src/app/thread_title_tests.rs
-@@ -126,7 +126,7 @@ async fn slash_rename_generates_editable_title_through_embedded_app_server()
-     )
-     .await;
+@@ -218,7 +218,7 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
+     }
+     let response = responses::mount_response_once(&server, template).await;
      let codex_home = tempdir()?;
 -    let provider_id = "thread-title-test";
 +    let provider_id = "marathon-local";
      std::fs::write(
          codex_home.path().join("config.toml"),
          format!(
-@@ -186,6 +186,21 @@ async fn slash_rename_generates_editable_title_through_embedded_app_server()
-         });
-     while event_rx.try_recv().is_ok() {}
- 
-+    // Automatic naming must not spawn an inference request on a local slot.
-+    app.generate_thread_title(
-+        &app_server,
-+        thread_id,
-+        crate::app_event::ThreadTitleDestination::Automatic {
-+            expected_title: "Fix the login timeout".to_string(),
-+        },
-+        thread_title_prompt("Fix the login timeout"),
-+    );
-+    assert!(
-+        tokio::time::timeout(std::time::Duration::from_millis(100), event_rx.recv())
-+            .await
-+            .is_err()
-+    );
-+
-     app.chat_widget.apply_external_edit("/rename".to_string());
-     app.chat_widget
-         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 09797a5c93..d74f9afefb 100644
+index 342750e689..5fd8671a7a 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -82,6 +82,15 @@ impl ChatWidget {
+@@ -108,6 +108,15 @@ impl ChatWidget {
                                  .set_generation_stage(GenerationStage::Answering);
                              self.refresh_status_line();
                          }
@@ -83,10 +61,10 @@ index 8bcd98975e..85ea7c87c3 100644
 -"  60.6 tok/s turn avg · first output 2.5s · total 202s                  "
 +"  60.6 tok/s turn avg · first activity 2.5s · total 202s                "
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index 97d5aba5f4..940ecdbf96 100644
+index 55103d3c41..77db28f48b 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -427,7 +427,7 @@ impl ChatWidget {
+@@ -464,7 +464,7 @@ impl ChatWidget {
              |sample| format!("{:.1} tok/s {rate_label}", sample.tokens_per_second),
          );
          if let Some(latency) = self.turn_throughput.time_to_first_output() {
@@ -106,10 +84,10 @@ index 28c78da38e..2b9a8aedbd 100644
 -105.0 tok/s decode · first output 2.5s
 +105.0 tok/s decode · first activity 2.5s
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 640cec03e3..40ef628ff6 100644
+index 738b53944c..6144988492 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3026,7 +3026,7 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3065,7 +3065,7 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
  
      assert_eq!(
          status_line_text(&chat),

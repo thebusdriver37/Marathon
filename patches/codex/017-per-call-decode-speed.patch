@@ -15,10 +15,10 @@ index 8558e4e83e..8bcd98975e 100644
 -"  60 tok/s decode · first output 2.5s · total 202s                      "
 +"  60.6 tok/s turn avg · first output 2.5s · total 202s                  "
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index 301ad8ab42..97d5aba5f4 100644
+index f658fd74c7..55103d3c41 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -417,9 +417,14 @@ impl ChatWidget {
+@@ -454,9 +454,14 @@ impl ChatWidget {
          }
  
          let elapsed = self.turn_throughput.elapsed(Instant::now())?;
@@ -47,10 +47,10 @@ index 0000000000..28c78da38e
 +---
 +105.0 tok/s decode · first output 2.5s
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 2d116e79bd..640cec03e3 100644
+index 8340b19598..738b53944c 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3003,13 +3003,30 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3042,13 +3042,30 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
              model_context_window: Some(131_072),
          }),
      );

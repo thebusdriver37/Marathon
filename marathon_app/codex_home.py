@@ -296,7 +296,12 @@ def codex_environment(
     home, profile = prepare_codex_home(child, instance)
     child["CODEX_HOME"] = str(home)
     child["MARATHON_LOCAL_ONLY"] = "1"
-    for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION"):
+    for key in (
+        "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION",
+        "OPENAI_BASE_URL", "OPENAI_IDENTITY_TOKEN_FILE", "CODEX_ACCESS_TOKEN",
+        "CODEX_CONNECTORS_TOKEN", "CODEX_EXEC_SERVER_URL",
+        "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL", "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+    ):
         child.pop(key, None)
     if profile is not None:
         child["CODEX_SQLITE_HOME"] = str(home)
