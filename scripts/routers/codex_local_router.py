@@ -46,7 +46,7 @@ from aiohttp import web
 from marathon_app.local_history import normalize_local_history
 from marathon_app.catalog import external_models, backends
 from marathon_app.model_identity import pool_identity
-from marathon_app.pool import acquire_pool_worker
+from marathon_app.pool import acquire_pool_worker, release_pool_worker
 from marathon_app.checkpoints import RollingCheckpointStore
 from marathon_app.checkpoints import SNAPSHOT_SIDECAR_SUFFIXES
 from marathon_app.checkpoints import conversation_key_hash
@@ -3093,7 +3093,7 @@ class RouterState:
     def _release_pool_worker(self) -> None:
         if getattr(self, "pool_handle", None) is not None:
             worker = self.pool_model
-            self.pool_handle.close()
+            release_pool_worker(self.pool_handle)
             self.pool_handle = None
             self.pool_model = None
             self._refresh_profiles()

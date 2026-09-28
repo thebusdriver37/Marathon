@@ -39,7 +39,7 @@ from .catalog import (
 from .instance import InstanceConfig, instance_path, normalize_instance_name, resolve_instance
 from .telemetry import EventWriter, create_run_writer, redact_text, runs_dir
 from .router_security import is_loopback, open_api_request
-from .pool import acquire_pool_worker
+from .pool import acquire_pool_worker, release_pool_worker
 
 
 def _xdg_path(env_name: str, fallback: Path) -> Path:
@@ -1645,10 +1645,7 @@ class Runtime:
             self._owns_lock = False
         if self._pool_lock is not None:
             with contextlib.suppress(OSError):
-                self._pool_lock.seek(0)
-                self._pool_lock.truncate()
-                fcntl.flock(self._pool_lock.fileno(), fcntl.LOCK_UN)
-                self._pool_lock.close()
+                release_pool_worker(self._pool_lock)
             self._pool_lock = None
             self._pool_model = None
 

@@ -12,6 +12,23 @@ from typing import TextIO
 from .catalog import Backend
 
 
+def release_pool_worker(handle: TextIO) -> None:
+    """Clear advisory ownership while still locked, then release the lease.
+
+    Lock-file existence or a live recorded PID does not establish ownership:
+    only flock does. Keep the inode in place so waiters cannot lock a second
+    file for the same worker.
+    """
+    if handle.closed:
+        return
+    try:
+        handle.seek(0)
+        handle.truncate()
+        handle.flush()
+    finally:
+        handle.close()
+
+
 def acquire_pool_worker(
     backend: Backend, runtime_dir: Path, instance: str | None
 ) -> tuple[TextIO, str]:

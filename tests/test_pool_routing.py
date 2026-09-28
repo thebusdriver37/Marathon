@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from marathon_app.catalog import Backend
-from marathon_app.pool import acquire_pool_worker
+from marathon_app.pool import acquire_pool_worker, release_pool_worker
 from marathon_app import runtime
 from test_router_context import fixture_profile, router_module
 
@@ -86,6 +86,8 @@ class PoolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.state.pool_external_unload_grace_seconds = 0
         async with self.state.pool_request("local"):
             self.assertEqual(self.state.pool_model, "worker-1")
+        lock_path = Path(self.state.pool_handle.name)
+        self.assertTrue(lock_path.read_text())
         self.state.live_slot_by_model["local"] = "old-response"
 
         async def unload_while_reserved(*_args):
@@ -101,6 +103,7 @@ class PoolRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.state.pool_handle)
         self.assertIsNone(self.state.pool_model)
+        self.assertEqual(lock_path.read_text(), "")
         self.assertNotIn("local", self.state.live_slot_by_model)
         profile, method, path = self.state._request_json.await_args.args
         self.assertEqual(profile.target, self.backend.proxy)
@@ -144,6 +147,7 @@ class PoolRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.state._request_json.side_effect = RuntimeError("broker unavailable")
         async with self.state.pool_request("local"):
             self.assertEqual(self.state.pool_model, "worker-1")
+        lock_path = Path(self.state.pool_handle.name)
         async with self.state.pool_request("spark"):
             release_task = self.state.pool_release_task
             self.assertIsNotNone(release_task)
@@ -151,7 +155,23 @@ class PoolRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.state.pool_handle)
         self.assertIsNone(self.state.pool_model)
+        self.assertEqual(lock_path.read_text(), "")
         self.assertEqual(self.reserve("another-session")[1], "worker-1")
+
+    def test_release_clears_owner_without_replacing_lock_inode(self):
+        handle, worker = self.reserve("old-owner")
+        path = Path(handle.name)
+        inode = path.stat().st_ino
+        release_pool_worker(handle)
+        self.assertEqual(path.read_text(), "")
+        new_handle, new_worker = self.reserve("new-owner")
+        self.assertEqual(new_worker, worker)
+        self.assertEqual(path.stat().st_ino, inode)
+        release_pool_worker(handle)  # Repeated cleanup must not erase new owner.
+        self.assertIn("new-owner", path.read_text())
+        with path.open() as contender:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     async def test_frontend_warmup_keeps_default_local_preload_when_capacity_is_free(self):
         async with self.state.pool_request("local", generate=False):
