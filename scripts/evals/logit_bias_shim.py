@@ -8,6 +8,7 @@ one code path and the baseline arm simply passes an empty map.
 """
 import argparse
 import json
+import time
 from pathlib import Path
 
 import aiohttp
@@ -17,6 +18,7 @@ from aiohttp import web
 async def proxy(request: web.Request) -> web.StreamResponse:
     state = request.app['state']
     session: aiohttp.ClientSession = request.app['session']
+    started = time.monotonic()
     raw = await request.read()
     body = None
     if raw:
@@ -41,7 +43,21 @@ async def proxy(request: web.Request) -> web.StreamResponse:
                 response.headers[key] = value
         await response.prepare(request)
         await response.write(payload)
+        state['count'] += 1
+        _record(state, {'n': state['count'], 'path': request.path,
+                        'ms': round((time.monotonic() - started) * 1000, 1),
+                        'request_bytes': len(raw), 'response_bytes': len(payload),
+                        'status': upstream.status})
         return response
+
+
+def _record(state, row):
+    """Append one request line to the per-shim log when a log path is set."""
+    handle = state.get('log')
+    if handle is None:
+        return
+    handle.write(json.dumps(row) + '\n')
+    handle.flush()
 
 
 async def _startup(app):
@@ -57,10 +73,12 @@ def main():
     parser.add_argument('--port', type=int, required=True)
     parser.add_argument('--upstream', default='http://127.0.0.1:9292')
     parser.add_argument('--bias-file', type=Path)
+    parser.add_argument('--log', type=Path)
     args = parser.parse_args()
     bias = json.loads(args.bias_file.read_text()) if args.bias_file else {}
     app = web.Application()
-    app['state'] = {'upstream': args.upstream, 'bias': bias}
+    app['state'] = {'upstream': args.upstream, 'bias': bias, 'count': 0,
+                    'log': args.log.open('a') if args.log else None}
     app.on_startup.append(_startup)
     app.on_cleanup.append(_cleanup)
     for route in ('/{tail:.*}',):

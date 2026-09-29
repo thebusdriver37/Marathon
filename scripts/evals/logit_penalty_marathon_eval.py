@@ -27,14 +27,19 @@ sys.path.insert(0, str(ROOT))
 GPU = ROOT.parent / 'gpu-control'
 MARATHON_BIN = '/home/deforest/.local/bin/marathon'
 POOL = 'llama-swap-qwen3.8-uncensored-pool'
-WORKERS = {2: 'marathon-qwen3.8-27b-uncensored-2', 3: 'marathon-qwen3.8-27b-uncensored-3'}
+WORKERS = {1: 'marathon-qwen3.8-27b-uncensored-1', 2: 'marathon-qwen3.8-27b-uncensored-2',
+           3: 'marathon-qwen3.8-27b-uncensored-3'}
 PROXY_BASE, SHIM_BASE = 19600, 19800
 TURN_TIMEOUT = 600
 
 
-def _ports(arm_index, gpu):
-    offset = arm_index * 2 + (0 if gpu == 2 else 1)
-    return PROXY_BASE + offset, SHIM_BASE + offset
+def _ports(slot):
+    """One unique port pair per plan position.
+
+    Plan positions, not (arm, gpu) pairs, because the same arm can appear on the
+    same GPU in overlapping waves, and a second router cannot bind a live port.
+    """
+    return PROXY_BASE + slot, SHIM_BASE + slot
 
 
 def save(path, value):
@@ -358,9 +363,10 @@ def _start_shim(arm, worker, out, bias, port):
     bias_path = out / f'bias-{arm}-{worker}.json'
     save(bias_path, bias)
     log = (out / f'shim-{arm}-{worker}.log').open('w')
+    requests = out / f'requests-{arm}-{worker}.jsonl'
     process = subprocess.Popen([str(ROOT / '.marathon/venv/bin/python'),
                                 str(ROOT / 'scripts/evals/logit_bias_shim.py'), '--port', str(port),
-                                '--bias-file', str(bias_path)],
+                                '--bias-file', str(bias_path), '--log', str(requests)],
                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     for _ in range(100):
         try:
@@ -371,7 +377,7 @@ def _start_shim(arm, worker, out, bias, port):
     return process, port
 
 
-def _environment(arm, worker, out, catalog, proxy_port):
+def _environment(arm, worker, out, catalog, proxy_port, tag=''):
     key = next(line.split('=', 1)[1].strip().strip('"\'') for line in
                (GPU.parent / 'qwen-inference/.env').read_text().splitlines()
                if line.startswith('HERMES_API_KEY='))
@@ -385,7 +391,9 @@ def _environment(arm, worker, out, catalog, proxy_port):
         XDG_CONFIG_HOME=str(out / 'config' / f'{arm}-{worker}'),
         XDG_STATE_HOME=str(out / 'state' / f'{arm}-{worker}'),
         HERMES_API_KEY=key, PYTHONDONTWRITEBYTECODE='1')
-    instance = f'lp2-{arm}-{worker[-1]}'
+    # One instance per (arm, worker, task, repeat): the pool runs tasks
+    # concurrently and a shared name would be reported as "already open".
+    instance = f'lp2-{arm}-{worker[-1]}' + (f'-{tag}' if tag else '')
     save(Path(environment['XDG_CONFIG_HOME']) / 'marathon/instances' / instance / 'selection.json',
          {'schema': 1, 'model': 'qwen3.8-27b-iq4-xs', 'profile': 'one-gpu-196k-uncensored',
           'frontend': 'codex', 'profile_policy': 'explicit'})
@@ -459,9 +467,9 @@ def _wait_lock_free(worker, seconds=240):
         handle.close()
 
 
-def run_task(task, arm, arm_index, bias, gpu, out, repeat):
+def run_task(task, arm, slot, bias, gpu, out, repeat):
     worker = WORKERS[gpu]
-    proxy_port, shim_port = _ports(arm_index, gpu)
+    proxy_port, shim_port = _ports(slot)
     trial = out / f'{task["id"]}-r{repeat}-{arm}-w{worker}'
     trial.mkdir(parents=True, exist_ok=True)
     workspace = trial / 'workspace'
@@ -474,7 +482,8 @@ def run_task(task, arm, arm_index, bias, gpu, out, repeat):
     protected = {name: sha(workspace / name) for name in task['files'] if name.startswith('test_')}
     catalog = _catalog_for(arm, worker, shim_port, out)
     shim, _ = _start_shim(arm, worker, out, bias, shim_port)
-    environment, instance = _environment(arm, worker, out, catalog, proxy_port)
+    environment, instance = _environment(arm, worker, out, catalog, proxy_port,
+                                         f'{task["id"]}r{repeat}')
     lease_wait_ok = _wait_lock_free(worker)
     turns, answers, session_id = [], [], None
     try:
@@ -519,6 +528,7 @@ def main():
     parser.add_argument('--arms-file', type=Path)
     parser.add_argument('--repeats', type=int, default=2)
     parser.add_argument('--tasks', nargs='+')
+    parser.add_argument('--gpus', default='2,3')
     parser.add_argument('--summarize', action='store_true')
     args = parser.parse_args()
     if args.summarize:
@@ -529,6 +539,7 @@ def main():
     if (out / 'protocol.json').exists():
         raise RuntimeError('Refusing to overwrite a prior run')
     arms = json.loads(args.arms_file.read_text())
+    gpus = [int(value) for value in args.gpus.split(',') if value.strip()]
     config_path = GPU / 'llama-swap/config.yaml'
     original = config_path.read_bytes()
     tasks = [t for t in task_definitions() if not args.tasks or t['id'] in args.tasks]
@@ -539,7 +550,8 @@ def main():
         'turns_per_task': {t['id']: len(t['turns']) for t in tasks},
         'interface': 'installed marathon exec + exec resume, workspace-write, approval never',
         'reasoning': 'xhigh via -c model_reasoning_effort', 'max_output_tokens': 32768,
-        'turn_timeout_s': TURN_TIMEOUT, 'workers': WORKERS, 'concurrency': 2,
+        'turn_timeout_s': TURN_TIMEOUT, 'workers': {gpu: WORKERS[gpu] for gpu in gpus},
+        'concurrency': len(gpus), 'gpus': gpus,
         'production_config_sha256': hashlib.sha256(original).hexdigest(),
         'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         'injection': 'one loopback shim adds logit_bias only; baseline uses the same shim with {}',
@@ -550,13 +562,13 @@ def main():
         order = arm_order if repeat % 2 else list(reversed(arm_order))
         for index, task in enumerate(tasks):
             for arm in order:
-                plan.append((task, arm, arm_order.index(arm), 2 if len(plan) % 2 == 0 else 3, repeat))
+                plan.append((task, arm, len(plan), gpus[len(plan) % len(gpus)], repeat))
     results = []
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(gpus)) as pool:
             futures = []
-            for key, (task, arm, arm_index, gpu, repeat) in enumerate(plan):
-                futures.append((key, pool.submit(run_task, task, arm, arm_index, arms[arm], gpu,
+            for key, (task, arm, slot, gpu, repeat) in enumerate(plan):
+                futures.append((key, pool.submit(run_task, task, arm, slot, arms[arm], gpu,
                                                  out, repeat)))
             for key, future in futures:
                 row = future.result()
@@ -568,9 +580,13 @@ def main():
                 assert config_path.read_bytes() == original, 'production config changed'
     finally:
         for arm in arms:
-            for gpu in (2, 3):
-                subprocess.run([MARATHON_BIN, '--instance', f'lp2-{arm}-{gpu}', 'stop'],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            for gpu in gpus:
+                for task in tasks:
+                    for repeat in range(1, args.repeats + 1):
+                        subprocess.run([MARATHON_BIN, '--instance',
+                                        f'lp2-{arm}-{gpu}-{task["id"]}r{repeat}', 'stop'],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       timeout=30)
     save(out / 'results.json', results)
     save(out / 'complete.json', {'runs': len(results),
                                  'production_config_unchanged': config_path.read_bytes() == original})
