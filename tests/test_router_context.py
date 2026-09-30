@@ -880,6 +880,20 @@ context = 32768
                 self.assertEqual(local["input"][0]["encrypted_content"], saved["encrypted_content"])
                 self.assertEqual(local["input"][0]["content"][0]["type"], "text")
 
+    def test_external_reasoning_replay_does_not_require_slots_api(self) -> None:
+        state = object.__new__(router_module.RouterState)
+        saved = state.sanitize_output_item({
+            "type": "reasoning", "summary": [],
+            "content": [{"type": "reasoning_text", "text": "Synthetic cache prefix."}],
+        })
+        saved.pop("content")  # Codex omits plaintext reasoning on serialization.
+        profile = replace(fixture_profile(), external=True, supports_slots=False)
+        resumed = router_module.normalize_responses_request({"input": [saved]}, profile)
+        self.assertEqual(resumed["input"], [{
+            "type": "reasoning", "summary": [],
+            "content": [{"type": "reasoning_text", "text": "Synthetic cache prefix."}],
+        }])
+
     def test_invalid_local_reasoning_capsule_is_not_replayed(self) -> None:
         normalized = router_module.normalize_responses_request(
             {

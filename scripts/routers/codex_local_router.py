@@ -3454,10 +3454,7 @@ class RouterState:
                             apply_patch_argument_buffers.pop(call_id, None)
                             continue
 
-                        sanitized = self.sanitize_output_item(
-                            item,
-                            replayable_reasoning=profile.supports_slots,
-                        )
+                        sanitized = self.sanitize_output_item(item)
                         if _is_assistant_message_item(sanitized):
                             pending_message_done = copy.deepcopy(event)
                             pending_message_done["item"] = sanitized
@@ -4796,7 +4793,7 @@ class RouterState:
         self,
         item: dict[str, Any],
         *,
-        replayable_reasoning: bool = False,
+        replayable_reasoning: bool = True,
     ) -> dict[str, Any]:
         sanitized = copy.deepcopy(item)
         if _is_apply_patch_function_call(sanitized):
@@ -4808,6 +4805,8 @@ class RouterState:
         # Codex deliberately omits plaintext reasoning content when serializing
         # history. Carry a compressed local capsule in its preserved opaque
         # field so a resumed request can reconstruct the token-exact prompt.
+        # This is independent of llama.cpp's slots API: external backends also
+        # need intact reasoning history for their own prefix caches.
         if replayable_reasoning and sanitized.get("type") == "reasoning":
             content = sanitized.get("content")
             if isinstance(content, list):
@@ -5262,12 +5261,7 @@ class RouterState:
             iter_items: list[dict[str, Any]] = []
             for item in response.get("output", []):
                 if isinstance(item, dict):
-                    iter_items.append(
-                        self.sanitize_output_item(
-                            item,
-                            replayable_reasoning=profile.supports_slots,
-                        )
-                    )
+                    iter_items.append(self.sanitize_output_item(item))
             pending_calls = collect_managed_calls(iter_items)
             _annotate_message_phases(iter_items, final_response=not pending_calls)
             iter_items = [
