@@ -173,7 +173,7 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
         environment, codex_home, shared_profile = codex_environment(
             dict(os.environ, MARATHON_CODEX_HOME=str(session_home))
         )
-    command = codex_command(runtime, extra_args, shared_profile=shared_profile)
+    command = codex_command(runtime, [*history_config(codex_home), *(extra_args or [])], shared_profile=shared_profile)
     require_hardened_codex(command[0])
     missing = missing_runtime_tools("codex")
     if missing:
@@ -219,6 +219,19 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
         level="info" if result.returncode in (0, 130) else "error",
     )
     return result.returncode
+
+
+def history_config(codex_home: Path) -> list[str]:
+    """Default session-scoped memory, with explicit user overrides last."""
+    if os.environ.get("MARATHON_HISTORY_ENABLED", "1").lower() in {"0", "false", "no"}:
+        return []
+    return [
+        "-c", "experimental_compact_prompt_file=" + json.dumps(str(Path(__file__).with_name("compaction.md"))),
+        "-c", "mcp_servers.marathon_history.command=" + json.dumps(sys.executable),
+        "-c", "mcp_servers.marathon_history.args=" + json.dumps([
+            str(Path(__file__).with_name("history_archive.py")), "--codex-home", str(codex_home)]),
+        "-c", 'mcp_servers.marathon_history.default_tools_approval_mode="approve"',
+    ]
 
 
 def hermes_command(runtime: Runtime, extra_args: list[str] | None = None) -> list[str]:

@@ -78,6 +78,14 @@ This is application-level hardening, not an operating-system network sandbox.
 The footer reports backend decode speed separately from first-output latency.
 Speed depends on context, workload, hardware, and speculative acceptance; there is no single guaranteed tok/s number.
 
+Compaction preserves a structured handoff and provides read-only `history_search`
+and `history_read` tools for recovering details from the current conversation's
+original journal. This works with new chats and `marathon resume`; `/compact`
+lets you compact manually. History stays local, is scoped to the calling
+conversation, and adds no duplicate transcript store. Existing sessions need a
+relaunch to pick up the tools. For troubleshooting, launch with
+`MARATHON_HISTORY_ENABLED=0 marathon` to use the previous compaction setup.
+
 ## More
 
 - [Setup and troubleshooting](docs/SETUP.md)

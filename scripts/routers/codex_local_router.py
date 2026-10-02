@@ -44,6 +44,7 @@ from aiohttp import WSMsgType
 from aiohttp import web
 
 from marathon_app.local_history import normalize_local_history
+from marathon_app.swarm_tools import flatten_request, restore_calls
 from marathon_app.catalog import external_models, backends
 from marathon_app.model_identity import pool_identity
 from marathon_app.pool import acquire_pool_worker, release_pool_worker
@@ -2849,7 +2850,7 @@ class RouterState:
                     "effective_context_window_percent": 100,
                     "experimental_supported_tools": [],
                     "input_modalities": list(profile.input_modalities),
-                    "supports_search_tool": True,
+                    "supports_search_tool": False,
                 }
             )
             data.append(
@@ -5536,6 +5537,26 @@ class RouterState:
             )
 
     async def _process_websocket_create(
+        self,
+        payload: dict[str, Any],
+        *,
+        preset_response_id: str | None = None,
+        event_sink: StreamEventSink | None = None,
+    ) -> dict[str, Any]:
+        # Native MCP namespaces must survive both transports and resume replay.
+        # Keep aliases request-local so concurrent conversations cannot mix them.
+        names = {}
+        if any(t.get("type") == "namespace" for t in payload.get("tools", []) or []):
+            payload = flatten_request(payload, names)
+        async def translated(event):
+            return await event_sink(restore_calls(event, names))
+        result = await self._process_translated_create(
+            payload, preset_response_id=preset_response_id,
+            event_sink=translated if names and event_sink is not None else event_sink,
+        )
+        return restore_calls(result, names) if names else result
+
+    async def _process_translated_create(
         self,
         payload: dict[str, Any],
         *,

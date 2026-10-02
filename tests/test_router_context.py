@@ -38,6 +38,32 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_namespace_tools_roundtrip_on_shared_transport_path(self):
+        async def exercise():
+            state = object.__new__(router_module.RouterState)
+            payload = {'tools': [{'type': 'namespace', 'name': 'mcp__marathon_history',
+                                  'tools': [{'type': 'function', 'name': 'history_search', 'parameters': {}}]}],
+                       'input': [{'type': 'function_call', 'namespace': 'mcp__marathon_history',
+                                  'name': 'history_search', 'arguments': '{}', 'call_id': 'old'}]}
+            call = {'type': 'function_call', 'name': 'mcp__marathon_history__history_search',
+                    'arguments': '{}', 'call_id': 'new'}
+            async def backend(request, **kwargs):
+                self.assertEqual(request['tools'][0]['name'], call['name'])
+                self.assertEqual(request['input'][0]['name'], call['name'])
+                if kwargs['event_sink']:
+                    await kwargs['event_sink']({'type': 'response.output_item.done', 'item': call})
+                return {'output_items': [call]}
+            state._process_translated_create = backend
+            sink = mock.AsyncMock(return_value=True)
+            for stream in (None, sink):
+                result = await state._process_websocket_create(payload, event_sink=stream)
+                item = result['output_items'][0]
+                self.assertEqual(item['namespace'], 'mcp__marathon_history')
+                self.assertEqual(item['name'], 'history_search')
+            self.assertEqual(sink.call_args.args[0]['item']['namespace'], 'mcp__marathon_history')
+            self.assertEqual(payload['tools'][0]['type'], 'namespace')
+        asyncio.run(exercise())
+
     def test_mixed_web_and_frontend_calls_wait_for_frontend_results(self):
         for streaming in (False, True):
             for exhausted in (False, True):
