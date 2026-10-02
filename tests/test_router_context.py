@@ -1152,7 +1152,7 @@ context = 32768
         response, _items, iterations = asyncio.run(
             state._run_responses_loop(
                 profile=profile,
-                forward_request={"input": [], "tools": []},
+                forward_request={"input": [], "tools": [{"type": "function", "name": "web_search"}]},
                 web_search_enabled=True,
             )
         )
@@ -1364,16 +1364,17 @@ context = 32768
         state.telemetry = mock.Mock()
         broken = {"type": "function_call", "name": "exec_command",
                   "call_id": "broken", "arguments": '{"cmd":"unfinished'}
-        failed = {"type": "function_call_output", "call_id": "broken",
-                  "output": "failed to parse function arguments"}
         answer = {"type": "message", "role": "assistant", "phase": "final_answer",
                   "content": [{"type": "output_text", "text": "Recovered."}]}
         state._request_json = mock.AsyncMock(side_effect=[
             {"output": [broken]}, {"output": [answer]},
         ])
-        initial = {"input": [{"type": "message", "role": "user",
+        initial = {"tools": [{"type": "function", "name": "exec_command"}],
+                   "input": [{"type": "message", "role": "user",
                               "content": [{"type": "input_text", "text": "Work."}]}]}
-        followup = {"input": initial["input"] + [broken, failed]}
+        # Router recovery happens before the malformed call reaches the client.
+        # Reconnect replays the same original request, not an executed bad call.
+        followup = copy.deepcopy(initial)
 
         async def run(request):
             return await state._run_responses_loop(
@@ -1389,7 +1390,7 @@ context = 32768
         self.assertEqual(recovered[1], [answer])
         self.assertEqual(reconnected[1], [answer])
         forwarded = state._request_json.await_args.args[3]["input"]
-        self.assertIn("invalid JSON", json.dumps(forwarded))
+        self.assertIn("valid JSON", json.dumps(forwarded))
         self.assertNotIn(broken, forwarded)
 
     def test_malformed_replayed_tool_pair_preserves_failure_feedback(self) -> None:
@@ -4516,7 +4517,8 @@ context = 32768
                 profile=profile,
                 forward_request={
                     "input": [],
-                    "tools": [{"type": "function", "name": "apply_patch"}],
+                    "tools": [{"type": "function", "name": "apply_patch"},
+                              {"type": "function", "name": "exec_command"}],
                     "max_output_tokens": 8_192,
                 },
                 web_search_enabled=False,

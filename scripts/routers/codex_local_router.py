@@ -42,6 +42,10 @@ from aiohttp import ClientSession
 from aiohttp import ClientTimeout
 from aiohttp import WSMsgType
 from aiohttp import web
+from jsonschema.validators import validator_for
+from jsonschema.exceptions import SchemaError
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 from marathon_app.local_history import normalize_local_history
 from marathon_app.swarm_tools import flatten_request, restore_calls
@@ -1165,7 +1169,7 @@ def _has_unquoted_tool_call(text: str) -> bool:
             continue
         # Inline code is quoted task data, too.
         unquoted = re.sub(r"(`+).*?\1", "", line)
-        if "<tool_call>" in unquoted:
+        if "<tool_call>" in unquoted or re.match(r"\s*<function=", unquoted):
             return True
     return False
 
@@ -1725,11 +1729,48 @@ def _apply_patch_protocol_error(item: dict[str, Any], limit: int) -> str | None:
 def _response_tool_protocol_error(
     response: dict[str, Any],
     limit: int,
+    tools: list[dict[str, Any]] | None = None,
 ) -> str | None:
     output = response.get("output")
     if not isinstance(output, list):
         return None
     for item in output:
+        if tools and isinstance(item, dict) and _is_assistant_message_item(item) and _has_unquoted_tool_call(_assistant_message_text(item)):
+            return "assistant text contained tool-call markup, not a structured tool call; no command in that text was executed"
+        if tools is not None and isinstance(item, dict) and item.get("type") in {"function_call", "custom_tool_call"}:
+            name = item.get("name")
+            offered = next((t for t in tools if t.get("name") == name and t.get("type") in {"function", "custom"}), None)
+            if offered is None:
+                available = ", ".join(str(t["name"]) for t in tools if t.get("name"))
+                return f"tool {name!r} was not offered; available tools: {available}"
+            if item["type"] == "function_call":
+                if offered.get("type") != "function":
+                    return f"tool {name!r} requires custom input, not function arguments"
+                arguments = item.get("arguments")
+                if isinstance(arguments, str):
+                    if error := _partial_tool_argument_error(arguments, limit):
+                        return error
+                    try:
+                        arguments = json.loads(arguments)
+                        json.dumps(arguments, allow_nan=False)
+                    except (ValueError, RecursionError):
+                        return f"tool {name!r} arguments must be valid JSON"
+                if not isinstance(arguments, dict):
+                    return f"tool {name!r} arguments must be a JSON object"
+                schema = offered.get("parameters", {})
+                try:
+                    # Empty registry has no network retriever. Local $defs work;
+                    # unresolved remote refs fail closed without fetching URLs.
+                    validator = validator_for(schema)(schema, registry=Registry())
+                    error = next(validator.iter_errors(arguments), None)
+                except (SchemaError, Unresolvable, ValueError, TypeError, RecursionError):
+                    return f"tool {name!r} schema could not be validated offline"
+                if error is not None:
+                    location = ".".join(map(str, error.absolute_path)) or "arguments"
+                    fields = ", ".join(schema.get("properties", {})) if isinstance(schema, dict) else ""
+                    return f"tool {name!r} violates {error.validator} at {location}; use the offered schema (fields: {fields})"
+            elif offered.get("type") != "custom" and name != APPLY_PATCH_TOOL_NAME:
+                return f"tool {name!r} requires JSON function arguments, not custom input"
         if isinstance(item, dict) and _is_apply_patch_function_call(item):
             error = _apply_patch_protocol_error(item, limit)
             if error:
@@ -3246,18 +3287,45 @@ class RouterState:
         generation_events = 0
         stream_completed_at: float | None = None
         pending_tool_events: list[dict[str, Any]] = []
+        message_stream_text: dict[str, str] = {}
+        held_text_events: dict[str, list[dict[str, Any]]] = {}
 
         async def send_event(event: dict[str, Any]) -> None:
             if event_sink is None:
                 return
+            # Hold text from the first '<' until the message is validated.
+            # This catches markers split across arbitrary SSE chunks without
+            # delaying ordinary prose or interpreting text as executable code.
+            kind = event.get("type")
+            item = event.get("item")
+            if request.get("tools"):
+                if kind == "response.output_text.delta":
+                    key = str(event.get("item_id") or "")
+                    delta = str(event.get("delta") or "")
+                    text = message_stream_text.get(key, "") + delta
+                    message_stream_text[key] = text
+                    if _has_unquoted_tool_call(text):
+                        raise ToolProtocolError("assistant text contained tool-call markup, not a structured tool call; that text was not executed")
+                    if key in held_text_events or "<" in delta:
+                        held_text_events.setdefault(key, []).append(copy.deepcopy(event))
+                        return
+                elif isinstance(item, dict) and _is_assistant_message_item(item):
+                    error = _response_tool_protocol_error({"output": [item]}, tool_argument_limit, request.get("tools", []))
+                    if error:
+                        raise ToolProtocolError(error)
+                    key = str(item.get("id") or "")
+                    if kind == "response.output_item.done":
+                        for held in held_text_events.pop(key, []):
+                            if not await event_sink(held):
+                                raise ConnectionError("websocket client disconnected")
+                        message_stream_text.pop(key, None)
             # A later malformed call can reject this entire backend attempt.
             # Do not let Codex execute an earlier call that recovery will forget.
             # Text/reasoning still stream normally; executable calls commit only
             # after the complete response has passed protocol validation.
-            if _starts_followup_work(event.get("item")) or event.get("type") in {
-                "response.custom_tool_call_input.delta",
-                "response.function_call_arguments.delta",
-            }:
+            if _starts_followup_work(event.get("item")) or str(event.get("type", "")).startswith((
+                "response.custom_tool_call_input.", "response.function_call_arguments.",
+            )):
                 pending_tool_events.append(copy.deepcopy(event))
                 return
             if not await event_sink(event):
@@ -3418,6 +3486,9 @@ class RouterState:
 
                 if event_type == "response.output_item.done":
                     if isinstance(item, dict):
+                        protocol_error = _response_tool_protocol_error({"output": [item]}, tool_argument_limit, request.get("tools", []))
+                        if protocol_error:
+                            raise ToolProtocolError(protocol_error)
                         if _is_apply_patch_function_call(item):
                             protocol_error = _apply_patch_protocol_error(
                                 item,
@@ -3534,7 +3605,7 @@ class RouterState:
             backend_response["output"] = []
         if "usage" not in backend_response:
             backend_response["usage"] = copy.deepcopy(DEFAULT_USAGE)
-        protocol_error = _response_tool_protocol_error(backend_response, tool_argument_limit)
+        protocol_error = _response_tool_protocol_error(backend_response, tool_argument_limit, request.get("tools", []))
         if protocol_error:
             raise ToolProtocolError(protocol_error)
         if event_sink is not None:
@@ -5226,6 +5297,7 @@ class RouterState:
                 protocol_error = _response_tool_protocol_error(
                     response,
                     _tool_argument_max_chars(),
+                    None if is_compaction else request.get("tools", []),
                 )
                 if protocol_error:
                     raise ToolProtocolError(protocol_error)
