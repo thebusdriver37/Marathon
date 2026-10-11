@@ -54,6 +54,15 @@ Other hardware keeps the general setup path, without untested 3090-specific tuni
 No power limits are changed automatically.
 See [runtime details and reproducibility](docs/RUNTIME.md).
 
+For a local llama-swap pool, set the backend's `identity_config` to the broker YAML
+and `pool_min_free_vram_mib` to the model's required per-GPU memory (23,500 MiB for
+the tuned 196K bundle). Before leasing a worker, Marathon checks the configured
+Docker GPU placement against NVIDIA process and free-memory reports. It skips
+GPUs occupied by other jobs and counts only that worker's own container memory
+as reusable. If availability cannot be verified, that worker is skipped.
+Pools without `identity_config` retain reservation-only selection. The check runs
+when acquiring a lease; it cannot prevent an unrelated job from starting later.
+
 ## Local by default
 
 Inference runs locally unless you explicitly configure a remote model.

@@ -87,6 +87,7 @@ class Backend:
     slot_save_root: Path | None = None
     cache_id: str = ""
     identity_config: Path | None = None
+    pool_min_free_vram_mib: int = 0
 
 
 @dataclass(frozen=True)
@@ -596,6 +597,7 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
             cache_id=str(raw.get("cache_id", "")).strip(),
             identity_config=(Path(str(raw["identity_config"])).expanduser()
                              if raw.get("identity_config") else None),
+            pool_min_free_vram_mib=max(0, int(raw.get("pool_min_free_vram_mib", 0))),
         )
     return result
 
