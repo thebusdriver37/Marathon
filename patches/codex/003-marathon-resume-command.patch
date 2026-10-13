@@ -1,7 +1,8 @@
 diff --git a/codex-rs/tui/src/app/exit_summary.rs b/codex-rs/tui/src/app/exit_summary.rs
+index f9932ced06..f0ded15195 100644
 --- a/codex-rs/tui/src/app/exit_summary.rs
 +++ b/codex-rs/tui/src/app/exit_summary.rs
-@@ -134,15 +134,16 @@ impl AppExitInfo {
+@@ -135,15 +135,16 @@ impl AppExitInfo {
          if let ExitReason::Archived(thread_id) = self.exit_reason {
              lines.push(format!("Session archived: {thread_id}"));
          } else if let Some(thread) = self.resume_hint {
@@ -21,10 +22,10 @@ diff --git a/codex-rs/tui/src/app/exit_summary.rs b/codex-rs/tui/src/app/exit_su
                  ));
              }
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index 0cd2d7ed24..faaab1b101 100644
+index dc0fbd0547..d9536c84f8 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -1256,6 +1256,7 @@ async fn run_ratatui_app(
+@@ -1424,6 +1424,7 @@ async fn run_ratatui_app(
              terminal_restore_guard.restore_silently();
              session_log::log_session_end();
              let _ = tui.terminal.clear();
@@ -32,7 +33,7 @@ index 0cd2d7ed24..faaab1b101 100644
              Ok(AppExitInfo {
                  token_usage: crate::token_usage::TokenUsage::default(),
                  thread_id: None,
-@@ -1263,7 +1264,7 @@ async fn run_ratatui_app(
+@@ -1431,7 +1432,7 @@ async fn run_ratatui_app(
                  disconnect_info: None,
                  update_action: None,
                  exit_reason: ExitReason::Fatal(format!(

@@ -1,8 +1,8 @@
 diff --git a/codex-rs/state/src/log_db.rs b/codex-rs/state/src/log_db.rs
-index 06387efc4c..bce149ac09 100644
+index 6b4cc42c43..00e69b06e7 100644
 --- a/codex-rs/state/src/log_db.rs
 +++ b/codex-rs/state/src/log_db.rs
-@@ -79,6 +79,10 @@ pub fn default_filter() -> Targets {
+@@ -85,6 +85,10 @@ pub fn default_filter() -> Targets {
          // Per-chunk streaming traces otherwise flood the bounded SQLite log queue.
          .with_target("codex_tui::streaming::controller", LevelFilter::DEBUG)
          .with_target("codex_tui::streaming::table_holdback", LevelFilter::DEBUG)
@@ -14,10 +14,10 @@ index 06387efc4c..bce149ac09 100644
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 diff --git a/codex-rs/state/src/log_db_filter_tests.rs b/codex-rs/state/src/log_db_filter_tests.rs
-index 28a36c706f..434326d486 100644
+index 3f04e1049c..f20099fedd 100644
 --- a/codex-rs/state/src/log_db_filter_tests.rs
 +++ b/codex-rs/state/src/log_db_filter_tests.rs
-@@ -76,6 +76,22 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
+@@ -84,6 +84,22 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
          target: "codex_tui::streaming::table_holdback",
          "retained-table-holdback-debug"
      );
@@ -40,7 +40,7 @@ index 28a36c706f..434326d486 100644
      tracing::trace!(
          target: "codex_tui::streaming::commit_tick",
          "retained-commit-tick-trace"
-@@ -141,6 +157,16 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
+@@ -164,6 +180,16 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
                  "codex_tui::streaming::table_holdback",
                  Some("retained-table-holdback-debug"),
              ),

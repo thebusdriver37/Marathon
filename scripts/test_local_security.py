@@ -35,6 +35,28 @@ from marathon_app.frontends import codex_command
 from marathon_app.router_security import router_security_middleware
 
 
+def local_listener_ports(trace):
+    """Recognize loopback services bound by the traced process tree.
+
+    The TUI task-tools MCP server uses an ephemeral loopback listener. An
+    outgoing socket's local address alone never establishes an allowed service.
+    """
+    listeners = set()
+    ports = set()
+    for line in trace.splitlines():
+        match = re.search(r'^(\d+)\s+(bind|getsockname)\((\d+), .*sin_port=htons\((\d+)\), sin_addr=inet_addr\("127\.0\.0\.1"\).* = 0$', line)
+        if not match:
+            continue
+        pid, operation, fd, port = match.groups()
+        if operation == 'bind':
+            listeners.add((pid, fd))
+            if port != '0':
+                ports.add(port)
+        elif (pid, fd) in listeners and port != '0':
+            ports.add(port)
+    return ports
+
+
 async def inside(binary, output):
     subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
     os.umask(0o077)
@@ -147,7 +169,7 @@ async def inside(binary, output):
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
         process = await asyncio.create_subprocess_exec(
-            "strace", "-f", "-qq", "-e", "trace=connect,sendto,sendmsg", "-o", str(output / f"{label}-connect.log"),
+            "strace", "-f", "-qq", "-e", "trace=connect,sendto,sendmsg,bind,getsockname", "-o", str(output / f"{label}-connect.log"),
             *command, *args, env=environment, cwd=output,
             stdin=slave, stdout=slave, stderr=slave, preexec_fn=terminal_session,
         )
@@ -237,14 +259,19 @@ async def inside(binary, output):
         assert "LOCAL_SECURITY_OK" in json.dumps(requests[-1].get("input")), "Resume lost history"
         bad = []
         for trace in output.glob("*-connect.log"):
-            for line in trace.read_text().splitlines():
+            trace_text = trace.read_text()
+            fixture_port = str(site._server.sockets[0].getsockname()[1])
+            allowed_ports = {fixture_port} | local_listener_ports(trace_text)
+            for line in trace_text.splitlines():
                 if "AF_INET" not in line:
+                    continue
+                if "getsockname(" in line:
                     continue
                 addresses = re.findall(r'(?:inet_addr\(|inet_pton\(AF_INET6, )"([^"]+)"', line)
                 ports = re.findall(r'sin6?_port=htons\((\d+)\)', line)
-                fixture_port = str(site._server.sockets[0].getsockname()[1])
+                permitted_ports = allowed_ports | ({'0'} if 'bind(' in line else set())
                 if (not addresses or any(not ipaddress.ip_address(address).is_loopback for address in addresses)
-                        or not ports or any(port != fixture_port for port in ports)):
+                        or not ports or any(port not in permitted_ports for port in ports)):
                     bad.append(line)
         assert not bad, f"Network attempts outside the loopback fixture detected: {len(bad)}"
         result = {"idle_seconds": idle_seconds, "model_requests": len(requests),

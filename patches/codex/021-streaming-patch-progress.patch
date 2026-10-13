@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/turn_start.rs b/codex-rs/app-server/tests/suite/v2/turn_start.rs
-index 896d27a302..ea6451b335 100644
+index d055f80a81..215ec5c3e5 100644
 --- a/codex-rs/app-server/tests/suite/v2/turn_start.rs
 +++ b/codex-rs/app-server/tests/suite/v2/turn_start.rs
-@@ -4247,7 +4247,6 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
+@@ -4186,7 +4186,6 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
      ];
      let server = create_mock_responses_server_sequence(responses).await;
      MockResponsesConfig::new(&server.uri())
@@ -11,10 +11,10 @@ index 896d27a302..ea6451b335 100644
          .disable_feature(Feature::RemoteModels)
          .disable_feature(Feature::ShellSnapshot)
 diff --git a/codex-rs/core/tests/suite/apply_patch_cli.rs b/codex-rs/core/tests/suite/apply_patch_cli.rs
-index aba4a3b3c8..6195a0553d 100644
+index 3681a7ed22..6f60de23be 100644
 --- a/codex-rs/core/tests/suite/apply_patch_cli.rs
 +++ b/codex-rs/core/tests/suite/apply_patch_cli.rs
-@@ -1723,15 +1723,7 @@ async fn apply_patch_cli_can_use_exec_command_output_as_patch_input() -> Result<
+@@ -1672,15 +1672,7 @@ async fn apply_patch_cli_can_use_exec_command_output_as_patch_input() -> Result<
  async fn apply_patch_custom_tool_streaming_emits_updated_changes() -> Result<()> {
      skip_if_no_network!(Ok(()));
  
@@ -32,10 +32,10 @@ index aba4a3b3c8..6195a0553d 100644
      let codex = test.codex.clone();
      let call_id = "apply-patch-streaming";
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index 30318ae47b..3f8f034364 100644
+index c68bc3bb74..6b545cc3ef 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -1188,8 +1188,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1272,8 +1272,8 @@ pub const FEATURES: &[FeatureSpec] = &[
      FeatureSpec {
          id: Feature::ApplyPatchStreamingEvents,
          key: "apply_patch_streaming_events",
@@ -47,10 +47,10 @@ index 30318ae47b..3f8f034364 100644
      FeatureSpec {
          id: Feature::ApplyPatchPreserveLineEndings,
 diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
-index da6cb3c822..5d353abf97 100644
+index 5891dc0c9b..4bc24c761c 100644
 --- a/codex-rs/features/src/tests.rs
 +++ b/codex-rs/features/src/tests.rs
-@@ -812,15 +812,12 @@ server_names = ["history", "notes"]
+@@ -841,15 +841,12 @@ server_names = ["history", "notes"]
  #[test]
  fn unstable_warning_event_only_mentions_enabled_under_development_features() {
      let mut configured_features = Table::new();
@@ -68,7 +68,7 @@ index da6cb3c822..5d353abf97 100644
  
      let warning = unstable_features_warning_event(
          Some(&configured_features),
-@@ -833,7 +830,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
+@@ -862,7 +859,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
      let EventMsg::Warning(WarningEvent { message }) = warning.msg else {
          panic!("expected warning event");
      };
@@ -78,10 +78,10 @@ index da6cb3c822..5d353abf97 100644
      assert!(message.contains("/tmp/config.toml"));
  }
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 5fd8671a7a..70e02030d6 100644
+index 25fbdcc908..76aa16e8f3 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -108,8 +108,12 @@ impl ChatWidget {
+@@ -122,8 +122,12 @@ impl ChatWidget {
                                  .set_generation_stage(GenerationStage::Answering);
                              self.refresh_status_line();
                          }
@@ -95,7 +95,7 @@ index 5fd8671a7a..70e02030d6 100644
                          | ThreadItem::McpToolCall { .. }
                          | ThreadItem::DynamicToolCall { .. }
                          | ThreadItem::WebSearch { .. }
-@@ -123,6 +127,10 @@ impl ChatWidget {
+@@ -137,6 +141,10 @@ impl ChatWidget {
                  self.handle_item_started_notification(notification, replay_kind);
              }
              ServerNotification::ItemCompleted(notification) => {
@@ -106,7 +106,7 @@ index 5fd8671a7a..70e02030d6 100644
                  self.handle_item_completed_notification(notification, replay_kind);
              }
              ServerNotification::AgentMessageDelta(notification) => {
-@@ -193,6 +201,16 @@ impl ChatWidget {
+@@ -207,6 +215,16 @@ impl ChatWidget {
              ServerNotification::FileChangeOutputDelta(notification) => {
                  self.on_patch_apply_output_delta(notification.item_id, notification.delta);
              }
@@ -123,14 +123,14 @@ index 5fd8671a7a..70e02030d6 100644
              ServerNotification::TurnDiffUpdated(notification) => {
                  self.on_turn_diff(notification.diff)
              }
-@@ -391,7 +409,6 @@ impl ChatWidget {
+@@ -407,7 +425,6 @@ impl ChatWidget {
              | ServerNotification::ProcessOutputDelta(_)
              | ServerNotification::ProcessExited(_)
              | ServerNotification::McpServerEventStream(_)
 -            | ServerNotification::FileChangePatchUpdated(_)
              | ServerNotification::McpToolCallProgress(_)
-             | ServerNotification::McpServerOauthLoginCompleted(_)
              | ServerNotification::AppListUpdated(_)
+             | ServerNotification::EnvironmentConnected(_)
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
 index 77db28f48b..8a77a7295d 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
@@ -163,10 +163,10 @@ index 77db28f48b..8a77a7295d 100644
          }
  
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 6144988492..cacfbe9289 100644
+index 9cc4dd7e4a..d1c0749faf 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3102,6 +3102,72 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3151,6 +3151,72 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
      );
  }
  

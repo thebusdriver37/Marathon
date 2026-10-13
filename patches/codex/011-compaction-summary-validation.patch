@@ -1,8 +1,8 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index e102da28b4..8d30ef5b64 100644
+index f4db71b688..eb09451f7c 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -17,7 +17,7 @@ use crate::responses_metadata::CompactionTurnMetadata;
+@@ -22,7 +22,7 @@ use crate::responses_metadata::CompactionTurnMetadata;
  use crate::session::RequestEffortUsage;
  use crate::session::session::Session;
  use crate::session::step_context::StepContext;
@@ -11,15 +11,15 @@ index e102da28b4..8d30ef5b64 100644
  use crate::session::turn_context::TurnContext;
  use crate::state::AutoCompactWindowIds;
  use crate::util::backoff;
-@@ -43,6 +43,7 @@ use codex_protocol::models::AgentMessageInputContent;
+@@ -46,6 +46,7 @@ use codex_protocol::models::AgentMessageInputContent;
+ use codex_protocol::models::BaseInstructions;
  use codex_protocol::models::ContentItem;
  use codex_protocol::models::ContentItemKind;
- use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 +use codex_protocol::models::MessagePhase;
  use codex_protocol::models::ResponseInputItem;
  use codex_protocol::models::ResponseItem;
  use codex_protocol::protocol::EventMsg;
-@@ -348,17 +349,7 @@ async fn run_compact_task_inner_impl(
+@@ -369,17 +370,7 @@ async fn run_compact_task_inner_impl(
  
      let history_snapshot = sess.clone_history().await;
      let history_items = history_snapshot.annotated_items();
@@ -36,8 +36,8 @@ index e102da28b4..8d30ef5b64 100644
 -    };
 +    let summary_suffix = compaction_response.summary;
      let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
-     let identity = if sess.guardian_context_mode == GuardianContextMode::ThreadOwned {
-         CompactedMessageIdentity::Preserve
+     let user_messages = collect_annotated_user_messages(history_items);
+ 
 @@ -765,7 +756,7 @@ fn build_compacted_history_with_limit(
  
  struct CompactionResponse {
@@ -55,7 +55,7 @@ index e102da28b4..8d30ef5b64 100644
      loop {
          let maybe_event = stream.next().await;
          let Some(event) = maybe_event else {
-@@ -804,18 +796,14 @@ async fn drain_to_completed(
+@@ -804,24 +796,14 @@ async fn drain_to_completed(
          };
          match event {
              Ok(ResponseEvent::OutputItemDone(item)) => {
@@ -64,10 +64,16 @@ index e102da28b4..8d30ef5b64 100644
 -                    // the live history and persisted rollout intact.
 -                    output.push(item);
 -                } else {
--                    sess.record_conversation_items(
+-                    sess.record_annotated_conversation_items(
 -                        turn_context,
 -                        turn_context.model_info(),
--                        std::slice::from_ref(&item),
+-                        vec![ResponseItemEnvelope {
+-                            item,
+-                            metadata: Some(CodexHarnessMetadata {
+-                                compaction_output: true,
+-                                ..Default::default()
+-                            }),
+-                        }],
 -                    )
 -                    .await;
 +                if !matches!(&item, ResponseItem::Message {
@@ -81,7 +87,7 @@ index e102da28b4..8d30ef5b64 100644
              }
              Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                  sess.set_server_reasoning_included(included).await;
-@@ -838,9 +826,15 @@ async fn drain_to_completed(
+@@ -844,9 +826,25 @@ async fn drain_to_completed(
                  .await;
                  sess.update_token_usage_info(turn_context, token_usage.as_ref())
                      .await?;
@@ -89,7 +95,17 @@ index e102da28b4..8d30ef5b64 100644
 +                    "compaction response completed without a usable assistant summary".to_string()
 +                ))?;
 +                if !matches!(phase, CompactionPhase::PostTurn) {
-+                    sess.record_conversation_items(turn_context, turn_context.model_info(), &output).await;
++                    sess.record_annotated_conversation_items(
++                        turn_context,
++                        turn_context.model_info(),
++                        output.into_iter().map(|item| ResponseItemEnvelope {
++                            item,
++                            metadata: Some(CodexHarnessMetadata {
++                                compaction_output: true,
++                                ..Default::default()
++                            }),
++                        }).collect(),
++                    ).await;
 +                }
                  return Ok(CompactionResponse {
                      response_id,
@@ -99,10 +115,10 @@ index e102da28b4..8d30ef5b64 100644
              }
              Ok(_) => continue,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 360607f3f4..6cfa5cf0ab 100644
+index 64e8786a15..69b6ab4c7b 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -46,7 +46,6 @@ use crate::stream_events_utils::TurnItemContributorPolicy;
+@@ -45,7 +45,6 @@ use crate::stream_events_utils::TurnItemContributorPolicy;
  use crate::stream_events_utils::finalize_non_tool_response_item;
  use crate::stream_events_utils::handle_non_tool_response_item;
  use crate::stream_events_utils::handle_output_item_done;
@@ -110,7 +126,7 @@ index 360607f3f4..6cfa5cf0ab 100644
  use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
  use crate::stream_events_utils::raw_assistant_output_text_from_item;
  use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
-@@ -3068,17 +3067,6 @@ async fn try_run_sampling_request(
+@@ -3190,17 +3189,6 @@ async fn try_run_sampling_request(
      outcome
  }
  
@@ -129,10 +145,10 @@ index 360607f3f4..6cfa5cf0ab 100644
  #[path = "turn_tests.rs"]
  mod tests;
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
-index cfbcefc9d8..b3fb53d7e2 100644
+index b46bc107e9..f41ce2dbb9 100644
 --- a/codex-rs/core/tests/suite/compact.rs
 +++ b/codex-rs/core/tests/suite/compact.rs
-@@ -3965,6 +3965,200 @@ async fn manual_compact_retries_after_context_window_error() {
+@@ -4152,6 +4152,200 @@ async fn manual_compact_retries_after_context_window_error() {
      }
  }
  

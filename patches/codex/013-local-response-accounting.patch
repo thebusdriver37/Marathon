@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index 772a8a0a96..75a9b5aae7 100644
+index c105c37195..a3dee20576 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-@@ -14245,6 +14245,50 @@
+@@ -14533,6 +14533,50 @@
          ],
          "type": "object"
        },
@@ -53,7 +53,7 @@ index 772a8a0a96..75a9b5aae7 100644
        "MarketplaceAddParams": {
          "$schema": "http://json-schema.org/draft-07/schema#",
          "properties": {
-@@ -19148,6 +19192,16 @@
+@@ -19545,6 +19589,16 @@
                "null"
              ]
            },
@@ -71,10 +71,10 @@ index 772a8a0a96..75a9b5aae7 100644
          },
          "type": "object"
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index ec8196f085..1738e2ba50 100644
+index 1a38e4fe91..335a07d2e0 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-@@ -10297,6 +10297,50 @@
+@@ -10545,6 +10545,50 @@
        ],
        "type": "object"
      },
@@ -125,7 +125,7 @@ index ec8196f085..1738e2ba50 100644
      "MarketplaceAddParams": {
        "$schema": "http://json-schema.org/draft-07/schema#",
        "properties": {
-@@ -15200,6 +15244,16 @@
+@@ -15557,6 +15601,16 @@
              "null"
            ]
          },
@@ -244,10 +244,10 @@ index 34b492bed2..0f6a8d20e3 100644
 -export type ResponseUsageMetadata = { amount: string | null, metadata: JsonValue | null, };
 +export type ResponseUsageMetadata = { amount: string | null, metadata: JsonValue | null, marathon: MarathonResponseMetrics | null, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
-index 64c7420cc0..a233e29b56 100644
+index a90d0548a3..6723ca2f2e 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
-@@ -242,6 +242,7 @@ export type { LoginAccountResponse } from "./LoginAccountResponse";
+@@ -249,6 +249,7 @@ export type { LoginAccountResponse } from "./LoginAccountResponse";
  export type { LoginAppBrand } from "./LoginAppBrand";
  export type { LogoutAccountResponse } from "./LogoutAccountResponse";
  export type { ManagedHooksRequirements } from "./ManagedHooksRequirements";
@@ -256,10 +256,10 @@ index 64c7420cc0..a233e29b56 100644
  export type { MarketplaceAddResponse } from "./MarketplaceAddResponse";
  export type { MarketplaceInterface } from "./MarketplaceInterface";
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
-index 09732cfb43..b3b13ce0e1 100644
+index c7f22e2930..146696afb3 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
-@@ -1872,6 +1872,26 @@ pub struct RawResponseCompletedNotification {
+@@ -1917,6 +1917,26 @@ pub struct RawResponseCompletedNotification {
  pub struct ResponseUsageMetadata {
      pub amount: Option<String>,
      pub metadata: Option<JsonValue>,
@@ -286,7 +286,7 @@ index 09732cfb43..b3b13ce0e1 100644
  }
  
  impl From<codex_protocol::ResponseUsageMetadata> for ResponseUsageMetadata {
-@@ -1879,6 +1899,14 @@ impl From<codex_protocol::ResponseUsageMetadata> for ResponseUsageMetadata {
+@@ -1924,6 +1944,14 @@ impl From<codex_protocol::ResponseUsageMetadata> for ResponseUsageMetadata {
          Self {
              amount: value.amount,
              metadata: value.metadata,
@@ -302,10 +302,10 @@ index 09732cfb43..b3b13ce0e1 100644
      }
  }
 diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
-index b0fa49b4ba..8bbd7e09cd 100644
+index 34fff277d4..6c12e7ea7d 100644
 --- a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
-@@ -325,10 +325,15 @@ pub(super) async fn ensure_listener_task_running(
+@@ -336,10 +336,15 @@ pub(super) async fn ensure_listener_task_running(
                          thread_state.track_current_turn_event(&event.id, &event.msg);
                          thread_state.experimental_raw_events
                      };
@@ -323,10 +323,10 @@ index b0fa49b4ba..8bbd7e09cd 100644
                          continue;
                      }
 diff --git a/codex-rs/app-server/tests/suite/v2/compaction.rs b/codex-rs/app-server/tests/suite/v2/compaction.rs
-index 9f3d1a0e61..5b7cd33660 100644
+index 2f3f895977..474d38b22d 100644
 --- a/codex-rs/app-server/tests/suite/v2/compaction.rs
 +++ b/codex-rs/app-server/tests/suite/v2/compaction.rs
-@@ -257,6 +257,7 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
+@@ -352,6 +352,7 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
              usage_metadata: Some(ResponseUsageMetadata {
                  amount: Some("0.125".to_string()),
                  metadata: Some(expected_metadata),
@@ -335,10 +335,10 @@ index 9f3d1a0e61..5b7cd33660 100644
              usage: Some(TokenUsageBreakdown {
                  total_tokens: 200,
 diff --git a/codex-rs/app-server/tests/suite/v2/turn_start.rs b/codex-rs/app-server/tests/suite/v2/turn_start.rs
-index 4179365c1e..896d27a302 100644
+index 491207ad77..d055f80a81 100644
 --- a/codex-rs/app-server/tests/suite/v2/turn_start.rs
 +++ b/codex-rs/app-server/tests/suite/v2/turn_start.rs
-@@ -1163,25 +1163,54 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
+@@ -1180,25 +1180,54 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
      Ok(())
  }
  
@@ -401,7 +401,7 @@ index 4179365c1e..896d27a302 100644
      let server = responses::start_mock_server().await;
      let mut completed = json!({
          "type": "response.completed",
-@@ -1205,6 +1234,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
+@@ -1222,6 +1251,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
      let expected_metadata = json!({
          "amount": expected_amount,
          "metadata": completed["response"]["usage"],
@@ -409,7 +409,7 @@ index 4179365c1e..896d27a302 100644
      });
      let body = responses::sse(vec![
          responses::ev_response_created("resp-1"),
-@@ -1224,7 +1254,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
+@@ -1241,7 +1271,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
  
      let ThreadStartResponse { thread, .. } = mcp
          .start_thread(ThreadStartParams {
@@ -418,7 +418,7 @@ index 4179365c1e..896d27a302 100644
              ..Default::default()
          })
          .await?;
-@@ -1265,7 +1295,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
+@@ -1282,7 +1312,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
      assert_eq!(
          notification,
          RawResponseCompletedNotification {
@@ -427,7 +427,7 @@ index 4179365c1e..896d27a302 100644
              turn_id: turn.id,
              response_id: "resp-1".to_string(),
              usage_metadata: serde_json::from_value(expected_metadata)?,
-@@ -1281,6 +1311,17 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
+@@ -1298,6 +1328,17 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
      );
  
      response_mock.single_request();
@@ -458,10 +458,10 @@ index 5c1dcb8ee5..842b5e163c 100644
              );
              assert_eq!(
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index a6436d15f7..52b8d77e8d 100644
+index 6a061086b1..48d18425b1 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -1227,6 +1227,7 @@ mod tests {
+@@ -1245,6 +1245,7 @@ mod tests {
                  usage_metadata: Some(codex_protocol::ResponseUsageMetadata {
                      amount: Some("0.125".to_string()),
                      metadata: Some(serde_json::json!({ "extra": { "label": "example" } })),
@@ -469,7 +469,7 @@ index a6436d15f7..52b8d77e8d 100644
                  }),
                  end_turn: Some(true),
              }),
-@@ -1250,7 +1251,8 @@ mod tests {
+@@ -1268,7 +1269,8 @@ mod tests {
              Some(codex_protocol::ResponseUsageMetadata {
                  amount: Some("0.125".to_string()),
                  metadata: Some(serde_json::json!({ "extra": { "label": "example" } })),
@@ -480,10 +480,10 @@ index a6436d15f7..52b8d77e8d 100644
          assert_eq!(
              output.token_usage,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index a4b4ba0032..774e6bd374 100644
+index bc086f8661..dec0ae4d8a 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -4618,17 +4618,38 @@ impl Session {
+@@ -4756,17 +4756,38 @@ impl Session {
          turn_context: &TurnContext,
          settings: &ResolvedStepSettings,
          token_usage: Option<&TokenUsage>,
@@ -524,10 +524,10 @@ index a4b4ba0032..774e6bd374 100644
                  state.token_info()
              };
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 6cfa5cf0ab..639a5b251e 100644
+index 69b6ab4c7b..a7ee9f49c3 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -2830,6 +2830,10 @@ async fn try_run_sampling_request(
+@@ -2948,6 +2948,10 @@ async fn try_run_sampling_request(
                  usage_metadata,
                  end_turn,
              } => {
@@ -538,7 +538,7 @@ index 6cfa5cf0ab..639a5b251e 100644
                  sess.services
                      .analytics_events_client
                      .track_code_mode_tool_call(
-@@ -2855,10 +2859,11 @@ async fn try_run_sampling_request(
+@@ -2973,10 +2977,11 @@ async fn try_run_sampling_request(
                  )
                  .await;
                  let budget_result = sess
@@ -552,10 +552,10 @@ index 6cfa5cf0ab..639a5b251e 100644
                      .await;
                  should_emit_token_count = true;
 diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
-index b9a0492e1a..851e149515 100755
+index 6659bba1f4..dd28972b85 100755
 --- a/codex-rs/core/tests/suite/client_websockets.rs
 +++ b/codex-rs/core/tests/suite/client_websockets.rs
-@@ -203,6 +203,7 @@ async fn responses_websocket_preserves_credit_usage_metadata() {
+@@ -207,6 +207,7 @@ async fn responses_websocket_preserves_credit_usage_metadata() {
          Some(codex_protocol::ResponseUsageMetadata {
              amount: Some("0.12345678901234567890".to_string()),
              metadata: Some(expected_metadata),
@@ -564,7 +564,7 @@ index b9a0492e1a..851e149515 100755
      );
      assert_eq!(server.single_connection().len(), 1);
 diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
-index c98a2f57b3..bf57e5e599 100644
+index 17e22cc5af..1c0ed14226 100644
 --- a/codex-rs/protocol/src/lib.rs
 +++ b/codex-rs/protocol/src/lib.rs
 @@ -11,6 +11,7 @@ pub use agent_path::AgentPath;

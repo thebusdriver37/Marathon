@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index c4b9796ef8..d66d64bdbd 100644
+index 01a59c276b..c7d760ef23 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -459,6 +459,7 @@ mod turn_lifecycle;
+@@ -401,6 +401,7 @@ mod turn_lifecycle;
  mod turn_runtime;
  use self::turn_lifecycle::TurnLifecycleState;
  mod turn_throughput;
@@ -10,7 +10,7 @@ index c4b9796ef8..d66d64bdbd 100644
  use self::turn_throughput::GenerationStage;
  use self::turn_throughput::TurnThroughput;
  mod usage;
-@@ -1232,6 +1233,7 @@ impl ChatWidget {
+@@ -1185,6 +1186,7 @@ impl ChatWidget {
              self.refresh_terminal_title();
          }
          self.refresh_status_line_if_workspace_headline_due();
@@ -93,10 +93,10 @@ index b5b0ab1283..1c23e244f5 100644
          &self,
          window: Option<&RateLimitWindowDisplay>,
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 4cf0f8dfb5..0dd59e492e 100644
+index f28c6a4d9c..797d75a7ec 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3088,27 +3088,84 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3137,27 +3137,84 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
      handle_turn_started(&mut chat, "turn-stage");
      chat.refresh_status_line();
      assert!(
@@ -190,7 +190,7 @@ index 4cf0f8dfb5..0dd59e492e 100644
      );
  }
  
-@@ -3138,7 +3195,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3187,7 +3244,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
  
      let drafting = status_line_text(&chat).expect("drafting status");
      assert!(
@@ -199,7 +199,7 @@ index 4cf0f8dfb5..0dd59e492e 100644
          "unexpected drafting status: {drafting}"
      );
  
-@@ -3157,7 +3214,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3206,7 +3263,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
      );
      assert!(
          status_line_text(&chat).is_some_and(|status| {
@@ -208,7 +208,7 @@ index 4cf0f8dfb5..0dd59e492e 100644
          }),
          "patch application should replace the drafting stage"
      );
-@@ -3176,8 +3233,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3225,8 +3282,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
          None,
      );
      assert!(

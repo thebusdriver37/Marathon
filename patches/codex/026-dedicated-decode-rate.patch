@@ -1,5 +1,5 @@
 diff --git a/codex-rs/tui/src/bottom_pane/status_line_style.rs b/codex-rs/tui/src/bottom_pane/status_line_style.rs
-index a3bf74ec43..8f0cc1be5b 100644
+index f7ed3ed628..5d9c1ab6cf 100644
 --- a/codex-rs/tui/src/bottom_pane/status_line_style.rs
 +++ b/codex-rs/tui/src/bottom_pane/status_line_style.rs
 @@ -48,9 +48,9 @@ impl StatusLineAccent {
@@ -11,13 +11,13 @@ index a3bf74ec43..8f0cc1be5b 100644
              | StatusLineItem::EstimatedThreadCost => Self::Usage,
 -            StatusLineItem::TokensPerSecond => Self::State,
              StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => Self::Limit,
-             StatusLineItem::CodexVersion
-             | StatusLineItem::Hostname
+             StatusLineItem::CodexVersion | StatusLineItem::Hostname | StatusLineItem::SessionId | StatusLineItem::ContextTokens => {
+                 Self::Metadata
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index d2b97de4b8..bfd55c6645 100644
+index 2c105fdef0..69a0a6a34e 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -109,15 +109,7 @@ impl ChatWidget {
+@@ -123,15 +123,7 @@ impl ChatWidget {
                              self.refresh_status_line();
                          }
                          ThreadItem::FileChange { id, .. } => {
@@ -34,7 +34,7 @@ index d2b97de4b8..bfd55c6645 100644
                              self.refresh_status_line();
                          }
                          _ => {}
-@@ -215,7 +207,7 @@ impl ChatWidget {
+@@ -229,7 +221,7 @@ impl ChatWidget {
              ServerNotification::FileChangePatchUpdated(notification) => {
                  if !from_replay {
                      self.turn_throughput
@@ -136,10 +136,10 @@ index b72c8d2508..27e3f66551 100644
 -    }
 -}
 diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-index d5e6dc1f61..c7084917cb 100644
+index 840906e588..93bcf00440 100644
 --- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
 +++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-@@ -736,7 +736,7 @@ impl ChatWidget {
+@@ -739,7 +739,7 @@ impl ChatWidget {
                          format!("+{} -{}", stats.additions, stats.deletions)
                      }
                  }),
@@ -149,10 +149,10 @@ index d5e6dc1f61..c7084917cb 100644
              StatusLineItem::ApprovalMode => Some(approval_mode_display(&self.config)),
              StatusLineItem::UsedTokens => {
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 28fb44a245..3c2a38e5df 100644
+index 3f82d04784..3d75c018d5 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3001,15 +3001,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3050,15 +3050,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
  
      let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
      chat.show_welcome_banner = false;
@@ -175,7 +175,7 @@ index 28fb44a245..3c2a38e5df 100644
      chat.handle_server_notification(
          ServerNotification::RawResponseCompleted(
              codex_app_server_protocol::RawResponseCompletedNotification {
-@@ -3057,17 +3058,9 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3106,17 +3107,9 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      );
      chat.refresh_status_line();
      let live_label = status_line_text(&chat).expect("latest call footer");
@@ -195,7 +195,7 @@ index 28fb44a245..3c2a38e5df 100644
      );
  
      let width = 72;
-@@ -3080,45 +3073,52 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3129,45 +3122,52 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
          "status_line_tokens_per_second_footer",
          normalized_backend_snapshot(terminal.backend())
      );
@@ -261,7 +261,7 @@ index 28fb44a245..3c2a38e5df 100644
  }
  
  fn is_generation_spinner_frame(frame: char) -> bool {
-@@ -3134,7 +3134,7 @@ async fn active_turn_footer_schedules_continuous_animation_frames() {
+@@ -3183,7 +3183,7 @@ async fn active_turn_footer_schedules_continuous_animation_frames() {
      let (frame_requester, mut frame_rx) = crate::tui::FrameRequester::test_channel();
      chat.frame_requester = frame_requester;
      chat.config.animations = true;
@@ -270,7 +270,7 @@ index 28fb44a245..3c2a38e5df 100644
      handle_turn_started(&mut chat, "turn-animated-stage");
      while frame_rx.try_recv().is_ok() {}
  
-@@ -3174,7 +3174,7 @@ async fn active_turn_footer_schedules_continuous_animation_frames() {
+@@ -3223,7 +3223,7 @@ async fn active_turn_footer_schedules_continuous_animation_frames() {
  #[tokio::test]
  async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
      let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -279,7 +279,7 @@ index 28fb44a245..3c2a38e5df 100644
      handle_turn_started(&mut chat, "turn-patch-progress");
      handle_agent_message_delta(&mut chat, "I will add the page.");
  
-@@ -3197,7 +3197,7 @@ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
+@@ -3246,7 +3246,7 @@ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
  
      let drafting = status_line_text(&chat).expect("working status");
      assert!(
@@ -288,7 +288,7 @@ index 28fb44a245..3c2a38e5df 100644
          "patch drafting should retain the stable working state: {drafting}"
      );
  
-@@ -3215,7 +3215,7 @@ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
+@@ -3264,7 +3264,7 @@ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
          None,
      );
      assert!(
@@ -297,7 +297,7 @@ index 28fb44a245..3c2a38e5df 100644
          "patch application should retain the stable working state"
      );
  
-@@ -3233,7 +3233,7 @@ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
+@@ -3282,7 +3282,7 @@ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
          None,
      );
      assert!(
@@ -307,10 +307,10 @@ index 28fb44a245..3c2a38e5df 100644
      );
  }
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index 3832839aad..7ee14a49a2 100644
+index ba89e17d0a..29a76062f9 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-@@ -121,7 +121,7 @@ impl ChatWidget {
+@@ -122,7 +122,7 @@ impl ChatWidget {
      ) {
          let stage_changed = self.turn_throughput.generation_stage() != Some(generation_stage);
          self.turn_throughput

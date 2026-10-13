@@ -1,21 +1,21 @@
 diff --git a/codex-rs/tui/src/app/tests/key_chords.rs b/codex-rs/tui/src/app/tests/key_chords.rs
-index 4e9507f9d8..34c1732732 100644
+index 35d8d52cf6..b55fcd270e 100644
 --- a/codex-rs/tui/src/app/tests/key_chords.rs
 +++ b/codex-rs/tui/src/app/tests/key_chords.rs
 @@ -111,7 +111,7 @@ async fn global_chord_keeps_hints_and_completes_before_deadline() -> Result<()>
          render_bottom_popup(&app.chat_widget, /*width*/ 80)
              .replace(&test_path_display("/tmp/project"), "/tmp/project"),
-         @r"
--        › Ask Codex to do anything
-+        › Ask Marathon to do anything
+         @"
+-    › Ask Codex to do anything
++    › Ask Marathon to do anything
  
-           ctrl+x then · ctrl+t open transcript · ctrl+u interrupt turn · esc cancel
-         "
+       ⌃x then · ⌃t open transcript · ⌃u interrupt turn · esc cancel
+     "
 diff --git a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
-index ac9343fa71..23fb081095 100644
+index e955d3a294..58427cc12c 100644
 --- a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
 +++ b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
-@@ -47,7 +47,7 @@ pub(crate) enum StatusSurfacePreviewItem {
+@@ -48,7 +48,7 @@ pub(crate) enum StatusSurfacePreviewItem {
  impl StatusSurfacePreviewItem {
      fn placeholder(self) -> &'static str {
          match self {
@@ -25,10 +25,10 @@ index ac9343fa71..23fb081095 100644
              StatusSurfacePreviewItem::ProjectRoot => "my-project",
              StatusSurfacePreviewItem::CurrentDir => "~/my-project/subdir",
 diff --git a/codex-rs/tui/src/bottom_pane/title_setup.rs b/codex-rs/tui/src/bottom_pane/title_setup.rs
-index a0815b4607..142e700f2c 100644
+index ebfc53ca97..d4d321ae52 100644
 --- a/codex-rs/tui/src/bottom_pane/title_setup.rs
 +++ b/codex-rs/tui/src/bottom_pane/title_setup.rs
-@@ -97,7 +97,7 @@ pub(crate) enum TerminalTitleItem {
+@@ -99,7 +99,7 @@ pub(crate) enum TerminalTitleItem {
  impl TerminalTitleItem {
      pub(crate) fn description(self) -> &'static str {
          match self {
@@ -38,10 +38,10 @@ index a0815b4607..142e700f2c 100644
              TerminalTitleItem::CurrentDir => "Current working directory",
              TerminalTitleItem::Spinner => {
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index d0861426cc..c4b9796ef8 100644
+index 0a574e2362..01a59c276b 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -2102,7 +2102,7 @@ impl Drop for ChatWidget {
+@@ -2064,7 +2064,7 @@ impl Drop for ChatWidget {
      }
  }
  
@@ -51,23 +51,23 @@ index d0861426cc..c4b9796ef8 100644
  
  // Extract the first bold (Markdown) element in the form **...** from `s`.
 diff --git a/codex-rs/tui/src/chatwidget/rendering_tests.rs b/codex-rs/tui/src/chatwidget/rendering_tests.rs
-index 59a28b577b..e4ce5f70ab 100644
+index 6a95ec466b..2791468afc 100644
 --- a/codex-rs/tui/src/chatwidget/rendering_tests.rs
 +++ b/codex-rs/tui/src/chatwidget/rendering_tests.rs
-@@ -372,7 +372,7 @@ async fn initial_session_header_starts_at_the_top_of_the_viewport() {
+@@ -399,7 +399,7 @@ async fn initial_session_header_starts_at_the_top_of_the_viewport() {
+     let cwd = widget.config.cwd.as_path().display().to_string();
  
-     insta::assert_snapshot!(header.replace(&cwd, &normalized_cwd), @r"
-     ╭───────────────────────────────────────╮
--    │ >_ OpenAI Codex (v<VERSION>)              │
-+    │ >_ Marathon (v<VERSION>)                │
-     │                                       │
-     │ model:     loading   /model to change │
-     │ directory: /tmp/project               │
+     insta::assert_snapshot!(header.replace(&cwd, "/tmp/project"), @r"
+-      >_ OpenAI Codex (v<VERSION>)
++      >_ Marathon (v<VERSION>)
+          /tmp/project
+     ");
+ }
 diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-index 1fe5b6f6eb..509084b762 100644
+index 2bda18efb8..608a5aa3b6 100644
 --- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
 +++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-@@ -890,7 +890,7 @@ impl ChatWidget {
+@@ -901,7 +901,7 @@ impl ChatWidget {
          now: Instant,
      ) -> Option<String> {
          match item {
@@ -77,23 +77,19 @@ index 1fe5b6f6eb..509084b762 100644
              TerminalTitleItem::CurrentDir => Some(Self::truncate_terminal_title_part(
                  format_directory_display(self.status_line_cwd(), /*max_width*/ None),
 diff --git a/codex-rs/tui/src/history_cell/session.rs b/codex-rs/tui/src/history_cell/session.rs
-index a6d5eed20e..8c408eaa20 100644
+index 48295d4b85..9fdcb9d0dc 100644
 --- a/codex-rs/tui/src/history_cell/session.rs
 +++ b/codex-rs/tui/src/history_cell/session.rs
-@@ -360,10 +360,10 @@ impl HistoryCell for SessionHeaderHistoryCell {
- 
-         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
- 
--        // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
-+        // Title line rendered inside the box: ">_ Marathon (vX)"
-         let title_spans: Vec<Span<'static>> = vec![
-             Span::from(">_ ").dim(),
--            Span::from("OpenAI Codex").bold(),
-+            Span::from("Marathon").red().bold(),
-             Span::from(" ").dim(),
-             Span::from(format!("(v{})", self.version)).dim(),
-         ];
-@@ -434,7 +434,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
+@@ -44,7 +44,7 @@ pub(crate) fn with_border_with_inner_width(
+ pub(crate) fn codex_title(version: &str) -> Vec<Span<'static>> {
+     vec![
+         ">_ ".fg(accent_color()),
+-        "OpenAI Codex".bold(),
++        "Marathon".red().bold(),
+         format!(" (v{version})").dim(),
+     ]
+ }
+@@ -362,7 +362,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
  
      fn raw_lines(&self) -> Vec<Line<'static>> {
          let mut lines = vec![
@@ -117,16 +113,3 @@ index 9c9e7b8f1d..67da265ee5 100644
          ]));
  
          Paragraph::new(lines)
-diff --git a/codex-rs/tui/src/status/card.rs b/codex-rs/tui/src/status/card.rs
-index 369a6749b2..88c3e00584 100644
---- a/codex-rs/tui/src/status/card.rs
-+++ b/codex-rs/tui/src/status/card.rs
-@@ -736,7 +736,7 @@ impl StatusHistoryCell {
-         let mut lines: Vec<Line<'static>> = Vec::new();
-         lines.push(Line::from(vec![
-             Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
--            Span::from("OpenAI Codex").bold(),
-+            Span::from("Marathon").red().bold(),
-             Span::from(" ").dim(),
-             Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
-         ]));

@@ -1,10 +1,10 @@
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 1e4ae6061b..342750e689 100644
+index 68225cd883..67caf55434 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -45,9 +45,6 @@ impl ChatWidget {
-         }
-         match notification {
+@@ -59,9 +59,6 @@ impl ChatWidget {
+                 }
+             }
              ServerNotification::ThreadTokenUsageUpdated(notification) => {
 -                if !from_replay {
 -                    self.complete_turn_response(Some(notification.token_usage.last.output_tokens));
@@ -12,7 +12,7 @@ index 1e4ae6061b..342750e689 100644
                  self.set_token_info(Some(token_usage_info_from_app_server(
                      notification.token_usage,
                  )));
-@@ -412,7 +409,11 @@ impl ChatWidget {
+@@ -427,7 +424,11 @@ impl ChatWidget {
              ServerNotification::RawResponseCompleted(notification) => {
                  if !from_replay {
                      self.complete_turn_response(
@@ -76,10 +76,10 @@ index 98fbf681e4..f658fd74c7 100644
  
      pub(super) fn status_line_limit_display(
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index d90f13450b..8340b19598 100644
+index 0a209ed8ff..765582fd19 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3007,6 +3007,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3056,6 +3056,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
          GenerationStage::Answering,
          started_at,
      );
@@ -108,7 +108,7 @@ index d90f13450b..8340b19598 100644
      let response_usage = TokenUsage {
          total_tokens: 4_200,
          output_tokens: 4_200,
-@@ -3020,14 +3042,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3069,14 +3091,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
              model_context_window: Some(131_072),
          }),
      );
@@ -128,10 +128,10 @@ index d90f13450b..8340b19598 100644
      let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
      terminal
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index a6667578f9..3832839aad 100644
+index 6ae481a49a..ba89e17d0a 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-@@ -127,8 +127,12 @@ impl ChatWidget {
+@@ -128,8 +128,12 @@ impl ChatWidget {
          }
      }
  

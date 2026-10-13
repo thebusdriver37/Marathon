@@ -34,10 +34,10 @@ index a10ba849ec..b5b0ab1283 100644
  
          let elapsed = self.turn_throughput.elapsed(Instant::now())?;
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 06dbd3bab1..4cf0f8dfb5 100644
+index 3be3a6f534..f28c6a4d9c 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3087,11 +3087,14 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3136,11 +3136,14 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
  
      handle_turn_started(&mut chat, "turn-stage");
      chat.refresh_status_line();
@@ -54,7 +54,7 @@ index 06dbd3bab1..4cf0f8dfb5 100644
          "reasoning delta should identify thinking"
      );
  
-@@ -3104,7 +3107,7 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3153,7 +3156,7 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
  
      handle_agent_message_delta(&mut chat, "answering");
      assert!(
@@ -63,7 +63,7 @@ index 06dbd3bab1..4cf0f8dfb5 100644
          "answer delta should identify answering"
      );
  }
-@@ -3172,7 +3175,10 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3221,7 +3224,10 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
          }),
          None,
      );

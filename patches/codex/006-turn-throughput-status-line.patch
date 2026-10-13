@@ -1,5 +1,5 @@
 diff --git a/codex-rs/tui/src/bottom_pane/status_line_setup.rs b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
-index d4cffa7f5d..f399685ae4 100644
+index aa20f0f9cd..d4a3c53010 100644
 --- a/codex-rs/tui/src/bottom_pane/status_line_setup.rs
 +++ b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
 @@ -131,6 +131,9 @@ pub(crate) enum StatusLineItem {
@@ -12,7 +12,7 @@ index d4cffa7f5d..f399685ae4 100644
      /// Estimated credits attributed directly to the current enterprise thread.
      ThreadCredits,
  
-@@ -200,6 +203,7 @@ impl StatusLineItem {
+@@ -203,6 +206,7 @@ impl StatusLineItem {
              StatusLineItem::UsedTokens => "Total tokens used in session (omitted when zero)",
              StatusLineItem::TotalInputTokens => "Total input tokens used in session",
              StatusLineItem::TotalOutputTokens => "Total output tokens used in session",
@@ -20,7 +20,7 @@ index d4cffa7f5d..f399685ae4 100644
              StatusLineItem::ThreadCredits => {
                  "Estimated current-thread credits (Enterprise workspaces only; omitted when unavailable)"
              }
-@@ -246,6 +250,7 @@ impl StatusLineItem {
+@@ -250,6 +254,7 @@ impl StatusLineItem {
              StatusLineItem::UsedTokens => StatusSurfacePreviewItem::UsedTokens,
              StatusLineItem::TotalInputTokens => StatusSurfacePreviewItem::TotalInputTokens,
              StatusLineItem::TotalOutputTokens => StatusSurfacePreviewItem::TotalOutputTokens,
@@ -29,7 +29,7 @@ index d4cffa7f5d..f399685ae4 100644
              StatusLineItem::EstimatedThreadCost => StatusSurfacePreviewItem::EstimatedThreadCost,
              StatusLineItem::SessionId => StatusSurfacePreviewItem::SessionId,
 diff --git a/codex-rs/tui/src/bottom_pane/status_line_style.rs b/codex-rs/tui/src/bottom_pane/status_line_style.rs
-index 820339b6cb..802ff94a44 100644
+index 9031f58b19..c7d120465f 100644
 --- a/codex-rs/tui/src/bottom_pane/status_line_style.rs
 +++ b/codex-rs/tui/src/bottom_pane/status_line_style.rs
 @@ -49,6 +49,7 @@ impl StatusLineAccent {
@@ -41,7 +41,7 @@ index 820339b6cb..802ff94a44 100644
              | StatusLineItem::EstimatedThreadCost => Self::Usage,
              StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => Self::Limit,
 diff --git a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
-index bfde3e7150..ac9343fa71 100644
+index cc693c8640..e955d3a294 100644
 --- a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
 +++ b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
 @@ -31,6 +31,7 @@ pub(crate) enum StatusSurfacePreviewItem {
@@ -52,7 +52,7 @@ index bfde3e7150..ac9343fa71 100644
      ThreadCredits,
      EstimatedThreadCost,
      SessionId,
-@@ -69,6 +70,7 @@ impl StatusSurfacePreviewItem {
+@@ -70,6 +71,7 @@ impl StatusSurfacePreviewItem {
              StatusSurfacePreviewItem::UsedTokens => "0 used",
              StatusSurfacePreviewItem::TotalInputTokens => "0 in",
              StatusSurfacePreviewItem::TotalOutputTokens => "0 out",
@@ -60,7 +60,7 @@ index bfde3e7150..ac9343fa71 100644
              StatusSurfacePreviewItem::ThreadCredits => "5.2 credits",
              StatusSurfacePreviewItem::EstimatedThreadCost => "~$1.82",
              StatusSurfacePreviewItem::SessionId => "550e8400-e29b-41d4",
-@@ -107,6 +109,7 @@ impl StatusSurfacePreviewItem {
+@@ -109,6 +111,7 @@ impl StatusSurfacePreviewItem {
              Self::UsedTokens,
              Self::TotalInputTokens,
              Self::TotalOutputTokens,
@@ -69,10 +69,10 @@ index bfde3e7150..ac9343fa71 100644
              Self::EstimatedThreadCost,
              Self::SessionId,
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index 57591c4017..6a98475899 100644
+index 7dbb54bb85..a5e5a31113 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -458,6 +458,8 @@ use self::transcript::TranscriptState;
+@@ -400,6 +400,8 @@ use self::transcript::TranscriptState;
  mod turn_lifecycle;
  mod turn_runtime;
  use self::turn_lifecycle::TurnLifecycleState;
@@ -81,9 +81,9 @@ index 57591c4017..6a98475899 100644
  mod usage;
  mod user_messages;
  mod working_directory;
-@@ -517,7 +519,8 @@ const ASK_FOR_APPROVAL_LABEL: &str = "Ask for approval";
+@@ -460,7 +462,8 @@ const ASK_FOR_APPROVAL_LABEL: &str = "Ask for approval";
  const APPROVE_FOR_ME_LABEL: &str = "Approve for me";
- const AUTO_REVIEW_DESCRIPTION: &str = "Only ask for actions detected as potentially unsafe.";
+ const AUTO_REVIEW_DESCRIPTION: &str = "Only ask for actions detected as potentially unsafe";
  const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 -const DEFAULT_STATUS_LINE_ITEMS: [&str; 3] = ["model-with-reasoning", "current-dir", "thread-name"];
 +const DEFAULT_STATUS_LINE_ITEMS: [&str; 3] =
@@ -91,7 +91,7 @@ index 57591c4017..6a98475899 100644
  
  /// Common initialization parameters shared by all `ChatWidget` constructors.
  pub(crate) struct ChatWidgetInit {
-@@ -658,6 +661,7 @@ pub(crate) struct ChatWidget {
+@@ -609,6 +612,7 @@ pub(crate) struct ChatWidget {
      turn_lifecycle: TurnLifecycleState,
      realtime_conversation: RealtimeConversationUiState,
      realtime_conversation_available_for_thread: bool,
@@ -100,10 +100,10 @@ index 57591c4017..6a98475899 100644
      task_complete_pending: bool,
      unified_exec_processes: Vec<UnifiedExecProcessSummary>,
 diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
-index 00d6329dbb..90bc09478f 100644
+index dc5adf7b73..2a004805bd 100644
 --- a/codex-rs/tui/src/chatwidget/constructor.rs
 +++ b/codex-rs/tui/src/chatwidget/constructor.rs
-@@ -184,6 +184,7 @@ impl ChatWidget {
+@@ -190,6 +190,7 @@ impl ChatWidget {
              turn_lifecycle: TurnLifecycleState::new(prevent_idle_sleep),
              realtime_conversation: RealtimeConversationUiState::default(),
              realtime_conversation_available_for_thread: false,
@@ -112,12 +112,12 @@ index 00d6329dbb..90bc09478f 100644
              task_complete_pending: false,
              unified_exec_processes: Vec::new(),
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index c5a887a957..7df96a5658 100644
+index 85ea551334..1724a4757c 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -45,6 +45,9 @@ impl ChatWidget {
-         }
-         match notification {
+@@ -59,6 +59,9 @@ impl ChatWidget {
+                 }
+             }
              ServerNotification::ThreadTokenUsageUpdated(notification) => {
 +                if !from_replay {
 +                    self.complete_turn_response(Some(notification.token_usage.last.output_tokens));
@@ -125,7 +125,7 @@ index c5a887a957..7df96a5658 100644
                  self.set_token_info(Some(token_usage_info_from_app_server(
                      notification.token_usage,
                  )));
-@@ -102,6 +105,9 @@ impl ChatWidget {
+@@ -116,6 +119,9 @@ impl ChatWidget {
                  self.handle_item_completed_notification(notification, replay_kind);
              }
              ServerNotification::AgentMessageDelta(notification) => {
@@ -135,7 +135,7 @@ index c5a887a957..7df96a5658 100644
                  self.restore_realtime_transcripts_before_turn(&notification.turn_id);
                  if !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
                      && (from_replay
-@@ -114,10 +120,16 @@ impl ChatWidget {
+@@ -128,10 +134,16 @@ impl ChatWidget {
                  }
              }
              ServerNotification::PlanDelta(notification) => {
@@ -152,7 +152,7 @@ index c5a887a957..7df96a5658 100644
                  if !self.is_realtime_delegated_reasoning_item(
                      &notification.turn_id,
                      &notification.item_id,
-@@ -128,6 +140,9 @@ impl ChatWidget {
+@@ -142,6 +154,9 @@ impl ChatWidget {
                  }
              }
              ServerNotification::ReasoningTextDelta(notification) => {
@@ -162,7 +162,7 @@ index c5a887a957..7df96a5658 100644
                  if self.config.show_raw_agent_reasoning
                      && !self.is_realtime_delegated_reasoning_item(
                          &notification.turn_id,
-@@ -351,7 +366,6 @@ impl ChatWidget {
+@@ -367,7 +382,6 @@ impl ChatWidget {
              | ServerNotification::ThreadUnarchived(_)
              | ServerNotification::ThreadAttachmentUpdated(_)
              | ServerNotification::RawResponseItemCompleted(_)
@@ -170,7 +170,7 @@ index c5a887a957..7df96a5658 100644
              | ServerNotification::CommandExecOutputDelta(_)
              | ServerNotification::ProcessOutputDelta(_)
              | ServerNotification::ProcessExited(_)
-@@ -380,6 +394,13 @@ impl ChatWidget {
+@@ -395,6 +409,13 @@ impl ChatWidget {
              | ServerNotification::ProjectChanged(_)
              | ServerNotification::ThreadProjectUpdated(_) => {}
              ServerNotification::ContextCompacted(_) => {}
@@ -219,10 +219,10 @@ index 5f4db51403..e14ca79d4f 100644
          &self,
          window: Option<&RateLimitWindowDisplay>,
 diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-index fcb6b382d3..1fe5b6f6eb 100644
+index 50c5ae35c7..2bda18efb8 100644
 --- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
 +++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-@@ -790,6 +790,7 @@ impl ChatWidget {
+@@ -793,6 +793,7 @@ impl ChatWidget {
                      format_tokens_compact(self.status_line_total_usage().output_tokens)
                  )
              }),
@@ -230,7 +230,7 @@ index fcb6b382d3..1fe5b6f6eb 100644
              StatusLineItem::ThreadCredits => self
                  .estimated_thread_usage()
                  .map(|usage| usage.estimated_usage_credits_micros)
-@@ -866,6 +867,7 @@ impl ChatWidget {
+@@ -876,6 +877,7 @@ impl ChatWidget {
              StatusSurfacePreviewItem::UsedTokens => StatusLineItem::UsedTokens,
              StatusSurfacePreviewItem::TotalInputTokens => StatusLineItem::TotalInputTokens,
              StatusSurfacePreviewItem::TotalOutputTokens => StatusLineItem::TotalOutputTokens,
@@ -239,10 +239,10 @@ index fcb6b382d3..1fe5b6f6eb 100644
              StatusSurfacePreviewItem::EstimatedThreadCost => StatusLineItem::EstimatedThreadCost,
              StatusSurfacePreviewItem::SessionId => StatusLineItem::SessionId,
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index f02ab4930c..1e153683d3 100644
+index 6324fae270..c0c3643c6e 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -2989,6 +2989,49 @@ async fn status_line_context_tokens_renders_live_context_count() {
+@@ -3038,6 +3038,49 @@ async fn status_line_context_tokens_renders_live_context_count() {
      );
  }
  
@@ -293,10 +293,10 @@ index f02ab4930c..1e153683d3 100644
  async fn status_line_legacy_context_usage_renders_context_used_percent() {
      let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index d473394efe..fe84d7460e 100644
+index 575410965b..609eabf91c 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-@@ -79,6 +79,7 @@ impl ChatWidget {
+@@ -80,6 +80,7 @@ impl ChatWidget {
          self.input_queue.user_turn_pending_start = false;
          self.reset_safety_buffering_for_turn_start();
          self.turn_lifecycle.start(Instant::now());
@@ -304,7 +304,7 @@ index d473394efe..fe84d7460e 100644
          self.transcript.reset_turn_flags();
          self.adaptive_chunking.reset();
          if self.plan_stream_controller.take().is_some() {
-@@ -113,6 +114,16 @@ impl ChatWidget {
+@@ -114,6 +115,16 @@ impl ChatWidget {
          self.request_redraw();
      }
  
@@ -321,7 +321,7 @@ index d473394efe..fe84d7460e 100644
      pub(super) fn on_task_complete(
          &mut self,
          last_agent_message: Option<String>,
-@@ -149,6 +160,8 @@ impl ChatWidget {
+@@ -150,6 +161,8 @@ impl ChatWidget {
          self.flush_completed_tool_activity();
          if !from_replay {
              self.collect_runtime_metrics_delta();
@@ -330,7 +330,7 @@ index d473394efe..fe84d7460e 100644
          }
          let runtime_metrics = (!from_replay && !self.turn_runtime_metrics.is_empty())
              .then_some(self.turn_runtime_metrics);
-@@ -312,6 +325,8 @@ impl ChatWidget {
+@@ -313,6 +326,8 @@ impl ChatWidget {
      /// This does not clear MCP startup tracking, because MCP startup can overlap with turn cleanup
      /// and should continue to drive the bottom-pane running indicator while it is in progress.
      pub(super) fn finalize_turn(&mut self) {

@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index 6a98475899..d0861426cc 100644
+index a5e5a31113..0a574e2362 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -459,6 +459,7 @@ mod turn_lifecycle;
+@@ -401,6 +401,7 @@ mod turn_lifecycle;
  mod turn_runtime;
  use self::turn_lifecycle::TurnLifecycleState;
  mod turn_throughput;
@@ -11,10 +11,10 @@ index 6a98475899..d0861426cc 100644
  mod usage;
  mod user_messages;
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 7df96a5658..1e4ae6061b 100644
+index 1724a4757c..68225cd883 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -99,6 +99,21 @@ impl ChatWidget {
+@@ -113,6 +113,21 @@ impl ChatWidget {
                  self.handle_turn_completed_notification(notification, replay_kind);
              }
              ServerNotification::ItemStarted(notification) => {
@@ -36,7 +36,7 @@ index 7df96a5658..1e4ae6061b 100644
                  self.handle_item_started_notification(notification, replay_kind);
              }
              ServerNotification::ItemCompleted(notification) => {
-@@ -106,7 +121,7 @@ impl ChatWidget {
+@@ -120,7 +135,7 @@ impl ChatWidget {
              }
              ServerNotification::AgentMessageDelta(notification) => {
                  if !from_replay {
@@ -45,7 +45,7 @@ index 7df96a5658..1e4ae6061b 100644
                  }
                  self.restore_realtime_transcripts_before_turn(&notification.turn_id);
                  if !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
-@@ -121,14 +136,14 @@ impl ChatWidget {
+@@ -135,14 +150,14 @@ impl ChatWidget {
              }
              ServerNotification::PlanDelta(notification) => {
                  if !from_replay {
@@ -62,7 +62,7 @@ index 7df96a5658..1e4ae6061b 100644
                  }
                  if !self.is_realtime_delegated_reasoning_item(
                      &notification.turn_id,
-@@ -141,7 +156,7 @@ impl ChatWidget {
+@@ -155,7 +170,7 @@ impl ChatWidget {
              }
              ServerNotification::ReasoningTextDelta(notification) => {
                  if !from_replay {
@@ -94,10 +94,10 @@ index ef1476c327..481eb60d23 100644
  
      pub(super) fn status_line_limit_display(
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 9f240f903f..130f1d3fa9 100644
+index 035ff17ad4..f8f1f434f7 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3001,8 +3001,11 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3050,8 +3050,11 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
      let started_at = Instant::now() - Duration::from_secs(200);
      chat.turn_throughput.start_turn();
@@ -111,7 +111,7 @@ index 9f240f903f..130f1d3fa9 100644
      let response_usage = TokenUsage {
          total_tokens: 4_200,
          output_tokens: 4_200,
-@@ -3032,6 +3035,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3081,6 +3084,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      );
  }
  
@@ -141,10 +141,10 @@ index 9f240f903f..130f1d3fa9 100644
  async fn status_line_legacy_context_usage_renders_context_used_percent() {
      let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index fe84d7460e..706667b169 100644
+index 609eabf91c..08f311e859 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-@@ -114,8 +114,13 @@ impl ChatWidget {
+@@ -115,8 +115,13 @@ impl ChatWidget {
          self.request_redraw();
      }
  

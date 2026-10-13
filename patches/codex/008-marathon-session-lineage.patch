@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index fd2db509e1..e0e4d4bf10 100644
+index d9536c84f8..f66d6bfa9a 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -748,7 +748,21 @@ async fn lookup_session_target_with_app_server(
+@@ -799,7 +799,21 @@ async fn lookup_session_target_with_app_server(
              .thread_read(thread_id, /*include_turns*/ false)
              .await
          {

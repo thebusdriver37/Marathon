@@ -53,10 +53,10 @@ index 481eb60d23..98fbf681e4 100644
 +    }
 +}
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 130f1d3fa9..d90f13450b 100644
+index f8f1f434f7..0a209ed8ff 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3000,7 +3000,8 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3049,7 +3049,8 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      chat.show_welcome_banner = false;
      chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
      let started_at = Instant::now() - Duration::from_secs(200);
@@ -66,7 +66,7 @@ index 130f1d3fa9..d90f13450b 100644
      chat.turn_throughput.record_output_delta(
          "streamed response",
          GenerationStage::Answering,
-@@ -3021,7 +3022,10 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3070,7 +3071,10 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      );
      chat.refresh_status_line();
  
@@ -78,7 +78,7 @@ index 130f1d3fa9..d90f13450b 100644
  
      let width = 48;
      let height = chat.desired_height(width);
-@@ -3046,13 +3050,13 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3095,13 +3099,13 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
  
      handle_agent_reasoning_delta(&mut chat, "thinking");
      assert!(
@@ -95,10 +95,10 @@ index 130f1d3fa9..d90f13450b 100644
      );
  }
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index 706667b169..a6667578f9 100644
+index 08f311e859..6ae481a49a 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-@@ -79,7 +79,7 @@ impl ChatWidget {
+@@ -80,7 +80,7 @@ impl ChatWidget {
          self.input_queue.user_turn_pending_start = false;
          self.reset_safety_buffering_for_turn_start();
          self.turn_lifecycle.start(Instant::now());
@@ -107,7 +107,7 @@ index 706667b169..a6667578f9 100644
          self.transcript.reset_turn_flags();
          self.adaptive_chunking.reset();
          if self.plan_stream_controller.take().is_some() {
-@@ -119,9 +119,12 @@ impl ChatWidget {
+@@ -120,9 +120,12 @@ impl ChatWidget {
          delta: &str,
          generation_stage: GenerationStage,
      ) {

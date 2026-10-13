@@ -18,7 +18,7 @@ index 8898221192..05ac85a580 100644
              self.pending_thread_titles.entry((thread_id, destination))
          else {
 diff --git a/codex-rs/tui/src/app/thread_title_tests.rs b/codex-rs/tui/src/app/thread_title_tests.rs
-index e9b10fbb85..e49b6e1a98 100644
+index ca73ee8d30..e6c9145750 100644
 --- a/codex-rs/tui/src/app/thread_title_tests.rs
 +++ b/codex-rs/tui/src/app/thread_title_tests.rs
 @@ -218,7 +218,7 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
@@ -31,10 +31,10 @@ index e9b10fbb85..e49b6e1a98 100644
          codex_home.path().join("config.toml"),
          format!(
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 342750e689..5fd8671a7a 100644
+index 67caf55434..25fbdcc908 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -108,6 +108,15 @@ impl ChatWidget {
+@@ -122,6 +122,15 @@ impl ChatWidget {
                                  .set_generation_stage(GenerationStage::Answering);
                              self.refresh_status_line();
                          }
@@ -84,10 +84,10 @@ index 28c78da38e..2b9a8aedbd 100644
 -105.0 tok/s decode · first output 2.5s
 +105.0 tok/s decode · first activity 2.5s
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 738b53944c..6144988492 100644
+index fe4f018cda..9cc4dd7e4a 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3065,7 +3065,7 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3114,7 +3114,7 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
  
      assert_eq!(
          status_line_text(&chat),

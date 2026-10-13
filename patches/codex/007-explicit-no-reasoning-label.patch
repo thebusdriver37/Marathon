@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/app/config_persistence.rs b/codex-rs/tui/src/app/config_persistence.rs
-index e6d4136046..a286797389 100644
+index 5e8bf63ef3..cf4ff462c7 100644
 --- a/codex-rs/tui/src/app/config_persistence.rs
 +++ b/codex-rs/tui/src/app/config_persistence.rs
-@@ -939,7 +939,8 @@ impl App {
+@@ -1028,7 +1028,8 @@ impl App {
  
      pub(super) fn reasoning_label(reasoning_effort: Option<&ReasoningEffortConfig>) -> String {
          match reasoning_effort {
@@ -12,7 +12,7 @@ index e6d4136046..a286797389 100644
              Some(reasoning_effort) => reasoning_effort.as_str().to_string(),
          }
      }
-@@ -1345,6 +1346,15 @@ mod tests {
+@@ -1435,6 +1436,15 @@ mod tests {
      use pretty_assertions::assert_eq;
      use tempfile::tempdir;
  
@@ -43,10 +43,10 @@ index e14ca79d4f..ef1476c327 100644
          }
      }
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 1e153683d3..9f240f903f 100644
+index c0c3643c6e..035ff17ad4 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -4111,6 +4111,22 @@ async fn status_line_and_terminal_title_reasoning_render_only_effort() {
+@@ -4160,6 +4160,22 @@ async fn status_line_and_terminal_title_reasoning_render_only_effort() {
      assert_eq!(chat.last_terminal_title, Some("xhigh".to_string()));
  }
  

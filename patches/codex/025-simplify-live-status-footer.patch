@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/bottom_pane/status_line_style.rs b/codex-rs/tui/src/bottom_pane/status_line_style.rs
-index 802ff94a44..a3bf74ec43 100644
+index c7d120465f..f7ed3ed628 100644
 --- a/codex-rs/tui/src/bottom_pane/status_line_style.rs
 +++ b/codex-rs/tui/src/bottom_pane/status_line_style.rs
-@@ -45,17 +45,17 @@ impl StatusLineAccent {
+@@ -45,15 +45,14 @@ impl StatusLineAccent {
              StatusLineItem::ContextRemaining
              | StatusLineItem::ContextUsed
              | StatusLineItem::ContextWindowSize
@@ -16,20 +16,15 @@ index 802ff94a44..a3bf74ec43 100644
 +            StatusLineItem::TokensPerSecond => Self::State,
              StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => Self::Limit,
 -            StatusLineItem::CodexVersion | StatusLineItem::Hostname | StatusLineItem::SessionId => {
--                Self::Metadata
--            }
-+            StatusLineItem::CodexVersion
-+            | StatusLineItem::Hostname
-+            | StatusLineItem::SessionId
-+            | StatusLineItem::ContextTokens => Self::Metadata,
-             StatusLineItem::FastMode | StatusLineItem::RawOutput => Self::Mode,
-             StatusLineItem::Permissions => Self::Mode,
-             StatusLineItem::ApprovalMode => Self::Mode,
++            StatusLineItem::CodexVersion | StatusLineItem::Hostname | StatusLineItem::SessionId | StatusLineItem::ContextTokens => {
+                 Self::Metadata
+             }
+             StatusLineItem::FastMode | StatusLineItem::Daybreak | StatusLineItem::RawOutput => {
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index d66d64bdbd..71353bd8c6 100644
+index c7d760ef23..8b0db11b05 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -1220,6 +1220,7 @@ impl ChatWidget {
+@@ -1173,6 +1173,7 @@ impl ChatWidget {
          self.bottom_pane.pre_draw_tick();
          self.flush_realtime_transcript_history();
          self.refresh_realtime_microphone_level();
@@ -37,7 +32,7 @@ index d66d64bdbd..71353bd8c6 100644
          if let Some(pet) = self.ambient_pet.as_ref() {
              pet.schedule_next_frame();
          }
-@@ -1233,7 +1234,6 @@ impl ChatWidget {
+@@ -1186,7 +1187,6 @@ impl ChatWidget {
              self.refresh_terminal_title();
          }
          self.refresh_status_line_if_workspace_headline_due();
@@ -46,10 +41,10 @@ index d66d64bdbd..71353bd8c6 100644
      }
  
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 4506f0542e..d2b97de4b8 100644
+index 4c2580c075..2c105fdef0 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -108,9 +108,8 @@ impl ChatWidget {
+@@ -122,9 +122,8 @@ impl ChatWidget {
                                  .set_generation_stage(GenerationStage::Answering);
                              self.refresh_status_line();
                          }
@@ -61,7 +56,7 @@ index 4506f0542e..d2b97de4b8 100644
                              self.refresh_status_line();
                          }
                          ThreadItem::CommandExecution { .. }
-@@ -215,11 +214,8 @@ impl ChatWidget {
+@@ -229,11 +228,8 @@ impl ChatWidget {
              }
              ServerNotification::FileChangePatchUpdated(notification) => {
                  if !from_replay {
@@ -195,10 +190,10 @@ index 1c23e244f5..b72c8d2508 100644
 +    }
 +}
 diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-index 509084b762..d5e6dc1f61 100644
+index 608a5aa3b6..840906e588 100644
 --- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
 +++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
-@@ -774,10 +774,14 @@ impl ChatWidget {
+@@ -777,10 +777,14 @@ impl ChatWidget {
              StatusLineItem::ContextWindowSize => self
                  .status_line_context_window_size()
                  .map(|cws| format!("{} window", format_tokens_compact(cws))),
@@ -229,10 +224,10 @@ index 2b9a8aedbd..0000000000
 ----
 -105.0 tok/s decode · first activity 2.5s
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 0dd59e492e..28fb44a245 100644
+index 797d75a7ec..3f82d04784 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -2974,7 +2974,7 @@ async fn status_line_context_remaining_renders_labeled_percent() {
+@@ -3023,7 +3023,7 @@ async fn status_line_context_remaining_renders_labeled_percent() {
  }
  
  #[tokio::test]
@@ -241,7 +236,7 @@ index 0dd59e492e..28fb44a245 100644
      let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
      chat.thread_id = Some(ThreadId::new());
      chat.config.tui_status_line = Some(vec!["context-tokens".to_string()]);
-@@ -2982,7 +2982,10 @@ async fn status_line_context_tokens_renders_live_context_count() {
+@@ -3031,7 +3031,10 @@ async fn status_line_context_tokens_renders_live_context_count() {
      handle_token_count(&mut chat, Some(make_token_info(2_345, 131_072)));
      chat.refresh_status_line();
  
@@ -253,7 +248,7 @@ index 0dd59e492e..28fb44a245 100644
      assert!(
          drain_insert_history(&mut rx).is_empty(),
          "context-tokens should remain a valid status line item"
-@@ -3054,10 +3057,9 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3103,10 +3106,9 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      );
      chat.refresh_status_line();
      let live_label = status_line_text(&chat).expect("latest call footer");
@@ -267,7 +262,7 @@ index 0dd59e492e..28fb44a245 100644
      );
      chat.turn_throughput
          .finish_turn(started_at + Duration::from_secs(200));
-@@ -3065,7 +3067,7 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3114,7 +3116,7 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
  
      assert_eq!(
          status_line_text(&chat),
@@ -276,7 +271,7 @@ index 0dd59e492e..28fb44a245 100644
      );
  
      let width = 72;
-@@ -3081,60 +3083,44 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3130,60 +3132,44 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
  }
  
  #[tokio::test]
@@ -354,7 +349,7 @@ index 0dd59e492e..28fb44a245 100644
  fn is_generation_spinner_frame(frame: char) -> bool {
      matches!(
          frame,
-@@ -3143,7 +3129,7 @@ fn is_generation_spinner_frame(frame: char) -> bool {
+@@ -3192,7 +3178,7 @@ fn is_generation_spinner_frame(frame: char) -> bool {
  }
  
  #[tokio::test]
@@ -363,7 +358,7 @@ index 0dd59e492e..28fb44a245 100644
      let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
      let (frame_requester, mut frame_rx) = crate::tui::FrameRequester::test_channel();
      chat.frame_requester = frame_requester;
-@@ -3160,6 +3146,22 @@ async fn active_generation_footer_schedules_continuous_animation_frames() {
+@@ -3209,6 +3195,22 @@ async fn active_generation_footer_schedules_continuous_animation_frames() {
      assert!(scheduled_at >= before_tick + GENERATION_ACTIVITY_INTERVAL);
      assert!(scheduled_at <= Instant::now() + GENERATION_ACTIVITY_INTERVAL);
  
@@ -386,7 +381,7 @@ index 0dd59e492e..28fb44a245 100644
      chat.turn_throughput.finish_turn(Instant::now());
      while frame_rx.try_recv().is_ok() {}
      chat.pre_draw_tick();
-@@ -3170,7 +3172,7 @@ async fn active_generation_footer_schedules_continuous_animation_frames() {
+@@ -3219,7 +3221,7 @@ async fn active_generation_footer_schedules_continuous_animation_frames() {
  }
  
  #[tokio::test]
@@ -395,7 +390,7 @@ index 0dd59e492e..28fb44a245 100644
      let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
      chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
      handle_turn_started(&mut chat, "turn-patch-progress");
-@@ -3193,10 +3195,10 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3242,10 +3244,10 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
          None,
      );
  
@@ -409,7 +404,7 @@ index 0dd59e492e..28fb44a245 100644
      );
  
      chat.handle_server_notification(
-@@ -3213,10 +3215,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3262,10 +3264,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
          None,
      );
      assert!(
@@ -422,7 +417,7 @@ index 0dd59e492e..28fb44a245 100644
      );
  
      chat.handle_server_notification(
-@@ -3233,8 +3233,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3282,8 +3282,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
          None,
      );
      assert!(

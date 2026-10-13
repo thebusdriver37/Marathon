@@ -47,10 +47,10 @@ index 0000000000..28c78da38e
 +---
 +105.0 tok/s decode · first output 2.5s
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 8340b19598..738b53944c 100644
+index 765582fd19..fe4f018cda 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3042,13 +3042,30 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3091,13 +3091,30 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
              model_context_window: Some(131_072),
          }),
      );
