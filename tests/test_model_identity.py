@@ -59,13 +59,22 @@ class ModelIdentityTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         app["state"] = state
         app.router.add_get("/v1/models", router_module.handle_models)
-        with mock.patch.object(router_module, "backends", return_value={"pool": self.backend}):
+        # CI intentionally runs without the Codex submodule. Supply this test's
+        # prompt while exercising the real instruction loader and HTTP handler.
+        prompt = self.path.parent / "prompt.md"
+        prompt.write_text("Model picker test instructions", encoding="utf-8")
+        with (
+            mock.patch.object(router_module, "backends", return_value={"pool": self.backend}),
+            mock.patch.object(router_module, "_prompt_path", return_value=prompt),
+        ):
             async with TestClient(TestServer(app)) as client:
                 for name in ("Swift-Merge-IQ4_XS.gguf", "Original-Q8_0.gguf"):
                     self.configure(name)
                     response = await client.get("/v1/models")
                     self.assertEqual(response.status, 200)
                     models = (await response.json())["models"]
+                    for model in models:
+                        self.assertIn("Model picker test instructions", model["base_instructions"])
                     visible = [m for m in models if m["visibility"] == "list"]
                     self.assertEqual([m["slug"] for m in visible], ["local", "spark"])
                     self.assertEqual(visible[0]["display_name"], Path(name).stem.replace("-", " ") + " (Local)")
