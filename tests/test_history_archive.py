@@ -21,6 +21,17 @@ class ArchiveTests(unittest.TestCase):
         self.path.write_text("".join(json.dumps({"type": "response_item", "payload": {
             "type": "function_call_output", "output": text}}) + "\n" for text in texts))
 
+    def append_events(self, *events):
+        with self.path.open("a") as handle:
+            for event in events:
+                handle.write(json.dumps(event) + "\n")
+
+    @staticmethod
+    def message(text, role="user", **extra):
+        return {"type": "response_item", "payload": {
+            "type": "message", "role": role,
+            "content": [{"type": "input_text", "text": text}]}, **extra}
+
     def test_exact_middle_of_large_output_and_pagination(self):
         self.write(["x" * 20000 + "needle-913 port=18473" + "y" * 20000])
         result = self.archive.search("needle-913")
@@ -137,17 +148,131 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn("exact-value", replies[2]["result"]["content"][0]["text"])
         self.assertTrue(replies[3]["result"]["isError"])
 
-    def test_invalid_complete_record_and_size_limits_fail_closed(self):
+    def test_invalid_complete_record_fails_closed(self):
         self.path.write_text("not json\n")
         with self.assertRaisesRegex(ValueError, "invalid complete"):
             self.archive.search("anything")
-        self.write(["oversized"])
-        with mock.patch("marathon_app.history_archive.MAX_JOURNAL_BYTES", 5):
-            with self.assertRaisesRegex(ValueError, "oversized"):
-                self.archive.search("oversized")
-        with mock.patch("marathon_app.history_archive.MAX_LINE_BYTES", 5):
-            with self.assertRaisesRegex(ValueError, "entry exceeds"):
-                self.archive.search("oversized")
+
+    def test_large_journal_remains_searchable_without_caching_transcript(self):
+        self.write(["early-needle"])
+        # Real file beyond the old cap; ignored reasoning records must not be
+        # retained in memory or parsed again during later paginated reads.
+        row = json.dumps({"type": "response_item", "payload": {
+            "type": "reasoning", "text": "x" * (1024 * 1024)}}) + "\n"
+        with self.path.open("a") as handle:
+            for _ in range(65):
+                handle.write(row)
+        self.append_events(self.message("late-needle"))
+        self.assertGreater(self.path.stat().st_size, 64 * 1024 * 1024)
+        self.assertEqual(self.archive.search("needle")["total_matches"], 2)
+        with mock.patch.object(self.archive, "_decode", wraps=self.archive._decode) as decode:
+            self.assertEqual(self.archive.read("e0000001")["text"], "early-needle")
+        self.assertEqual(decode.call_count, 1)
+        self.assertEqual(len(self.archive._index), 2)
+
+    def test_oversized_record_is_skipped_with_notice_and_stable_ids(self):
+        self.write(["early-needle"])
+        self.append_events({"type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [
+                {"type": "input_image", "image_url": "A" * (4 * 1024 * 1024)}]}},
+            self.message("late-needle"))
+        result = self.archive.search("needle")
+        self.assertEqual([m["id"] for m in result["matches"]], ["e0000003", "e0000001"])
+        self.assertEqual(result["coverage"]["skipped_oversized_records"], 1)
+        self.assertEqual(self.archive.read("e0000003")["text"], "late-needle")
+        with self.assertRaisesRegex(ValueError, "not found"):
+            self.archive.read("e0000002")
+
+    def test_partial_oversized_append_is_counted_once_when_completed(self):
+        self.write(["early-needle"])
+        with self.path.open("a") as handle:
+            handle.write('{"type":"response_item","payload":{"type":"reasoning","text":"' + "x" * 600)
+        with mock.patch("marathon_app.history_archive.MAX_LINE_BYTES", 512):
+            self.assertEqual(self.archive.search("needle")["coverage"]["skipped_oversized_records"], 0)
+            with self.path.open("a") as handle:
+                handle.write('"}}\n')
+            self.append_events(self.message("late-needle"))
+            for _ in range(2):
+                result = self.archive.search("needle")
+                self.assertEqual(result["total_matches"], 2)
+                self.assertEqual(result["coverage"]["skipped_oversized_records"], 1)
+
+    def test_rollback_invalidates_search_and_cached_read_ids_across_compaction(self):
+        self.append_events(self.message("keep disabled"), self.message("enable deployment"),
+                           self.message("deployment approved", "assistant"),
+                           {"type": "compacted", "payload": {"message": "deployment approved"}})
+        removed = self.archive.search("enable")["matches"][0]["id"]
+        self.append_events({"type": "event_msg", "payload": {
+            "type": "thread_rolled_back", "num_turns": 1}})
+        with self.assertRaisesRegex(ValueError, "not found"):
+            self.archive.read(removed)
+        self.assertEqual(self.archive.search("deployment")["total_matches"], 0)
+        self.append_events(self.message("test only"))
+        for archive in (self.archive, HistoryArchive(self.root)):
+            self.assertEqual(archive.search("keep disabled")["total_matches"], 1)
+            self.assertEqual(archive.search("test only")["total_matches"], 1)
+            self.assertEqual(archive.search("deployment")["total_matches"], 0)
+        self.append_events({"type": "event_msg", "payload": {
+            "type": "thread_rolled_back", "num_turns": 99}})
+        self.assertEqual(list(self.archive.entries()), [])
+
+    def test_native_turn_boundaries_do_not_double_count_user_events_or_steering(self):
+        self.append_events(
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "one"}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "keep"}},
+            self.message("keep"),
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "two"}},
+            self.message("remove first"), self.message("remove steering"),
+            {"type": "compacted", "payload": {"message": "remove summary"}},
+            {"type": "event_msg", "payload": {"type": "thread_rolled_back", "num_turns": 1}})
+        self.assertEqual(self.archive.search("keep")["total_matches"], 1)
+        self.assertEqual(self.archive.search("remove")["total_matches"], 0)
+
+    def test_legacy_user_events_after_response_records_do_not_double_count(self):
+        self.append_events(self.message("keep"),
+                           {"type": "event_msg", "payload": {"type": "user_message", "message": "keep"}},
+                           self.message("remove"),
+                           {"type": "event_msg", "payload": {"type": "user_message", "message": "remove"}},
+                           {"type": "event_msg", "payload": {"type": "thread_rolled_back", "num_turns": 1}})
+        self.assertEqual(self.archive.search("keep")["total_matches"], 1)
+        self.assertEqual(self.archive.search("remove")["total_matches"], 0)
+
+    def test_legacy_scaffolding_and_synthetic_summaries_are_not_user_turns(self):
+        self.append_events(self.message("keep"), self.message("remove"),
+                           self.message("Another language model started to solve this problem. remove"),
+                           self.message("<environment_context>remove</environment_context>"),
+                           {"type": "event_msg", "payload": {"type": "thread_rolled_back", "num_turns": 1}})
+        self.assertEqual(self.archive.search("keep")["total_matches"], 1)
+        self.assertEqual(self.archive.search("remove")["total_matches"], 0)
+
+    def test_opaque_record_before_rollback_withholds_uncertain_history(self):
+        self.append_events(self.message("possibly withdrawn"), self.message("x" * 700),
+                           {"type": "event_msg", "payload": {"type": "thread_rolled_back", "num_turns": 1}},
+                           self.message("new active request"))
+        with mock.patch("marathon_app.history_archive.MAX_LINE_BYTES", 512):
+            result = self.archive.search("withdrawn")
+            self.assertEqual(result["total_matches"], 0)
+            self.assertTrue(result["coverage"]["pre_rollback_history_unavailable"])
+            self.assertEqual(self.archive.search("active")["total_matches"], 1)
+
+    def test_summary_output_is_not_original_evidence_or_duplicate_summary(self):
+        self.append_events(self.message("canonical-needle", "assistant", metadata={"compaction_output": True}),
+                           {"type": "compacted", "payload": {"message": "canonical-needle"}},
+                           self.message("uncommitted-needle", "assistant", metadata={"compaction_output": True}))
+        result = self.archive.search("needle")
+        self.assertEqual(result["total_matches"], 1)
+        self.assertEqual(result["matches"][0]["role"], "summary (lossy)")
+        self.assertEqual(self.archive.read("e0000002")["role"], "summary (lossy)")
+        for entry_id in ("e0000001", "e0000003"):
+            with self.assertRaisesRegex(ValueError, "not found"):
+                self.archive.read(entry_id)
+
+    def test_truncation_of_indexed_journal_is_rejected(self):
+        self.write(["original evidence"])
+        self.archive.search("original")
+        self.path.write_text("")
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            self.archive.read("e0000001")
 
     def test_two_sessions_never_mix(self):
         self.write(["local fact"])

@@ -5358,7 +5358,16 @@ class RouterState:
             if _codex_request_kind(request) == "compaction":
                 if any(_starts_followup_work(item) for item in iter_items):
                     raise RuntimeError("tools are disabled during compaction")
-                summary_error = _compaction_summary_error(iter_items)
+                # Some backends enforce a smaller generation cap than requested.
+                # Token counts alone cannot establish successful completion. Older
+                # llama.cpp responses omit status, so retain that compatibility.
+                summary_error = (
+                    "compaction backend did not complete the summary"
+                    if response.get("status") not in (None, "completed")
+                    or response.get("incomplete_details")
+                    or response.get("error")
+                    else _compaction_summary_error(iter_items)
+                )
                 if summary_error:
                     if compaction_recoveries:
                         raise RuntimeError(summary_error)

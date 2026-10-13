@@ -94,6 +94,10 @@ lets you compact manually. History stays local, is scoped to the calling
 conversation, and adds no duplicate transcript store. Existing sessions need a
 relaunch to pick up the tools. For troubleshooting, launch with
 `MARATHON_HISTORY_ENABLED=0 marathon` to use the previous compaction setup.
+History retrieval excludes rolled-back turns and labels committed summaries as
+lossy evidence. Large journals remain searchable; individual records over 4 MiB
+are skipped with a coverage notice. If a skipped record obscures a rollback
+boundary, earlier evidence is withheld rather than treated as current history.
 
 ## More
 

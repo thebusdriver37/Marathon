@@ -4373,6 +4373,49 @@ context = 32768
             {"type": "message", "role": "assistant", "content": [
                 {"type": "output_text", "text": "已完成数据库迁移，下一步验证副本延迟。"}]}]))
 
+    def test_compaction_requires_backend_completion_before_publishing(self):
+        for failure in (
+            {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+            {"status": "failed", "error": {"message": "backend failure"}},
+            {"status": "cancelled"},
+            {"status": "in_progress"},
+            {"incomplete_details": {"reason": "max_output_tokens"}},
+            {"error": {"message": "backend failure"}},
+        ):
+            for recover in (True, False):
+                with self.subTest(failure=failure, recover=recover):
+                    def response(text, **fields):
+                        return {"output": [{"type": "message", "role": "assistant", "content": [
+                            {"type": "output_text", "text": text}]}],
+                            "usage": {"output_tokens": 64}, **fields}
+                    partial = response("Partial summary: critical constraints:", **failure)
+                    complete = response("Complete summary: preserve dry-run restriction.", status="completed")
+                    state = object.__new__(router_module.RouterState)
+                    state.web_search_settings = SimpleNamespace(max_iterations=3)
+                    state.telemetry = mock.Mock()
+                    state._request_json = mock.AsyncMock(side_effect=[partial, complete if recover else partial])
+                    sink = mock.AsyncMock(return_value=True)
+                    request = {"input": [{"role": "user", "content": "Original objective and constraints"}],
+                               "tools": [], "max_output_tokens": 8192,
+                               "client_metadata": {"x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}}
+                    run = state._run_responses_loop(profile=fixture_profile(), forward_request=request,
+                                                   web_search_enabled=False, event_sink=sink)
+                    if recover:
+                        result, items, _ = asyncio.run(run)
+                        self.assertEqual(result["status"], "completed")
+                        self.assertNotIn("Partial summary", json.dumps(items))
+                        self.assertNotIn("Partial summary", str(sink.await_args_list))
+                        self.assertEqual(sink.await_count, 1)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "did not complete"):
+                            asyncio.run(run)
+                        sink.assert_not_awaited()
+                    self.assertEqual(state._request_json.await_count, 2)
+                    retry = state._request_json.await_args_list[1].args[3]
+                    self.assertEqual(retry["input"][0], request["input"][0])
+                    self.assertNotIn("Partial summary", json.dumps(retry))
+                    self.assertEqual(retry["tool_choice"], "none")
+
     def test_stalled_compaction_recovers_with_final_message(self) -> None:
         profile = fixture_profile(65_536)
         state = object.__new__(router_module.RouterState)
