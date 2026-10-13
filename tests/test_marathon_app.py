@@ -1503,6 +1503,19 @@ class FrontendTests(unittest.TestCase):
         self.assertLess(command.index('web_search="disabled"'), command.index("exec"))
         self.assertEqual(command[command.index("exec"):], ["exec", "hello"])
 
+    def test_explicit_codex_model_does_not_duplicate_singleton_cli_option(self) -> None:
+        model = fixture_model()
+        runtime = Runtime(model, catalog.find_profile(model, "balanced", "codex"))
+        for arguments in (["-m", "external-model"], ["--model=external-model"],
+                          ["exec", "--model", "external-model", "hello"]):
+            with self.subTest(arguments=arguments):
+                command = codex_command(runtime, list(arguments))
+                self.assertIn(f"model={json.dumps(model.alias)}", command)
+                self.assertEqual(command[-len(arguments):], list(arguments))
+                defaults = command[:-len(arguments)]
+                self.assertNotIn("-m", defaults)
+                self.assertNotIn("--model", defaults)
+
     def test_patched_codex_is_preferred_when_installed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "marathon" / "bin" / "codex"

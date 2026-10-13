@@ -23,6 +23,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--launcher", type=Path, default=LAUNCHER)
+    parser.add_argument("--model", help="model ID from Marathon's frontend catalog")
     parser.add_argument("--typing-delay", type=float, default=0.0)
     args = parser.parse_args()
     if not args.run_gpu:
@@ -54,7 +55,10 @@ def main() -> int:
         # Use normal worker selection and session preparation, including an
         # automatic instance relaunch when other Marathon sessions are open.
         started = time.monotonic_ns()
-        terminal = Terminal([str(launcher), "codex", "--no-alt-screen"],
+        command = [str(launcher), "codex", "--no-alt-screen"]
+        if args.model:
+            command.extend(["--model", args.model])
+        terminal = Terminal(command,
                             launcher.parent.parent, environment, trial / "terminal.txt")
 
         def events():

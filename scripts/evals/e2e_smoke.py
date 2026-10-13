@@ -78,7 +78,11 @@ class Terminal:
             self.text += chunk
             if "\x1b[6n" in chunk:
                 self.send("\x1b[1;1R")
-            if "Press enter to continue" in self.clean() and not self.trusted:
+            screen = self.clean()
+            trust_prompt = "Press enter to continue" in screen or (
+                "Folder access" in screen and "Trust and continue" in screen
+            )
+            if trust_prompt and not self.trusted:
                 time.sleep(0.25)
                 self.send("\r")
                 self.trusted = True

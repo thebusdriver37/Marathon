@@ -134,7 +134,9 @@ def codex_command(
         binary,
         "-c", provider,
         "-c", 'model_provider="marathon-local"',
-        "-m", runtime.model.alias,
+        # A config default lets explicit -m/--model select another catalog
+        # model without passing the same singleton CLI option twice.
+        "-c", f"model={json.dumps(runtime.model.alias)}",
         "-c", f"model_catalog_json={json.dumps(str(runtime.catalog_file))}",
         "-c", 'web_search="cached"',
         # Marathon defaults to full access; an explicit --sandbox override

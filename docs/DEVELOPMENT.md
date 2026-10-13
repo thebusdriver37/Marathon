@@ -119,6 +119,9 @@ Measure normal terminal startup and verify its first reply with:
 ./bin/marathon eval startup --run-gpu --repeats 3
 ```
 
+Pass `--model MODEL_ID` to test a specific frontend catalog entry, including
+an external model such as `qwen3.8-flash-next-spark`.
+
 This uses the installed frontend, normal worker selection, and existing session-home preparation.
 Readiness requires both the terminal's Ready title and its successful Responses connection probe, so the initial loading screen does not count as ready.
 Each run then requires an exact, unique reply from a real model turn.
