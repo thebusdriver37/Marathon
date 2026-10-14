@@ -9,6 +9,7 @@ import csv
 import shlex
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TextIO
 
@@ -32,21 +33,29 @@ def _worker_gpu_blockers(backend: Backend) -> dict[str, str]:
         return {}
     try:
         models = yaml.safe_load(backend.identity_config.read_text())["models"]
+        # These inventories are independent. Keep them fresh for every lease,
+        # but overlap process/driver startup instead of paying for it serially.
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            gpu_query = executor.submit(_output, [
+                "nvidia-smi", "--query-gpu=index,uuid,memory.free",
+                "--format=csv,noheader,nounits",
+            ])
+            process_query = executor.submit(_output, [
+                "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ])
+            container_query = executor.submit(_output, ["docker", "ps", "--format", "{{.Names}}"])
+            gpu_output = gpu_query.result()
+            process_output = process_query.result()
+            running = set(container_query.result().splitlines())
         devices = {}
-        for row in csv.reader(_output([
-            "nvidia-smi", "--query-gpu=index,uuid,memory.free",
-            "--format=csv,noheader,nounits",
-        ]).splitlines()):
+        for row in csv.reader(gpu_output.splitlines()):
             index, uuid, free = (item.strip() for item in row)
             devices[index] = devices[uuid] = (uuid, int(free))
         processes = []
-        for row in csv.reader(_output([
-            "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory",
-            "--format=csv,noheader,nounits",
-        ]).splitlines()):
+        for row in csv.reader(process_output.splitlines()):
             uuid, pid, memory = (item.strip() for item in row)
             processes.append((uuid, int(pid), int(memory)))
-        running = set(_output(["docker", "ps", "--format", "{{.Names}}"]).splitlines())
     except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError, subprocess.SubprocessError):
         return dict.fromkeys(backend.pool_models, "cannot verify GPU availability")
     blocked = {}

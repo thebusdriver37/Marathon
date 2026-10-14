@@ -1,5 +1,6 @@
 """Picker identities track configured weights, not stable routing aliases."""
 
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -50,6 +51,22 @@ class ModelIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("identity unavailable", pool_identity(self.backend)[0])
         self.path.unlink()
         self.assertIn("identity unavailable", pool_identity(self.backend)[0])
+
+    def test_same_size_edit_with_preserved_mtime_refreshes_identity(self):
+        self.configure("First-Q8.gguf")
+        original = self.path.stat()
+        self.assertIn("First", pool_identity(self.backend)[0])
+        self.configure("Other-Q8.gguf")
+        os.utime(self.path, ns=(original.st_atime_ns, original.st_mtime_ns))
+        self.assertEqual(self.path.stat().st_size, original.st_size)
+        self.assertIn("Other", pool_identity(self.backend)[0])
+
+    def test_identity_is_scoped_to_selected_workers(self):
+        self.configure(second="Other.gguf")
+        single = replace(self.backend, pool_models=("one",))
+        self.assertIn("Swift", pool_identity(single)[0])
+        self.assertIn("mixed identities", pool_identity(self.backend)[0])
+        self.assertIn("Swift", pool_identity(single)[0])
 
     async def test_http_picker_refreshes_names_and_hides_only_duplicate_pool_alias(self):
         self.configure()

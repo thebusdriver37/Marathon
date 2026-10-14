@@ -9,12 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from prompt_toolkit.application import Application
-from prompt_toolkit.formatted_text import StyleAndTextTuples
-from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
-from prompt_toolkit.layout import Layout, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -81,22 +75,20 @@ class MenuItem:
     badge: str = ""
 
 
-MENU_STYLE = Style.from_dict(
-    {
-        "logo": "bold #ff5fff",
-        "tagline": "#888888",
-        "context": "#dddddd",
-        "context.detail": "#5fd7ff",
-        "title": "bold #5fd7ff",
-        "subtitle": "#888888",
-        "item": "#eeeeee",
-        "item.badge": "bold #5fd7ff",
-        "item.description": "#888888",
-        "selected": "bold #000000 bg:#5fd7ff",
-        "selected.description": "#000000 bg:#5fd7ff",
-        "help": "#888888",
-    }
-)
+MENU_STYLE = {
+    "logo": "bold #ff5fff",
+    "tagline": "#888888",
+    "context": "#dddddd",
+    "context.detail": "#5fd7ff",
+    "title": "bold #5fd7ff",
+    "subtitle": "#888888",
+    "item": "#eeeeee",
+    "item.badge": "bold #5fd7ff",
+    "item.description": "#888888",
+    "selected": "bold #000000 bg:#5fd7ff",
+    "selected.description": "#000000 bg:#5fd7ff",
+    "help": "#888888",
+}
 
 
 def _menu_content(
@@ -106,8 +98,8 @@ def _menu_content(
     items: list[MenuItem],
     selected: int,
     allow_back: bool,
-) -> StyleAndTextTuples:
-    content: StyleAndTextTuples = [
+) -> list[tuple[str, str]]:
+    content: list[tuple[str, str]] = [
         ("class:logo", "  MARATHON"),
         ("class:tagline", "   local AI, ready when you are\n"),
         ("class:tagline", "  ────────────────────────────────────────\n\n"),
@@ -152,6 +144,14 @@ def _arrow_menu(
         return None
     if not sys.stdin.isatty():
         raise RuntimeError("Marathon's interactive menu requires a terminal")
+    # Ordinary chat/resume launches never open this menu. Defer the toolkit
+    # until it is needed so they can reach the native frontend sooner.
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
+    from prompt_toolkit.layout import Layout, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.styles import Style
+
     state = {"selected": min(max(selected, 0), len(items) - 1), "result": None}
     bindings = KeyBindings()
 
@@ -199,7 +199,7 @@ def _arrow_menu(
         key_bindings=bindings,
         full_screen=True,
         mouse_support=False,
-        style=MENU_STYLE,
+        style=Style.from_dict(MENU_STYLE),
     )
     console.clear()
     application.run()

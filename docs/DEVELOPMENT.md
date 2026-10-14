@@ -151,6 +151,55 @@ The first browser request pays that deferred import cost; ordinary coding sessio
 Regression coverage retains port-ownership fallback and checks optional browser discovery, disabled or broken dependencies, crawler reuse, and cleanup.
 The 316-test Python suite passed with one optional skip, and a real browser rendered a local JavaScript fixture after the deferred import.
 
+### Launcher and model-picker performance, October 14
+
+Normal chat/resume launches now defer `prompt_toolkit` imports until an arrow-key
+menu actually opens. Model-picker identity lookup reads the broker file on every
+request but reuses the parsed identity for identical contents and worker lists
+(an eight-entry cache). Same-size edits with preserved timestamps still refresh
+immediately, and unreadable/invalid configurations never reuse an old identity.
+Worker acquisition overlaps the two NVIDIA inventory queries and Docker container
+listing; it retains fresh per-lease checks, ownership validation, and failure handling.
+
+Measured on AiGuy with Python 3.12 and the warm Qwen3.8 local worker pool:
+
+| Measurement | Before | After | Less time |
+| --- | ---: | ---: | ---: |
+| Launcher Python imports, median of 25 fresh processes | 188.51 ms | 128.17 ms | 32.0% |
+| Live model-picker HTTP refresh | 37.56 ms | 23.54 ms | 37.3% |
+| GPU availability check, 25 alternating paired samples | 234.05 ms | 162.05 ms | 30.8% |
+| Real terminal launch through Ready and successful connection probe | 2.178 s | 1.910 s | 12.3% |
+
+The terminal comparison used three baseline and five optimized launches, with 30
+catalog requests per launch. HTTP figures are medians of the per-launch medians;
+every catalog response was nonempty and unchanged within its trial. All eight
+launches passed a unique real-model reply check. Median prompt-to-reply time was
+9.088 s before and 9.098 s after, so this establishes reduced launch/picker waiting,
+not increased inference throughput. These short warm-worker tests do not measure
+GPU-cold startup or establish results on other machines. The first setup/dashboard
+menu still pays the deferred toolkit import cost.
+
+The paired availability probes returned identical decisions before and after,
+without probe failures. Content invalidation, worker selection, and concurrent
+probe regressions passed; a real terminal also passed Down/Enter, Back, and Ctrl-C
+menu checks. The full Python suite ran 508 tests successfully, with 14 skips.
+
+Reproduce on each revision with:
+
+```bash
+.marathon/venv/bin/python scripts/benchmarks/bench_launcher.py \
+  --repeats 25 --gpu-probes --output /tmp/marathon-launcher-results.json
+.marathon/venv/bin/python scripts/evals/startup.py \
+  --run-gpu --repeats 5 --catalog-requests 30
+```
+
+The component benchmark only queries inventory; the startup evaluator uses normal
+worker leasing and never evicts other jobs. Catalog probes run after Ready and
+before the prompt, so use `prompt_reply_seconds` to exclude their time from reply
+comparisons. Local evidence is in `/tmp/marathon-perf-20261014`,
+`/tmp/marathon-perf-before-picker-20261014`, and
+`/tmp/marathon-perf-after-picker-20261014`; these are not portable fixtures.
+
 Keep first-run setup in the README and advanced configuration in [advanced usage](ADVANCED_USAGE.md).
 Document actual tested support separately from expected hardware compatibility.
 Preserve existing user selections and never change power caps or stop unrelated inference services during setup.

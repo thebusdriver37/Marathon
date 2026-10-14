@@ -1,5 +1,6 @@
 """Pool selection must account for jobs outside Marathon's lease registry."""
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -59,6 +60,26 @@ class GPUAvailabilityTests(unittest.TestCase):
         with patch('marathon_app.pool._output', side_effect=OSError('missing')):
             with self.assertRaisesRegex(RuntimeError, 'cannot verify GPU availability'):
                 acquire_pool_worker(self.backend, self.root, None)
+
+    def test_independent_availability_probes_run_concurrently(self):
+        probes = threading.Barrier(3, timeout=5)
+
+        def output(args):
+            # Each probe must start before any can complete. This verifies
+            # concurrency without depending on machine-specific latency.
+            probes.wait()
+            if '--query-gpu=index,uuid,memory.free' in args:
+                return '1, GPU-one, 24500\n2, GPU-two, 24500\n'
+            if '--query-compute-apps=gpu_uuid,pid,used_memory' in args:
+                return 'GPU-one, 42, 100\n'
+            return ''
+
+        with patch('marathon_app.pool._output', side_effect=output):
+            handle, worker = acquire_pool_worker(self.backend, self.root, None)
+        try:
+            self.assertEqual(worker, 'worker-2')
+        finally:
+            release_pool_worker(handle)
 
     def test_all_busy_reports_jobs(self):
         with self.assertRaisesRegex(RuntimeError, 'other jobs'):

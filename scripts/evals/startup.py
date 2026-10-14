@@ -10,8 +10,11 @@ import argparse
 import json
 import os
 from pathlib import Path
+import statistics
+import sys
 import tempfile
 import time
+import urllib.request
 
 from e2e_smoke import LAUNCHER, Terminal, read_events
 
@@ -25,6 +28,8 @@ def main() -> int:
     parser.add_argument("--launcher", type=Path, default=LAUNCHER)
     parser.add_argument("--model", help="model ID from Marathon's frontend catalog")
     parser.add_argument("--typing-delay", type=float, default=0.0)
+    parser.add_argument("--catalog-requests", type=int, default=0,
+                        help="measure live model-picker HTTP refreshes after readiness")
     args = parser.parse_args()
     if not args.run_gpu:
         parser.error("live inference is opt-in; pass --run-gpu")
@@ -32,6 +37,8 @@ def main() -> int:
         parser.error("repeats and timeout must be positive")
     if args.typing_delay < 0:
         parser.error("typing delay must be non-negative")
+    if args.catalog_requests < 0:
+        parser.error("catalog requests must be non-negative")
     launcher = args.launcher.resolve()
     output = args.output_dir.resolve() if args.output_dir else Path(
         tempfile.mkdtemp(prefix="marathon-startup-")
@@ -77,6 +84,33 @@ def main() -> int:
                 if event.get("event") in {"run.started", "backend.model.ready", "runtime.ready", "frontend.started"}:
                     milestones[event["event"]] = round((event["mono_ns"] - started) / 1e9, 3)
             frontend = next(event for event in events() if event.get("event") == "frontend.started")
+            catalog_ms = []
+            if args.catalog_requests:
+                sys.path.insert(0, str(launcher.parent.parent))
+                from marathon_app.instance import resolve_instance
+                from marathon_app.runtime import runtime_paths
+                from marathon_app.router_security import open_api_request
+
+                run = next(event for event in events() if event.get("event") == "run.started")
+                instance = run["data"].get("instance")
+                config = resolve_instance(instance).settings
+                host = config.router_host
+                if ":" in host:
+                    host = f"[{host}]"
+                token = runtime_paths(instance).session_file.with_name("router.token").read_text()
+                request = urllib.request.Request(
+                    f"http://{host}:{config.router_port}/v1/models",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                previous = None
+                for _ in range(args.catalog_requests):
+                    tick = time.perf_counter()
+                    with open_api_request(request, timeout=5) as response:
+                        payload = json.load(response)
+                    catalog_ms.append((time.perf_counter() - tick) * 1000)
+                    if not payload.get("models") or (previous is not None and payload != previous):
+                        raise RuntimeError("model catalog empty or changed during benchmark")
+                    previous = payload
             sessions = Path(frontend["data"]["codex_home"]) / "sessions"
             before = {path: path.stat().st_size for path in sessions.rglob("*.jsonl")}
             expected = f"STARTUP_OK_{os.getpid()}_{repeat}"
@@ -114,6 +148,9 @@ def main() -> int:
                        prompt_reply_seconds=round((completed - prompted) / 1e9, 3),
                        typing_delay_seconds=args.typing_delay,
                        milestones=milestones)
+            if catalog_ms:
+                row["catalog_ms"] = catalog_ms
+                row["catalog_median_ms"] = statistics.median(catalog_ms)
         except Exception as error:
             row = dict(repeat=repeat, passed=False, error=str(error))
         finally:

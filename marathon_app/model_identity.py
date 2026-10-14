@@ -1,5 +1,6 @@
 """Read model identity from the broker's launch configuration, never its alias."""
 
+from functools import lru_cache
 from pathlib import Path
 import re
 import shlex
@@ -10,7 +11,7 @@ from .catalog import Backend
 
 
 def pool_identity(backend: Backend) -> tuple[str, str] | None:
-    """Refresh on every discovery request; no network calls or worker startup.
+    """Check current contents on every discovery; parse only changed identities.
 
     Stable routing aliases are deliberately not treated as weight identities.
     Unsupported or inconsistent commands must not inherit a plausible stale name.
@@ -18,9 +19,19 @@ def pool_identity(backend: Backend) -> tuple[str, str] | None:
     if backend.identity_config is None:
         return None
     try:
-        config = yaml.safe_load(backend.identity_config.read_text())
+        return _configured_identity(backend.identity_config.read_text(), backend.pool_models)
+    except (OSError, UnicodeError):
+        return "Local pool (identity unavailable)", "Cannot verify the broker's configured model identity."
+
+
+@lru_cache(maxsize=8)
+def _configured_identity(content: str, workers: tuple[str, ...]) -> tuple[str, str]:
+    # Key by contents, not just mtime: even same-size edits, atomic replacement,
+    # and edits that preserve timestamps must update the picker immediately.
+    try:
+        config = yaml.safe_load(content)
         identities = set()
-        for worker in backend.pool_models:
+        for worker in workers:
             command = config["models"][worker]["cmd"]
             if not isinstance(command, str):
                 raise ValueError("model command is not text")
