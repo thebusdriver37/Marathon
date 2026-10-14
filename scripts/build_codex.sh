@@ -94,6 +94,9 @@ candidate="$CARGO_TARGET_DIR/$BUILD_PROFILE/codex"
 if [[ "${MARATHON_CODEX_RUN_TESTS:-0}" == "1" ]]; then
   MARATHON_SANDBOX_TEST_BIN="$candidate" python3 -m unittest discover \
     -s "$ROOT_DIR/tests" -p test_sandbox_diagnostics.py -v
+  PYTHONPATH="$ROOT_DIR" MARATHON_TEST_CODEX_BIN="$candidate" \
+    "$ROOT_DIR/.marathon/venv/bin/python3" -m unittest discover \
+    -s "$ROOT_DIR/tests" -p test_conversation_model.py -v
 fi
 
 install_dir="$(dirname "$INSTALL_BIN")"

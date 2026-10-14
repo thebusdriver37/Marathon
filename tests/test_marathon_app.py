@@ -24,6 +24,7 @@ from marathon_app.frontends import (
     _codex_binary,
     _collect_codex_config_overrides,
     _marathon_cli_name,
+    _restore_conversation_model,
     _stream_chat,
     codex_command,
     hermes_command,
@@ -1434,6 +1435,22 @@ class CodexHomeTests(unittest.TestCase):
 
 
 class FrontendTests(unittest.TestCase):
+    def test_resume_restores_saved_settings_unless_explicitly_overridden(self) -> None:
+        for arguments in ([], ["resume"], ["resume", "thread-id"],
+                          ["exec", "resume", "--last", "continue"],
+                          ["-c", 'sandbox_mode="read-only"', "resume"],
+                          ["exec", "--", "--model=literal prompt"]):
+            with self.subTest(arguments=arguments):
+                self.assertTrue(_restore_conversation_model(arguments))
+        for arguments in (["resume", "-m", "flash"], ["--model=flash"],
+                          ["-mflash"], ["--profile", "custom"], ["-pcustom"],
+                          ["--profile=custom"], ["--oss"],
+                          ["-c", 'model="flash"'],
+                          ['--config=model_reasoning_effort="high"'],
+                          ['-cmodel_provider="custom"']):
+            with self.subTest(arguments=arguments):
+                self.assertFalse(_restore_conversation_model(arguments))
+
     def setUp(self) -> None:
         # Entry-point unit tests must never inspect or launch live user workers.
         self.launch_selection = mock.patch.object(main_module, "automatic_launch_instance", return_value=None)
@@ -1679,6 +1696,7 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(run.call_args.kwargs["env"]["CODEX_CLI_NAME"], "marathon")
         self.assertEqual(run.call_args.kwargs["env"]["CODEX_CLI_INSTANCE"], "")
+        self.assertEqual(run.call_args.kwargs["env"]["MARATHON_RESTORE_THREAD_MODEL"], "1")
         self.assertEqual(
             run.call_args.kwargs["env"]["CODEX_HOME"],
             str(marathon_home.resolve()),

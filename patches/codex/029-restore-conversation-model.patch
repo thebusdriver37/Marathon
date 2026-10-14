@@ -1,0 +1,65 @@
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -1588,6 +1588,14 @@
+ }
+ 
+ impl Config {
++    /// Marathon supplies startup defaults as CLI config. They are not a user's
++    /// request to replace the model and effort persisted with a resumed thread.
++    /// The launcher disables this flag for explicit model/profile overrides.
++    pub fn marathon_restore_thread_model(&self) -> bool {
++        self.model_provider_id == "marathon-local"
++            && std::env::var_os("MARATHON_RESTORE_THREAD_MODEL").is_some_and(|value| value == "1")
++    }
++
+     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
+         &self.sqlite
+     }
+--- a/codex-rs/tui/src/app/config_persistence.rs
++++ b/codex-rs/tui/src/app/config_persistence.rs
+@@ -32,6 +32,9 @@
+     config: &Config,
+     harness_overrides: &ConfigOverrides,
+ ) -> crate::app_server_session::ResumeModelSettings {
++    if config.marathon_restore_thread_model() {
++        return crate::app_server_session::ResumeModelSettings::RestoreFromThread;
++    }
+     let has_layer_override = config.config_layer_stack.layers_high_to_low().any(|layer| {
+         matches!(
+             &layer.name,
+--- a/codex-rs/exec/src/lib.rs
++++ b/codex-rs/exec/src/lib.rs
+@@ -915,7 +915,14 @@
+ 
+     let default_cwd = config.cwd.to_path_buf();
+     let default_approval_policy = config.permissions.approval_policy.value();
+-    let default_effort = config.model_reasoning_effort.clone();
++    let default_effort = if matches!(command.as_ref(), Some(ExecCommand::Resume(_)))
++        && config.marathon_restore_thread_model()
++    {
++        // Leave the resumed thread's persisted effort in force on its first turn.
++        None
++    } else {
++        config.model_reasoning_effort.clone()
++    };
+ 
+     let (initial_operation, prompt_summary) = match (command.as_ref(), prompt, images) {
+         (Some(ExecCommand::Review(review_cli)), _, _) => {
+@@ -1476,10 +1483,15 @@
+             config.cwd.as_path(),
+         )
+     });
++    let (model, model_provider) = if config.marathon_restore_thread_model() {
++        (None, None)
++    } else {
++        (config.model.clone(), Some(config.model_provider_id.clone()))
++    };
+     ThreadResumeParams {
+         thread_id,
+-        model: config.model.clone(),
+-        model_provider: Some(config.model_provider_id.clone()),
++        model,
++        model_provider,
+         cwd: Some(config.cwd.to_string_lossy().to_string()),
+         runtime_workspace_roots: Some(config.workspace_roots.clone()),
+         approval_policy: Some(config.permissions.approval_policy.value().into()),

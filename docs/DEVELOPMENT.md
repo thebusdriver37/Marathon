@@ -36,6 +36,14 @@ Protocol export bundles and the generated Python response types must be regenera
 when Marathon's response metrics schema changes. Native patch tests use synthetic
 fixtures and temporary homes, not personal conversation history.
 
+Marathon resumes each conversation with its persisted model and reasoning effort.
+The launcher sets `MARATHON_RESTORE_THREAD_MODEL=1` so its startup defaults do not
+override saved settings in the TUI or `exec resume`. Explicit model, reasoning,
+provider, or profile arguments disable restoration for that launch. New conversations
+still use the selected startup defaults. The native behavior is covered by
+`MARATHON_TEST_CODEX_BIN=/path/to/codex .marathon/venv/bin/python3 -m unittest discover -s tests -p test_conversation_model.py -v`,
+which uses a local scripted Responses server and isolated conversation history.
+
 Marathon builds bake in a loopback-only frontend transport boundary. Cloud login,
 shared Codex daemons, remote-control attachment, feedback and telemetry are disabled;
 unsetting `MARATHON_LOCAL_ONLY` cannot re-enable them in shipped binaries. The launcher

@@ -116,6 +116,23 @@ def _codex_features(binary: str) -> set[str]:
         return set()
 
 
+def _restore_conversation_model(arguments: list[str]) -> bool:
+    """Launcher defaults must not masquerade as explicit resume overrides."""
+    overrides, remaining = _collect_codex_config_overrides(arguments)
+    for setting in overrides[1::2]:
+        key = setting.partition("=")[0].strip().strip("\"'")
+        if key in {"model", "model_provider", "model_reasoning_effort"}:
+            return False
+    for argument in remaining:
+        if argument == "--":
+            break
+        if argument in {"--model", "--profile", "--oss", "--local-provider"}:
+            return False
+        if argument.startswith(("--model=", "--profile=", "--local-provider=", "-m", "-p")):
+            return False
+    return True
+
+
 def codex_command(
     runtime: Runtime,
     extra_args: list[str] | None = None,
@@ -181,6 +198,9 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
     if missing:
         raise RuntimeError("Missing " + ", ".join(missing) + "; see docs/SETUP.md")
     environment["MARATHON_ROUTER_TOKEN"] = runtime.router_token
+    environment["MARATHON_RESTORE_THREAD_MODEL"] = (
+        "1" if _restore_conversation_model(extra_args or []) else "0"
+    )
     environment["CODEX_CLI_NAME"] = _marathon_cli_name()
     environment["CODEX_CLI_INSTANCE"] = ""
     before = snapshot_sessions(codex_home)
