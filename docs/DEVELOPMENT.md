@@ -200,6 +200,72 @@ comparisons. Local evidence is in `/tmp/marathon-perf-20261014`,
 `/tmp/marathon-perf-before-picker-20261014`, and
 `/tmp/marathon-perf-after-picker-20261014`; these are not portable fixtures.
 
+### Nonempty warmup cache reuse, October 14
+
+A non-generating frontend warmup can contain base instructions or conversation
+history. It creates a new response ID without generating a new GPU prompt. The
+router previously recognized only empty warmups as roots; following a nonempty
+warmup could therefore erase an already valid live slot or restore it needlessly.
+
+Warmups without generated output now retain root cache selection. For the same
+conversation and matching model/prompt scaffold, the router reuses the live slot.
+A new conversation or fork still prefers its own disk checkpoint, then reuses
+the compatible live prefix on a checkpoint miss. The full prompt reaches the
+backend, which validates the token-exact prefix. Lost slots and changed scaffolds
+retain their existing fallback; experimental delta-only requests are excluded.
+No model, sampling, reasoning, context limit, or cache capacity setting changed.
+
+The real-GPU protocol evaluator uses a synthetic 4,492-token recall request,
+normal worker leasing, and three repetitions per revision. On AiGuy with the
+Qwen3.8 27B IQ4_XS worker, median request-to-completion times were:
+
+| Measurement | Before | After | Time saved |
+| --- | ---: | ---: | ---: |
+| Real terminal: first reply after `/new` | 15.750 s | 0.919 s | 14.831 s (94.2%) |
+| Same-conversation base warmup, next reply | 5.155 s | 0.286 s | 4.869 s (94.5%) |
+| Fork base warmup, next reply | 5.355 s | 0.247 s | 5.108 s (95.4%) |
+| Ordinary continuation control | 0.378 s | 0.280 s | 0.098 s |
+
+All 12 generated answers per revision passed exact-output checks, with matching
+output hashes across revisions. Affected requests went from zero cached tokens
+to 4,467/4,501 cached tokens. Full-history warmups were also measured in three
+repetitions, saving 4.90/5.11 seconds respectively. The ordinary-continuation
+control is not a claim of improved decoding throughput. These measurements
+cover the affected warmup paths, not every reply or GPU-cold startup.
+
+The separate terminal test used three `/new` actions per revision. Each new chat
+returned the exact requested answer. Cached tokens increased from 0 to 13,960,
+leaving only 23 tokens to prefill. Median time to first activity fell from
+15.484 s to 0.611 s. The initial launch reply was 9.298 s before and 9.227 s after;
+the large improvement applies to new chats within an already active session.
+
+Nine focused regression tests cover native base warmups, history warmups, fork
+checkpoint preference, lost-slot fallback, changed scaffolds, and delta-only
+exclusion. The Python suite passed 517 tests with 14 skips.
+Five live terminal/headless workflows also passed: conversation recall and cache
+reuse, file edits with real shell tests, background-tool cancellation and recovery,
+the printed resume command with fact recall, and headless configuration overrides
+with shell tools. The smoke evaluator now verifies cached-token reuse for both
+delta and full-history reconnects, and waits for resume readiness without requiring
+an old message to remain visible in the terminal viewport.
+
+Reproduce on each revision with the same model and worker configuration:
+
+```bash
+.marathon/venv/bin/python scripts/evals/warmup_cache.py --run-gpu --repeats 3
+.marathon/venv/bin/python scripts/evals/warmup_cache.py --run-gpu --repeats 3 --warmup-input history
+.marathon/venv/bin/python scripts/evals/warmup_cache.py --run-gpu --repeats 3 --native-new-chat
+```
+
+The native variant drives `/new` in a real terminal; the other variants exercise
+the Responses WebSocket protocol against real inference. All use synthetic
+prompts and isolated evidence directories, with no worker eviction. Local A/B
+evidence is in `/tmp/marathon-warmup-base-{before,after}-20261014` and
+`/tmp/marathon-native-new-{before,after}-20261014`; these are not portable fixtures.
+The baseline router was byte-identical to commit `e0d7f907`; hashes and comparison
+results are in `/tmp/marathon-perf-pass2-20261014`, and live workflow evidence is in
+`/tmp/marathon-pass2-smoke-complete-20261014`.
+
 Keep first-run setup in the README and advanced configuration in [advanced usage](ADVANCED_USAGE.md).
 Document actual tested support separately from expected hardware compatibility.
 Preserve existing user selections and never change power caps or stop unrelated inference services during setup.

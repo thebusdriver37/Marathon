@@ -461,12 +461,12 @@ def _root_prompt_cache_mode(
 
 
 def _is_warmup_root(snapshot: ResponseSnapshot | None) -> bool:
-    """Return whether a non-generating Codex warmup precedes the first turn."""
+    """Recognize non-generating warmups, including initial context and history."""
 
     return bool(
         snapshot is not None
         and snapshot.response_id.startswith("warm_")
-        and snapshot.conversation_item_count == 0
+        and not snapshot.output_items
         and not snapshot.snapshot_filename
     )
 
@@ -6058,10 +6058,17 @@ class RouterState:
                 and previous_response_id is not None
                 and self.live_slot_by_model.get(profile.slug) == previous_response_id
             )
-            starter_root = parent_snapshot is None or _is_warmup_root(parent_snapshot)
+            # A history-bearing warmup records a frontend continuation point,
+            # not a new GPU generation. Its ID need not own the still-valid live
+            # slot. Full requests can reuse that slot through token prefix matching.
+            warmup_root = _is_warmup_root(parent_snapshot) and not delta_only_restore
+            starter_root = parent_snapshot is None or warmup_root
             live_reconnect_root = (
                 profile.supports_slots
-                and parent_snapshot is None
+                and not delta_only_restore
+                and (parent_snapshot is None or (
+                    warmup_root and prewarmed_slot_kind != "conversation"
+                ))
                 and self._live_slot_scaffold_matches(
                     profile.slug,
                     scaffold_fingerprint,

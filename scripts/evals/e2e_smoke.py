@@ -209,7 +209,15 @@ def main():
         assert {r["prompt_cache_key"] for r in requests} == {thread_id}, requests
         completions = [e["data"] for e in traces if e.get("event") == "router.response.completed"
                        and e["data"].get("backend_ms", 0) > 0]
-        assert all(e["slot"]["prepare_mode"] == "reuse-live-parent" for e in completions[1:]), completions
+        # Clients can send either a previous-response delta or full history on
+        # reconnect. Both must reuse the live prefix without a restore/erase.
+        assert len(completions) == 4, completions
+        for completion in completions[1:]:
+            slot = completion["slot"]
+            timing = completion["backend_timings"]
+            assert slot["prepare_mode"] in {"reuse-live-parent", "reuse-live-reconnect-root"}, slot
+            assert slot.get("erase_result") is None and slot.get("restore_error") is None, slot
+            assert timing["cache_n"] > 0 and timing["cache_n"] > timing["prompt_n"], timing
         record("chat-memory-and-live-cache", first_activity_ms=latencies,
                router_timings=[{k: e.get(k) for k in ("request_ms", "queue_wait_ms", "first_activity_ms", "backend_ms")}
                                for e in completions])
@@ -269,7 +277,10 @@ def main():
         assert shlex.split(command) == [str(LAUNCHER), "resume", thread_id], command
         resumed = Terminal(["bash", "-lc", command], project, environment, output / "resume.terminal.txt")
         terminals.append(resumed)
-        resumed.wait(lambda: PHRASE in resumed.clean())
+        # Long conversations render only the visible tail. Readiness must not
+        # depend on the original phrase still fitting in the terminal viewport;
+        # the recall turn below verifies that the resumed model retained it.
+        resumed.wait(lambda: "Ready" in resumed.clean())
         prompt = "Reply only with the original remembered phrase. Do not use tools."
         completed_before_resume = len(completed(session))
         resumed.send(prompt)
