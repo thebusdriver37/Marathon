@@ -29,6 +29,59 @@ def source_text(projects, settings=''):
 
 
 class SharedProfileTests(unittest.TestCase):
+    def test_marathon_instructions_migrate_and_remain_independent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stock, local = root / 'stock', root / 'local'
+            stock.mkdir()
+            shared = root / 'AGENTS.md'
+            shared.write_text('Codex and Claude rules\n')
+            (stock / 'AGENTS.md').symlink_to(shared)
+            instructions = root / 'MARATHON.md'
+            instructions.write_text('Marathon rules\n')
+            environment = {'CODEX_HOME': str(stock), 'MARATHON_CODEX_HOME': str(local),
+                           'MARATHON_INSTRUCTIONS_FILE': str(instructions)}
+            for instance in (None, 'second'):
+                destination = local if instance is None else local / 'instances' / instance
+                destination.mkdir(parents=True, exist_ok=True)
+                (destination / 'AGENTS.md').symlink_to(stock / 'AGENTS.md')
+                home, _ = prepare_codex_home(environment, instance)
+                self.assertEqual((home / 'AGENTS.md').resolve(), instructions.resolve())
+                (home / 'AGENTS.md').write_text('Edited Marathon rules\n')
+                self.assertEqual(shared.read_text(), 'Codex and Claude rules\n')
+                prepare_codex_home(environment, instance)
+                self.assertEqual(instructions.read_text(), 'Edited Marathon rules\n')
+            shared.write_text('Changed stock rules\n')
+            self.assertEqual(instructions.read_text(), 'Edited Marathon rules\n')
+
+    def test_missing_marathon_instructions_do_not_inherit_stock_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stock, local = root / 'stock', root / 'local'
+            stock.mkdir()
+            local.mkdir()
+            (stock / 'AGENTS.md').write_text('Stock rules\n')
+            (local / 'AGENTS.md').symlink_to(stock / 'AGENTS.md')
+            environment = {'CODEX_HOME': str(stock), 'MARATHON_CODEX_HOME': str(local),
+                           'MARATHON_INSTRUCTIONS_FILE': str(root / 'MARATHON.md')}
+            prepare_codex_home(environment)
+            self.assertFalse((local / 'AGENTS.md').exists())
+            self.assertFalse((local / 'AGENTS.md').is_symlink())
+            self.assertEqual((stock / 'AGENTS.md').read_text(), 'Stock rules\n')
+
+    def test_marathon_owned_instructions_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            local = root / 'local'
+            local.mkdir()
+            (local / 'AGENTS.md').write_text('Custom instance rules\n')
+            instructions = root / 'MARATHON.md'
+            instructions.write_text('Global Marathon rules\n')
+            prepare_codex_home({'CODEX_HOME': str(root / 'stock'),
+                                'MARATHON_CODEX_HOME': str(local),
+                                'MARATHON_INSTRUCTIONS_FILE': str(instructions)})
+            self.assertEqual((local / 'AGENTS.md').read_text(), 'Custom instance rules\n')
+
     def test_missing_and_empty_source(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'config.toml'

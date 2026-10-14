@@ -203,6 +203,58 @@ class SseEvent:
     data: str
 
 
+class BackendImageLimitError(RuntimeError):
+    def __init__(self, limit: int):
+        self.limit = limit
+        super().__init__(f"Backend accepts at most {limit} images per request")
+
+
+def _backend_image_limit(status: int, text: str) -> int | None:
+    if status != 400:
+        return None
+    try:
+        error = json.loads(text)
+    except ValueError:
+        return None
+    for _ in range(4):
+        if not isinstance(error, dict):
+            return None
+        match = re.fullmatch(r"a request supports at most ([1-9][0-9]{0,5}) images", str(error.get("message", "")))
+        if match:
+            return int(match[1])
+        error = error.get("error")
+    return None
+
+
+def _bound_request_images(request: dict[str, Any], limit: int) -> int:
+    """Bound a private outbound copy, never the saved conversation or attachments."""
+    images = []
+    latest_count = 0
+    for item in request.get("input", []):
+        if not isinstance(item, dict) or not isinstance(item.get("content"), list):
+            continue
+        current = [(item["content"], index) for index, part in enumerate(item["content"])
+                   if isinstance(part, dict) and part.get("type") == "input_image"]
+        if current:
+            latest_count = len(current)
+            images.extend(current)
+    if len(images) <= limit:
+        return 0
+    if latest_count > limit:
+        raise RuntimeError(
+            f"This backend accepts at most {limit} images per request; the newest image "
+            f"message contains {latest_count}. Send or view images in batches of {limit} or fewer."
+        )
+    omitted = len(images) - limit
+    for content, index in images[:omitted]:
+        content[index] = {
+            "type": "input_text",
+            "text": f"[Earlier image omitted to fit the backend's {limit}-image request limit. "
+                    "Re-open it if needed; do not infer its contents from this placeholder.]",
+        }
+    return omitted
+
+
 class ToolProtocolError(RuntimeError):
     """The backend stopped making valid, bounded tool-call progress."""
 
@@ -2290,6 +2342,7 @@ class RouterState:
         self.lock = threading.Lock()
         self.model_lock = threading.Lock()
         self.backend_lock = asyncio.Lock()
+        self.backend_image_limits: dict[tuple[str, str], int] = {}
         self.lineage_lock = asyncio.Lock()
         self.debug = debug
         self.state_dir = state_dir
@@ -3208,6 +3261,9 @@ class RouterState:
                 ) as response:
                     text = await response.text()
                     if response.status >= 400:
+                        image_limit = _backend_image_limit(response.status, text)
+                        if image_limit is not None:
+                            raise BackendImageLimitError(image_limit)
                         protocol_error = _backend_tool_protocol_error_reason(
                             response.status,
                             text,
@@ -3374,6 +3430,9 @@ class RouterState:
         ) as response:
             if response.status >= 400:
                 text = await response.text()
+                image_limit = _backend_image_limit(response.status, text)
+                if image_limit is not None:
+                    raise BackendImageLimitError(image_limit)
                 protocol_error = _backend_tool_protocol_error_reason(
                     response.status,
                     text,
@@ -5131,6 +5190,37 @@ class RouterState:
         result["call_id"] = call_id
         return result
 
+    async def _request_with_image_limit(
+        self, profile: ModelProfile, payload: dict[str, Any],
+        event_sink: StreamEventSink | None,
+    ) -> dict[str, Any]:
+        request = copy.deepcopy(payload)
+        limits = getattr(self, "backend_image_limits", None)
+        if limits is None:
+            limits = self.backend_image_limits = {}
+        key = (profile.target, profile.alias)
+        for attempt in range(2):
+            if key in limits:
+                omitted = _bound_request_images(request, limits[key])
+                if omitted:
+                    self.telemetry.emit("router.images.history_bounded", {
+                        "profile_slug": profile.slug, "limit": limits[key],
+                        "omitted_images": omitted,
+                    })
+            try:
+                if event_sink is None:
+                    request["stream"] = False
+                    return await self._request_json(profile, "POST", "/v1/responses", request)
+                return await self._request_responses_stream(profile, request, event_sink=event_sink)
+            except BackendImageLimitError as error:
+                # A rejected HTTP request has emitted no model output. Retry
+                # only this specific validation failure, once, without changing
+                # saved history or the source images.
+                if attempt or key in limits:
+                    raise
+                limits[key] = error.limit
+        raise AssertionError("image-limit retry exhausted")
+
     async def _run_responses_loop(
         self,
         *,
@@ -5242,18 +5332,10 @@ class RouterState:
             )
             response = None
             try:
-                if event_sink is None or finalizing or is_compaction:
-                    request = copy.deepcopy(request)
-                    request["stream"] = False
-                    response = await self._request_json(
-                        profile, "POST", "/v1/responses", request
-                    )
-                else:
-                    response = await self._request_responses_stream(
-                        profile,
-                        request,
-                        event_sink=event_sink,
-                    )
+                response = await self._request_with_image_limit(
+                    profile, request,
+                    None if finalizing or is_compaction else event_sink,
+                )
                 accounting.add(response)
                 finalization_hit_output_limit = _response_stalled_at_output_limit(
                     response,

@@ -38,6 +38,45 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_image_limit_error_classification_is_specific(self):
+        error = json.dumps({"error": {"error": {"message": "a request supports at most 4 images"}}})
+        self.assertEqual(router_module._backend_image_limit(400, error), 4)
+        for status, text in [(500, error), (400, 'not JSON'), (400, '{"message":"other error"}')]:
+            self.assertIsNone(router_module._backend_image_limit(status, text))
+
+    def test_image_limit_preserves_text_and_rejects_oversized_new_batch(self):
+        parts = [{"type": "input_image", "image_url": str(i)} for i in range(6)]
+        request = {"input": [{"role": "user", "content": [part]} for part in parts]}
+        original = copy.deepcopy(request)
+        outgoing = copy.deepcopy(request)
+        self.assertEqual(router_module._bound_request_images(outgoing, 4), 2)
+        self.assertEqual(request, original)
+        self.assertEqual(outgoing["input"][2:], original["input"][2:])
+        self.assertEqual(router_module._bound_request_images(outgoing, 4), 0)
+        batch = {"input": [{"role": "user", "content": parts}]}
+        with self.assertRaisesRegex(RuntimeError, "batches of 4 or fewer"):
+            router_module._bound_request_images(batch, 4)
+        self.assertEqual(batch["input"][0]["content"], parts)
+
+    def test_image_limit_retries_once_and_does_not_limit_other_models(self):
+        async def exercise():
+            state = object.__new__(router_module.RouterState)
+            state.telemetry = mock.Mock()
+            profile = fixture_profile()
+            request = {"input": [{"role": "user", "content": [
+                {"type": "input_image", "image_url": str(i)}]} for i in range(5)]}
+            state._request_json = mock.AsyncMock(side_effect=[
+                router_module.BackendImageLimitError(4), router_module.BackendImageLimitError(4)])
+            with self.assertRaises(router_module.BackendImageLimitError):
+                await state._request_with_image_limit(profile, request, None)
+            self.assertEqual(state._request_json.await_count, 2)
+            state._request_json = mock.AsyncMock(return_value={})
+            await state._request_with_image_limit(replace(profile, alias="other-model"), request, None)
+            forwarded = state._request_json.call_args.args[3]
+            self.assertEqual(sum(part['type'] == 'input_image' for item in forwarded['input']
+                                 for part in item['content']), 5)
+        asyncio.run(exercise())
+
     def test_namespace_tools_roundtrip_on_shared_transport_path(self):
         async def exercise():
             state = object.__new__(router_module.RouterState)

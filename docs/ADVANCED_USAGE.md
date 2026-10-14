@@ -108,6 +108,12 @@ Each conversation atomically replaces its previous checkpoint instead of accumul
 Speculative workers save the target model state, draft model state, and speculative boundary state as one managed bundle, so restoring a conversation cannot leave the two models at different token positions.
 Before restoring, Marathon verifies the system-and-tools scaffold with a content-free hash, then lets llama.cpp token-match the saved history prefix so harmless serialization changes can retain valid KV state.
 Multimodal checkpoints include the complete conversation history, including all text after image inputs.
+
+Some external backends limit the number of images across the whole request, including history.
+When a backend rejects a request with an explicit image-count limit, Marathon retries once
+with the newest images that fit, replacing older images with explanatory text in the outbound request.
+The saved conversation and source images remain intact. The learned limit applies only to that backend/model
+for the current router process. A newest image message that itself exceeds the limit must be sent or viewed in smaller batches.
 Each Marathon instance keeps at most eight recent conversations, while all instances share a hard 32 GiB ceiling.
 An inactive checkpoint expires 48 hours after its last save or restore.
 Cleanup runs at startup, after saves, and periodically while Marathon remains open.
@@ -229,7 +235,13 @@ Configuration, sessions, logs, history, memory, and SQLite state therefore canno
 
 Marathon refreshes a generated `marathon-shared` profile from the user's normal Codex configuration before each launch.
 It excludes the model, provider, reasoning effort, context, and catalog keys that Marathon owns.
-Only `AGENTS.md`, rules, and skills are linked into the isolated home.
+Rules and skills are linked into the isolated home.
+Global instructions come from `~/MARATHON.md`, independently of Codex and Claude.
+Create or edit that file, or set `MARATHON_INSTRUCTIONS_FILE` to use another path.
+Marathon links it as `AGENTS.md` inside its isolated home for frontend discovery.
+Old links to stock Codex's `AGENTS.md` are replaced on launch; existing Marathon-owned
+instruction files are preserved. A missing `MARATHON.md` does not fall back to Codex's rules.
+Repository `AGENTS.md` files continue to apply normally. Start a new conversation after editing global instructions.
 The generated profile inherits an allowlist of local preferences and project trust entries, not cloud accounts or executable startup integrations.
 Legacy links to stock authentication, hooks, and plugins are removed without changing the stock resources.
 Locally owned copies are preserved beside their former paths with a `.disabled-<id>` suffix.

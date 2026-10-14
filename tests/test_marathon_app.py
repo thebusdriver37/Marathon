@@ -1299,6 +1299,8 @@ class CodexHomeTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (stock / "AGENTS.md").write_text("shared instructions\n", encoding="utf-8")
+            instructions = root / "MARATHON.md"
+            instructions.write_text("Marathon instructions\n", encoding="utf-8")
             (stock / "skills").mkdir()
             (stock / "skills" / "local-skill").mkdir()
             isolated.mkdir()
@@ -1310,6 +1312,7 @@ class CodexHomeTests(unittest.TestCase):
                 {
                     "CODEX_HOME": str(stock),
                     "MARATHON_CODEX_HOME": str(isolated),
+                    "MARATHON_INSTRUCTIONS_FILE": str(instructions),
                 }
             )
 
@@ -1330,7 +1333,7 @@ class CodexHomeTests(unittest.TestCase):
             self.assertNotIn("mcp_servers", shared_config)
             self.assertEqual((isolated / SHARED_PROFILE_FILE).stat().st_mode & 0o777, 0o600)
             self.assertEqual(
-                (isolated / "AGENTS.md").resolve(), (stock / "AGENTS.md").resolve()
+                (isolated / "AGENTS.md").resolve(), instructions.resolve()
             )
             self.assertEqual(
                 (isolated / "skills" / "local-skill").resolve(),

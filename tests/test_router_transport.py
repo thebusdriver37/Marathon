@@ -114,6 +114,56 @@ async def websocket_turn(http, server, tools):
 
 
 class RouterTransportRegressions(unittest.IsolatedAsyncioTestCase):
+    async def test_image_limit_recovers_history_for_http_and_websocket(self):
+        def image_item(index):
+            return {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": f"Screenshot {index}"},
+                {"type": "input_image", "image_url": f"https://example.invalid/{index}.png"}]}
+
+        for transport in ("http", "websocket"):
+            with self.subTest(transport=transport):
+                counts, successful = [], []
+                normal = scripted_backend(lambda data, count: [answer()], successful)
+
+                async def backend(request):
+                    data = await request.json()
+                    count = sum(part.get("type") == "input_image"
+                                for item in data["input"]
+                                for part in item.get("content", []) if isinstance(part, dict))
+                    counts.append(count)
+                    if count > 4:
+                        return web.json_response({"error": {"error": {
+                            "message": "a request supports at most 4 images",
+                            "type": "invalid_request_error"}}}, status=400)
+                    return await normal(request)
+
+                async with serving(backend) as (state, http, server):
+                    previous = None
+                    for count in (4, 5, 6):
+                        payload = {"input": [image_item(i) for i in range(count)], "tools": []}
+                        if transport == "websocket":
+                            if previous:
+                                payload["input"] = [image_item(count - 1)]
+                                payload["previous_response_id"] = previous
+                            async with http.ws_connect(server.make_url('/v1/responses')) as ws:
+                                await ws.send_json(dict(payload, type="response.create"))
+                                while True:
+                                    event = await asyncio.wait_for(ws.receive_json(), 5)
+                                    if event["type"] in {"response.completed", "response.failed"}:
+                                        break
+                                self.assertEqual(event["type"], "response.completed", event)
+                                previous = event["response"]["id"]
+                        else:
+                            async with http.post(server.make_url('/v1/responses'), json=payload) as response:
+                                body = await response.json()
+                                self.assertEqual(response.status, 200, body)
+                    self.assertEqual(counts, [4, 5, 4, 4])
+                    retained = [part["image_url"] for item in successful[-1]["input"]
+                                for part in item.get("content", [])
+                                if isinstance(part, dict) and part.get("type") == "input_image"]
+                    self.assertEqual(retained, [f"https://example.invalid/{i}.png" for i in range(2, 6)])
+                    self.assertIn("Earlier image omitted", json.dumps(successful[-1]))
+
     @unittest.skipUnless(os.environ.get("MARATHON_ROUTER_TEST_BIN"),
                          "Set MARATHON_ROUTER_TEST_BIN for installed CLI integration")
     async def test_installed_cli_http_research_and_edit(self):

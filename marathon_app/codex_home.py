@@ -22,7 +22,6 @@ SHARED_PROFILE_FILE = f"{SHARED_PROFILE}.config.toml"
 SESSION_MIGRATION_MARKER = ".stock-marathon-sessions-migrated-v2"
 MARATHON_SESSION_PROVIDERS = frozenset({"marathon-local", "marathon_local"})
 SHARED_PATHS = (
-    "AGENTS.md",
     "rules",
     "skills",
 )
@@ -124,6 +123,23 @@ def _share_path(source: Path, destination: Path) -> None:
         for child in source.iterdir():
             _share_path(child, destination / child.name)
         return
+
+
+def _link_marathon_instructions(
+    stock_home: Path, isolated_home: Path, environment: Mapping[str, str]
+) -> None:
+    """Replace only the legacy global-instructions link, preserving local rules."""
+
+    source = Path(environment.get("MARATHON_INSTRUCTIONS_FILE") or Path.home() / "MARATHON.md").expanduser().absolute()
+    destination = isolated_home / "AGENTS.md"
+    stock_instructions = stock_home / "AGENTS.md"
+    if source.resolve() == stock_instructions.resolve():
+        raise RuntimeError("Marathon instructions must be separate from stock Codex's AGENTS.md")
+    if destination.is_symlink() and destination.resolve() == stock_instructions.resolve():
+        destination.unlink()
+    # Codex discovers AGENTS.md; MARATHON.md is the independently editable source.
+    # No automatic copy or fallback to stock instructions when it is absent.
+    _share_path(source, destination)
 
 
 def _shared_profile_text(source: Path) -> str:
@@ -268,6 +284,7 @@ def prepare_codex_home(
         raise RuntimeError("Marathon's home must be separate from the stock Codex home")
     isolated_home.mkdir(parents=True, exist_ok=True)
     isolated_home.chmod(0o700)
+    _link_marathon_instructions(stock_home, isolated_home, environment)
     for shared_name in ("auth.json", "hooks.json", "plugins"):
         destination = isolated_home / shared_name
         if destination.is_symlink() and destination.resolve() == (stock_home / shared_name).resolve():
