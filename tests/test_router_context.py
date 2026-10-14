@@ -4052,6 +4052,7 @@ context = 32768
         })
 
         class Request:
+            transport = SimpleNamespace(is_closing=lambda: False)
             app = {"state": state}
             path = "/v1/responses"
             method = "POST"

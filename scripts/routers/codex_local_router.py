@@ -6518,6 +6518,12 @@ async def handle_http_proxy(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": {"message": str(exc)}}, status=502)
 
 
+async def _http_client_disconnected(request: web.Request) -> None:
+    """Notice an abandoned request even while its backend emits no events."""
+    while request.transport is not None and not request.transport.is_closing():
+        await asyncio.sleep(0.05)
+
+
 async def _handle_http_responses(
     request: web.Request,
     payload: dict[str, Any],
@@ -6549,6 +6555,7 @@ async def _handle_http_responses(
     streaming = payload.get("stream") is True
     response = web.StreamResponse(headers={"Content-Type": "text/event-stream"}) if streaming else None
     task: asyncio.Task[Any] | None = None
+    disconnected = asyncio.create_task(_http_client_disconnected(request))
 
     async def send(event: dict[str, Any]) -> bool:
         assert response is not None
@@ -6565,9 +6572,12 @@ async def _handle_http_responses(
         ))
         while not task.done():
             done, _ = await asyncio.wait(
-                {task}, timeout=HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS
+                {task, disconnected}, return_when=asyncio.FIRST_COMPLETED,
+                timeout=HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS
                 if streaming and HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS > 0 else None,
             )
+            if disconnected in done:
+                return response if response is not None else web.Response(status=499)
             if not done and response is not None:
                 await response.write(b": marathon-keepalive\n\n")
         result = task.result()
@@ -6594,6 +6604,8 @@ async def _handle_http_responses(
                 pass
         return response
     finally:
+        disconnected.cancel()
+        await asyncio.gather(disconnected, return_exceptions=True)
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -6757,6 +6769,30 @@ async def _handle_http_proxy(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": {"message": str(exc)}}, status=502)
 
 
+@asynccontextmanager
+async def _websocket_inbox(ws: web.WebSocketResponse):
+    """Keep reading close frames while inference waits on a silent backend."""
+    inbox = asyncio.Queue()
+    disconnected = asyncio.Event()
+
+    async def receive():
+        try:
+            async for message in ws:
+                await inbox.put(message)
+        finally:
+            disconnected.set()
+            await inbox.put(None)
+
+    reader = asyncio.create_task(receive())
+    closed = asyncio.create_task(disconnected.wait())
+    try:
+        yield inbox, closed
+    finally:
+        reader.cancel()
+        closed.cancel()
+        await asyncio.gather(reader, closed, return_exceptions=True)
+
+
 async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
     state: RouterState = request.app["state"]
     # Do not use aiohttp's server heartbeat here. During long local prefills the
@@ -6782,138 +6818,159 @@ async def handle_ws_responses(request: web.Request) -> web.StreamResponse:
         except (asyncio.TimeoutError, ConnectionResetError, ConnectionError):
             return False
 
-    async for msg in ws:
-        if msg.type == WSMsgType.TEXT:
-            try:
-                payload = json.loads(msg.data)
-            except json.JSONDecodeError:
-                await safe_send({"type": "error", "error": {"message": "invalid JSON"}})
-                continue
+    async with _websocket_inbox(ws) as (inbox, disconnected):
+        while True:
+            msg = await inbox.get()
+            if msg is None:
+                break
+            if msg.type == WSMsgType.TEXT:
+                try:
+                    payload = json.loads(msg.data)
+                except json.JSONDecodeError:
+                    await safe_send({"type": "error", "error": {"message": "invalid JSON"}})
+                    continue
 
-            if payload.get("type") != "response.create":
-                await safe_send(
-                    {
-                        "type": "error",
-                        "error": {"message": f"unsupported websocket message type: {payload.get('type')}"},
-                    }
-                )
-                continue
+                if payload.get("type") != "response.create":
+                    await safe_send(
+                        {
+                            "type": "error",
+                            "error": {"message": f"unsupported websocket message type: {payload.get('type')}"},
+                        }
+                    )
+                    continue
 
-            if _stabilize_codex_prompt_cache_key(payload, request.headers):
-                state.telemetry.emit(
-                    "router.prompt_cache_key.stabilized",
-                    {"transport": "websocket"},
-                )
-
-            # Pre-mint the response id and acknowledge IMMEDIATELY so Codex's
-            # WS client doesn't time out waiting through a long generation.
-            # The same id flows into process_websocket_create so backend
-            # lineage and the events we send Codex stay consistent.
-            preset_id = state.mint_response_id(
-                "warm" if payload.get("generate") is False else "resp"
-            )
-            request_scope = _active_ws_request_scope(payload)
-            disconnect_reported = False
-
-            async def response_send(message: dict[str, Any]) -> bool:
-                nonlocal disconnect_reported
-                sent = await safe_send(message)
-                if not sent and not disconnect_reported:
-                    disconnect_reported = True
+                if _stabilize_codex_prompt_cache_key(payload, request.headers):
                     state.telemetry.emit(
-                        "router.ws.client_disconnected",
+                        "router.prompt_cache_key.stabilized",
+                        {"transport": "websocket"},
+                    )
+
+                # Pre-mint the response id and acknowledge IMMEDIATELY so Codex's
+                # WS client doesn't time out waiting through a long generation.
+                # The same id flows into process_websocket_create so backend
+                # lineage and the events we send Codex stay consistent.
+                preset_id = state.mint_response_id(
+                    "warm" if payload.get("generate") is False else "resp"
+                )
+                request_scope = _active_ws_request_scope(payload)
+                disconnect_reported = False
+
+                async def response_send(message: dict[str, Any]) -> bool:
+                    nonlocal disconnect_reported
+                    sent = await safe_send(message)
+                    if not sent and not disconnect_reported:
+                        disconnect_reported = True
+                        state.telemetry.emit(
+                            "router.ws.client_disconnected",
+                            {
+                                "scope": _sha256_text(request_scope or "")[:16],
+                                "response_id": preset_id,
+                                "last_event_type": str(message.get("type") or "unknown"),
+                            },
+                            level="warning",
+                        )
+                    return sent
+
+                if not await response_send(
+                    {"type": "response.created", "response": {"id": preset_id}}
+                ):
+                    # Client dropped before we could ack; skip the heavy work.
+                    continue
+
+                result_task = asyncio.create_task(
+                    state.process_websocket_create(
+                        payload,
+                        preset_response_id=preset_id,
+                        event_sink=response_send,
+                    )
+                )
+                previous_task = state.replace_active_ws_task(request_scope, result_task)
+                if previous_task is not None:
+                    state.telemetry.emit(
+                        "router.ws.request.superseded",
                         {
                             "scope": _sha256_text(request_scope or "")[:16],
                             "response_id": preset_id,
-                            "last_event_type": str(message.get("type") or "unknown"),
                         },
                         level="warning",
                     )
-                return sent
-
-            if not await response_send(
-                {"type": "response.created", "response": {"id": preset_id}}
-            ):
-                # Client dropped before we could ack; skip the heavy work.
-                continue
-
-            result_task = asyncio.create_task(
-                state.process_websocket_create(
-                    payload,
-                    preset_response_id=preset_id,
-                    event_sink=response_send,
-                )
-            )
-            previous_task = state.replace_active_ws_task(request_scope, result_task)
-            if previous_task is not None:
-                state.telemetry.emit(
-                    "router.ws.request.superseded",
-                    {
-                        "scope": _sha256_text(request_scope or "")[:16],
-                        "response_id": preset_id,
-                    },
-                    level="warning",
-                )
-                previous_task.cancel()
-                await asyncio.gather(previous_task, return_exceptions=True)
-            try:
-                client_connected = True
-                while True:
-                    done, _ = await asyncio.wait(
-                        {result_task},
-                        timeout=WS_KEEPALIVE_INTERVAL_SECONDS
-                        if WS_KEEPALIVE_INTERVAL_SECONDS > 0
-                        else None,
-                    )
-                    if done:
-                        result = result_task.result()
-                        break
-                    if not await response_send(
+                    previous_task.cancel()
+                    await asyncio.gather(previous_task, return_exceptions=True)
+                try:
+                    client_connected = True
+                    while True:
+                        done, _ = await asyncio.wait(
+                            {result_task, disconnected},
+                            return_when=asyncio.FIRST_COMPLETED,
+                            timeout=WS_KEEPALIVE_INTERVAL_SECONDS
+                            if WS_KEEPALIVE_INTERVAL_SECONDS > 0
+                            else None,
+                        )
+                        if disconnected in done:
+                            if not disconnect_reported:
+                                state.telemetry.emit("router.ws.client_disconnected", {
+                                    "scope": _sha256_text(request_scope or "")[:16],
+                                    "response_id": preset_id,
+                                    "last_event_type": "websocket.close",
+                                }, level="warning")
+                            result_task.cancel()
+                            await asyncio.gather(result_task, return_exceptions=True)
+                            client_connected = False
+                            break
+                        if result_task in done:
+                            result = result_task.result()
+                            break
+                        if not await response_send(
+                            {
+                                "type": "response.in_progress",
+                                "response": {"id": preset_id, "status": "in_progress"},
+                            }
+                        ):
+                            result_task.cancel()
+                            try:
+                                await result_task
+                            except asyncio.CancelledError:
+                                pass
+                            client_connected = False
+                            break
+                    if not client_connected:
+                        continue
+                except Exception as exc:
+                    await response_send(
                         {
-                            "type": "response.in_progress",
-                            "response": {"id": preset_id, "status": "in_progress"},
+                            "type": "response.failed",
+                            "response": {
+                                "id": preset_id,
+                                "status": "failed",
+                                "error": {"message": str(exc)},
+                            },
                         }
-                    ):
-                        result_task.cancel()
-                        try:
-                            await result_task
-                        except asyncio.CancelledError:
-                            pass
-                        client_connected = False
-                        break
-                if not client_connected:
+                    )
                     continue
-            except Exception as exc:
+
+                finally:
+                    if not result_task.done():
+                        result_task.cancel()
+                        await asyncio.gather(result_task, return_exceptions=True)
+
+                if not result.get("streamed"):
+                    for item in result["output_items"]:
+                        if not await response_send(
+                            {"type": "response.output_item.done", "item": item}
+                        ):
+                            break
                 await response_send(
                     {
-                        "type": "response.failed",
+                        "type": "response.completed",
                         "response": {
-                            "id": preset_id,
-                            "status": "failed",
-                            "error": {"message": str(exc)},
+                            "id": result["response_id"],
+                            "usage": result["usage"],
+                            "usage_metadata": result.get("backend_response", {}).get("usage_metadata"),
                         },
                     }
                 )
-                continue
-
-            if not result.get("streamed"):
-                for item in result["output_items"]:
-                    if not await response_send(
-                        {"type": "response.output_item.done", "item": item}
-                    ):
-                        break
-            await response_send(
-                {
-                    "type": "response.completed",
-                    "response": {
-                        "id": result["response_id"],
-                        "usage": result["usage"],
-                        "usage_metadata": result.get("backend_response", {}).get("usage_metadata"),
-                    },
-                }
-            )
-        elif msg.type == WSMsgType.ERROR:
-            break
+            elif msg.type == WSMsgType.ERROR:
+                break
 
     return ws
 

@@ -30,6 +30,7 @@ class ConversationModelTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.requests = []
         requests = self.requests
+        test_case = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
@@ -45,6 +46,9 @@ class ConversationModelTests(unittest.TestCase):
                     body = zstandard.ZstdDecompressor().decompress(body)
                 request = json.loads(body)
                 requests.append(request)
+                gate = getattr(test_case, "response_gate", None)
+                if gate is not None and len(requests) == 1:
+                    gate.wait(20)
                 identifier = f"resp_{len(requests)}"
                 answer = f"RESUME_VERIFIED_{len(requests)}"
                 item = {"type": "message", "role": "assistant", "id": identifier + "_msg",
@@ -136,6 +140,28 @@ class ConversationModelTests(unittest.TestCase):
         rollout = next((home / "sessions").rglob("*.jsonl"))
         metadata = json.loads(rollout.read_text().splitlines()[0])
         return metadata["payload"]["id"]
+
+    def test_steering_is_in_the_next_model_request(self):
+        self.response_gate = threading.Event()
+        command, environment, _ = self.launch(DEFAULT, [])
+        terminal = Terminal(command, self.root, environment, self.root / "steering.log")
+        try:
+            self.wait_terminal(terminal, lambda: DEFAULT in terminal.clean())
+            terminal.prompt("Begin the original task.")
+            self.wait_terminal(terminal, lambda: len(self.requests) == 1)
+            terminal.prompt("STEERING_MARKER: stop the original task and answer only BLUE.")
+            # Let the TUI deliver Enter while the first response is still running.
+            for _ in range(8):
+                terminal.pump()
+            self.response_gate.set()
+            self.wait_terminal(terminal, lambda: len(self.requests) >= 2)
+            self.assertNotIn("STEERING_MARKER", json.dumps(self.requests[0]))
+            latest = self.requests[1]["input"][-1]
+            self.assertEqual(latest["role"], "user")
+            self.assertIn("STEERING_MARKER", json.dumps(latest))
+        finally:
+            self.response_gate.set()
+            self.close_terminal(terminal)
 
     def test_exec_resume_restores_both_settings_and_persists_explicit_changes(self):
         session = self.seed()
