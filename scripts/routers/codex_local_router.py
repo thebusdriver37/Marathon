@@ -51,7 +51,7 @@ from marathon_app.local_history import normalize_local_history
 from marathon_app.swarm_tools import flatten_request, restore_calls
 from marathon_app.catalog import external_models, backends
 from marathon_app.model_identity import pool_identity
-from marathon_app.pool import acquire_pool_worker, release_pool_worker
+from marathon_app.pool import acquire_pool_worker, release_pool_worker, retain_slot, take_retained_slot
 from marathon_app.checkpoints import RollingCheckpointStore
 from marathon_app.checkpoints import SNAPSHOT_SIDECAR_SUFFIXES
 from marathon_app.checkpoints import conversation_key_hash
@@ -2355,6 +2355,10 @@ class RouterState:
         self.pool_slug = os.getenv("MARATHON_MODEL_SLUG", "") if self.pool_backend else ""
         self.pool_handle = None
         self.pool_model = None
+        self.retained_slot_hint: dict[str, Any] | None = None
+        self.retained_slot_scaffolds: dict[str, str] = {}
+        self.retained_slot_key_hashes: dict[str, str] = {}
+        self.cache_handoff_profile: str | None = None
         self.pool_request_lock = asyncio.Lock()
         try:
             self.pool_external_unload_grace_seconds = max(
@@ -2537,6 +2541,8 @@ class RouterState:
         *,
         starter: bool,
     ) -> None:
+        getattr(self, "retained_slot_scaffolds", {}).pop(profile_slug, None)
+        getattr(self, "retained_slot_key_hashes", {}).pop(profile_slug, None)
         self.live_slot_by_model[profile_slug] = response_id
         if prompt_cache_key:
             self.live_prompt_cache_key_by_model[profile_slug] = prompt_cache_key
@@ -2554,6 +2560,8 @@ class RouterState:
         getattr(self, "prewarmed_conversation_slot_models", set()).discard(profile_slug)
 
     def _clear_live_slot(self, profile_slug: str) -> str | None:
+        getattr(self, "retained_slot_scaffolds", {}).pop(profile_slug, None)
+        getattr(self, "retained_slot_key_hashes", {}).pop(profile_slug, None)
         response_id = self.live_slot_by_model.pop(profile_slug, None)
         self.live_prompt_cache_key_by_model.pop(profile_slug, None)
         getattr(self, "starter_slot_models", set()).discard(profile_slug)
@@ -2603,7 +2611,7 @@ class RouterState:
             return False
         snapshot = self.lineage.get(response_id)
         if snapshot is None:
-            return False
+            return getattr(self, "retained_slot_scaffolds", {}).get(profile_slug) == scaffold_fingerprint
         if snapshot.scaffold_fingerprint:
             return snapshot.scaffold_fingerprint == scaffold_fingerprint
         return (
@@ -3092,6 +3100,7 @@ class RouterState:
                         yield
                         return
                     self._refresh_profiles()
+                    self.retained_slot_hint = take_retained_slot(self.pool_handle)
                     self.telemetry.emit("router.pool.acquired", {"worker": self.pool_model})
             elif self.pool_handle is not None:
                 # Prefix prewarming is no longer useful, but the live slot and worker
@@ -3188,11 +3197,50 @@ class RouterState:
     def _release_pool_worker(self) -> None:
         if getattr(self, "pool_handle", None) is not None:
             worker = self.pool_model
+            hint = None
+            slug = getattr(self, "cache_handoff_profile", None)
+            if slug is not None and slug in self.pool_slugs:
+                response_id = self.live_slot_by_model.get(slug)
+                snapshot = self.lineage.get(response_id)
+                fingerprint = (snapshot.scaffold_fingerprint if snapshot else
+                               self.retained_slot_scaffolds.get(slug))
+                if fingerprint:
+                    hint = {"profile_slug": slug, "backend_cache_id": self.backend_cache_id,
+                            "slot_id": self.slot_id, "scaffold_fingerprint": fingerprint,
+                            "key_hash": self.retained_slot_key_hashes.get(slug) or conversation_key_hash(
+                                self.live_prompt_cache_key_by_model.get(slug, "")),
+                            "starter": self._live_slot_is_starter(slug)}
+            try:
+                retain_slot(self.pool_handle, hint)
+            except (OSError, ValueError, TypeError):
+                pass  # This optional handoff must never delay lease release.
             release_pool_worker(self.pool_handle)
             self.pool_handle = None
             self.pool_model = None
+            self.cache_handoff_profile = None
             self._refresh_profiles()
             self.telemetry.emit("router.pool.released", {"worker": worker})
+
+    async def _adopt_retained_slot(self, profile: ModelProfile, fingerprint: str,
+                                   prompt_cache_key: str) -> bool:
+        """Reuse a clean same-process GPU slot; the backend still matches all tokens."""
+        hint = getattr(self, "retained_slot_hint", None)
+        self.retained_slot_hint = None
+        if (not hint or self.experimental_delta_only or not profile.supports_slots
+                or hint.get("profile_slug") != profile.slug
+                or hint.get("backend_cache_id") != self.backend_cache_id
+                or hint.get("slot_id") != self.slot_id
+                or hint.get("scaffold_fingerprint") != fingerprint
+                or await self._slot_has_cached_prompt(profile) is not True):
+            return False
+        key = (prompt_cache_key if hint.get("key_hash") == conversation_key_hash(prompt_cache_key)
+               else "retained-other-conversation")
+        self._set_live_slot(profile.slug, "retained-worker-slot", key, starter=bool(hint.get("starter")))
+        self.retained_slot_scaffolds[profile.slug] = fingerprint
+        self.retained_slot_key_hashes[profile.slug] = str(hint.get("key_hash") or "")
+        self.cache_handoff_profile = profile.slug
+        self.telemetry.emit("router.slot.retained", {"profile_slug": profile.slug, "slot_id": self.slot_id})
+        return True
 
     def resolve_model(self, requested_model: str | None) -> ModelProfile:
         self._refresh_profiles()
@@ -4019,6 +4067,11 @@ class RouterState:
                     or profile.slug in self.live_slot_by_model
                 ):
                     return
+                if await self._adopt_retained_slot(
+                    profile, self._conversation_scaffold_fingerprint(profile, request), prompt_cache_key
+                ):
+                    return
+                self.cache_handoff_profile = None
                 result = await self.prepare_conversation_checkpoint(
                     profile,
                     request,
@@ -4039,6 +4092,9 @@ class RouterState:
                         self.prewarmed_conversation_slot_models.add(profile.slug)
                     else:
                         self.prewarmed_starter_slot_models.add(profile.slug)
+                    self.cache_handoff_profile = (
+                        profile.slug if profile.slug in getattr(self, "pool_slugs", ()) else None
+                    )
                 self.telemetry.emit(
                     "router.starter_cache.prewarm_completed",
                     {
@@ -4621,6 +4677,8 @@ class RouterState:
                 "reason": "checkpoint has no verifiable conversation prefix",
             }
         checkpoint_dir = self.slot_checkpoint_store.profile_dir(profile.slug)
+        handoff_profile = getattr(self, "cache_handoff_profile", None)
+        self.cache_handoff_profile = None
         try:
             checkpoint_dir.mkdir(
                 parents=True,
@@ -4687,6 +4745,7 @@ class RouterState:
                 pending_filename,
             )
             raise
+        self.cache_handoff_profile = handoff_profile
         return {
             **dict(result),
             "boundary": boundary_result,
@@ -6021,6 +6080,8 @@ class RouterState:
         async with self.backend_lock:
             slot_prepare_start = time.perf_counter()
             queue_wait_ms = (slot_prepare_start - queue_started) * 1000.0
+            await self._adopt_retained_slot(profile, scaffold_fingerprint, prompt_cache_key)
+            self.cache_handoff_profile = None
             switch_checkpoint_result = (
                 await self._checkpoint_before_conversation_switch_locked(
                     profile,
@@ -6313,6 +6374,10 @@ class RouterState:
                 )
             )
             self.last_response_by_model[profile.slug] = response_id
+
+        self.cache_handoff_profile = (
+            profile.slug if profile.supports_slots and profile.slug in getattr(self, "pool_slugs", ()) else None
+        )
 
         save_start = time.perf_counter()
         save_result = self.schedule_conversation_checkpoint(

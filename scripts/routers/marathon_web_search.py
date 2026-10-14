@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from collections import OrderedDict
+import hashlib
 import importlib
 import importlib.util
 import ipaddress
@@ -43,6 +45,7 @@ import socket
 import shutil
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -711,6 +714,15 @@ def make_web_browse_call_item(call_id: str, url: str) -> dict[str, Any]:
     }
 
 
+class _ExtractedText(str):
+    """Immutable text that can be reused while existing tool history retains it."""
+
+    __slots__ = ("__weakref__",)
+
+    def __deepcopy__(self, memo):
+        return self
+
+
 class WebFetchExecutor:
     """Fetch a URL and return its main content as Markdown."""
 
@@ -726,6 +738,9 @@ class WebFetchExecutor:
         # Crawl4AI (Playwright) is expensive; keep it opt-in and reuse the
         # crawler across requests when enabled.
         self._crawl4ai: AsyncWebCrawler | None = None
+        # Eight weak references, not another page-content cache. A result dies
+        # with its existing tool/history owners; no raw HTML is retained here.
+        self._extracted: OrderedDict[tuple, weakref.ReferenceType[_ExtractedText]] = OrderedDict()
 
     async def _ensure_client(self) -> ClientSession:
         if self._client is not None:
@@ -828,7 +843,19 @@ class WebFetchExecutor:
         except Exception as exc:
             raise RuntimeError(f"web_fetch failed: {exc}") from exc
 
-        body = await _extract_to_markdown(raw, content_type, final_url, cap)
+        # Always download and validate the full current response first. Reuse
+        # conversion only for identical bytes, URL, encoding, and output limit.
+        key = (hashlib.sha256(raw).digest(), content_type, final_url, cap)
+        reference = self._extracted.get(key)
+        cached = reference() if reference is not None else None
+        if cached is not None:
+            self._extracted.move_to_end(key)
+            return cached
+        body = _ExtractedText(await _extract_to_markdown(raw, content_type, final_url, cap))
+        self._extracted[key] = weakref.ref(body)
+        self._extracted.move_to_end(key)
+        while len(self._extracted) > 8:
+            self._extracted.popitem(last=False)
         return body
 
     async def browse(self, url: str, max_chars: int | None = None) -> str:
@@ -980,7 +1007,9 @@ async def _extract_to_markdown(raw: bytes, content_type: str, url: str, cap: int
     if "text/plain" in content_type or "application/json" in content_type:
         body = text
     elif "text/html" in content_type or "<html" in text[:1024].lower() or "application/xhtml" in content_type:
-        body = _html_to_markdown(text, url)
+        # Large documents can take seconds to convert. Keep model discovery,
+        # cancellation, and other router requests responsive during that work.
+        body = await asyncio.to_thread(_html_to_markdown, text, url)
     else:
         body = text
 

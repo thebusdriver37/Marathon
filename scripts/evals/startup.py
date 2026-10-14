@@ -138,9 +138,11 @@ def main() -> int:
             terminal.wait(reply, args.timeout)
             completed = time.monotonic_ns()
             terminal.wait(
+                # Incremental terminal rendering can reuse the existing input
+                # prompt. Wait for Ready after this unique reply before sending
+                # Ctrl-C, so cleanup cannot race the frontend's turn completion.
                 lambda: expected in terminal.clean()
-                and terminal.clean().rfind("Ask Marathon to do anything")
-                > terminal.clean().rfind(expected),
+                and terminal.text.rfind("| Ready |") > terminal.text.rfind("| Working |"),
                 args.timeout,
             )
             row = dict(repeat=repeat, passed=True, ready_seconds=round((ready - started) / 1e9, 3),

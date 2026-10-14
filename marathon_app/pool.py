@@ -22,7 +22,7 @@ def _output(args: list[str]) -> str:
                           timeout=5).stdout
 
 
-def _worker_gpu_blockers(backend: Backend) -> dict[str, str]:
+def _worker_gpu_blockers(backend: Backend, *, worker_processes: dict | None = None) -> dict[str, str]:
     """Check physical devices, including jobs outside Marathon's lease system.
 
     Broker configuration is the source of GPU placement. Only PIDs in the
@@ -87,6 +87,16 @@ def _worker_gpu_blockers(backend: Backend) -> dict[str, str]:
                 if free + reusable < backend.pool_min_free_vram_mib:
                     blocked[model_id] = f"GPU {gpu} has insufficient available VRAM"
                     break
+            if model_id not in blocked and worker_processes is not None and own_pids:
+                # PID plus start time identifies this exact worker lifetime.
+                # Never adopt retained GPU state after a container restart.
+                try:
+                    worker_processes[model_id] = [
+                        [pid, Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]]
+                        for pid in sorted(own_pids)
+                    ]
+                except (OSError, IndexError):
+                    pass  # Missing identity disables the optional cache handoff.
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             blocked[model_id] = "cannot verify worker GPU placement or ownership"
     return blocked
@@ -114,7 +124,8 @@ def acquire_pool_worker(
 ) -> tuple[TextIO, str]:
     pool_dir = runtime_dir / "backend-pools" / backend.id
     pool_dir.mkdir(parents=True, exist_ok=True)
-    blocked = _worker_gpu_blockers(backend)
+    worker_processes: dict = {}
+    blocked = _worker_gpu_blockers(backend, worker_processes=worker_processes)
     for model_id in backend.pool_models:
         if model_id in blocked:
             continue
@@ -130,7 +141,8 @@ def acquire_pool_worker(
             handle.seek(0)
             handle.truncate()
             json.dump({"pid": os.getpid(), "instance": instance, "model": model_id,
-                       "started_at": int(time.time())}, handle)
+                       "started_at": int(time.time()),
+                       "worker_processes": worker_processes.get(model_id, [])}, handle)
             handle.flush()
         except BaseException:
             handle.close()
@@ -141,3 +153,41 @@ def acquire_pool_worker(
         "or their GPUs are unavailable. "
         + "; ".join(f"{worker}: {reason}" for worker, reason in blocked.items())
     )
+
+
+def take_retained_slot(handle: TextIO) -> dict | None:
+    """Consume content-free cache metadata while holding the worker's lease."""
+    path = Path(handle.name + ".slot.json")
+    try:
+        if path.stat().st_size > 4096:
+            path.unlink()
+            return None
+        handle.seek(0)
+        lease = json.load(handle)
+        contents = path.read_text()
+        path.unlink()
+        hint = json.loads(contents)
+        if (hint.get("schema") == 1 and lease.get("worker_processes")
+                and hint.get("worker_processes") == lease["worker_processes"]):
+            return hint
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def retain_slot(handle: TextIO, hint: dict | None) -> None:
+    """Publish a clean cache handoff, never prompt text or conversation IDs."""
+    path = Path(handle.name + ".slot.json")
+    path.unlink(missing_ok=True)
+    if hint is None:
+        return
+    handle.seek(0)
+    lease = json.load(handle)
+    if not isinstance(lease, dict) or not lease.get("worker_processes"):
+        return
+    payload = {**hint, "schema": 1, "worker_processes": lease["worker_processes"]}
+    # A single consumer holds the same lease throughout this write. A partial
+    # file after a crash is rejected by take_retained_slot, then removed.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump(payload, stream)

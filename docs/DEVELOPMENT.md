@@ -266,6 +266,80 @@ The baseline router was byte-identical to commit `e0d7f907`; hashes and comparis
 results are in `/tmp/marathon-perf-pass2-20261014`, and live workflow evidence is in
 `/tmp/marathon-pass2-smoke-complete-20261014`.
 
+### Retained worker state and web responsiveness, October 14
+
+Three additional changes were measured against `5ca7f79`, including the preceding
+warmup optimization. Medians from live tests on AiGuy:
+
+| Change and measured interaction | Before | After | Time saved |
+| --- | ---: | ---: | ---: |
+| Retain validated GPU prefix across clean relaunches: first prompt to reply | 9.263 s | 3.934 s | 5.329 s (57.5%) |
+| Convert HTML outside the router event loop: model-picker HTTP response during conversion | 3.177 s | 0.015 s | 3.162 s (99.5%) |
+| Reuse extraction for identical freshly downloaded bytes: repeat page fetch | 3.216 s | 0.050 s | 3.166 s (98.5%) |
+
+The relaunch comparison used three terminal launches per revision with exact,
+unique real-model reply checks on the Qwen3.8 27B IQ4_XS worker. Optimized launches
+followed an initial priming launch; the optimization requires a compatible slot
+left by a clean shutdown on the same worker process. Fresh isolated frontend
+homes per launch still changed part of the input prefix. Cached tokens rose from
+6,519 to 11,166, with the complete prompt still sent for token-exact validation.
+An earlier four-launch verification also passed, with a 4.076 s median reply.
+These are warm relaunch results, not GPU-cold startup or faster decoding.
+
+The handoff stores only private, bounded metadata next to the worker lease.
+It validates worker PID/start time, backend identity, profile, slot, scaffold,
+and live slot presence. A hashed conversation key preserves checkpoint preference.
+Only the last successfully completed profile is eligible; interrupted mutations,
+restarted workers, invalid metadata, and experimental delta-only requests fall
+back to existing behavior. It allocates no additional GPU cache and records no
+prompt text. Optional adoption runs after frontend readiness. The startup evaluator
+now waits for the terminal's Ready state before Ctrl-C rather than assuming the
+input prompt always redraws. A premature-interrupt trial correctly missed the
+handoff after forced shutdown; it is retained separately in the evidence.
+
+Web tests fetched the live 3,095,308-byte Wikipedia List of Unicode characters page
+through the actual managed tool handler and probed the real `/v1/models` endpoint
+from a separate process. Each fetch used a different turn scope. The second row
+compares three baseline samples with four offload-only samples. The third isolates
+the additional reuse improvement: three warm repetitions with offload alone versus
+three with both changes. The original baseline warm-fetch median was 3.222 s.
+All formatted extracted-text SHA-256 hashes matched across configurations.
+
+Every repeated fetch still downloads the current response and validates redirects,
+status, and byte limits. Reuse requires identical response bytes, content type,
+final URL, and output cap. Eight weak references reuse only results already owned
+by existing tool history; the table retains neither HTML nor additional result
+bodies. Changed content invalidates even when the server sends an unchanged ETag.
+The converter and all model, reasoning, sampling, context, and cache-capacity
+settings remain unchanged. The two web measurements describe different waits and
+must not be added together as a single end-to-end improvement.
+
+The Python suite ran 533 tests: 519 passed and 14 skipped. New coverage checks
+worker restarts/PID reuse, incompatible slots, metadata failures, profile ownership,
+fresh downloads, content invalidation, weak-reference lifetime, bounded metadata,
+HTTP errors, and event-loop responsiveness. Five live workflows passed: recall
+and cache reuse, file edits with shell tests, background cancellation and recovery,
+resume with fact recall, and headless overrides with tools. No functional or
+accuracy regressions were observed in these checks.
+
+Reproduce with the same worker/model configuration and a stable public page:
+
+```bash
+.marathon/venv/bin/python scripts/evals/startup.py --run-gpu --repeats 4
+.marathon/venv/bin/python scripts/evals/web_responsiveness.py --run-network --repeats 4
+.marathon/venv/bin/python scripts/evals/e2e_smoke.py --run-gpu
+.marathon/venv/bin/python -m unittest discover -s tests -v
+```
+
+For relaunch comparisons, prime a clean handoff before collecting warm samples.
+The web evaluator's optional `--web-source` loads a baseline or offload-only module
+in an isolated child. Its authenticated evaluation route exists only in that child.
+Baseline source files were byte-identical to `5ca7f79`. Local evidence is under
+`/tmp/marathon-pass3-relaunch-{before-final,complete,verified}`,
+`/tmp/marathon-pass3-web-{before-v2,offload-final,after}`, and
+`/tmp/marathon-pass3-smoke`. Source hashes, raw page identity, and test logs are in
+`/tmp/marathon-perf-pass3-20261014`; these are not portable fixtures.
+
 Keep first-run setup in the README and advanced configuration in [advanced usage](ADVANCED_USAGE.md).
 Document actual tested support separately from expected hardware compatibility.
 Preserve existing user selections and never change power caps or stop unrelated inference services during setup.
