@@ -1,6 +1,7 @@
 """Read model identity from the broker's launch configuration, never its alias."""
 
 from pathlib import Path
+import re
 import shlex
 
 import yaml
@@ -45,7 +46,14 @@ def pool_identity(backend: Backend) -> tuple[str, str] | None:
         if len(identities) != 1:
             return "Local pool (mixed identities)", "Pool workers do not share one model configuration."
         target, draft, _ = identities.pop()
-        name = Path(target).stem.replace("-", " ") + " (Local)"
+        # Keep deployment details in the description, not the picker/footer.
+        stem = Path(target).stem
+        if re.search(r"qwen3[.]8[-_ ]27b(?:[-_ ]|$)", stem, re.IGNORECASE):
+            name = "Qwen3.8 27B"
+        elif re.search(r"qwen3[.]8[-_ ]flash[-_ ]next(?:[-_ ]|$)", stem, re.IGNORECASE):
+            name = "Qwen3.8 Flash-Next"
+        else:
+            name = stem.replace("-", " ") + " (Local)"
         description = f"Configured target: {Path(target).name}."
         if draft:
             description += f" Drafter: {Path(draft).name}."

@@ -31,10 +31,16 @@ class ModelIdentityTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_identity_changes_with_weights_and_keeps_drafter_in_description(self):
-        for name in ("Swift-Merge-IQ4_XS.gguf", "Original-Q8_0.gguf"):
+        for name, expected in (
+            ("Swift-Merge-IQ4_XS.gguf", "Swift Merge IQ4_XS (Local)"),
+            ("Original-Q8_0.gguf", "Original Q8_0 (Local)"),
+            ("Swift-Qwen3.8-27B-Uncensored-Merge-IQ4_XS.gguf", "Qwen3.8 27B"),
+            ("Qwen3.8-Flash-Next-UD-IQ4_XS.gguf", "Qwen3.8 Flash-Next"),
+        ):
             self.configure(name)
             label, description = pool_identity(self.backend)
-            self.assertEqual(label, Path(name).stem.replace("-", " ") + " (Local)")
+            self.assertEqual(label, expected)
+            self.assertIn(name, description)
             self.assertIn("Marathon-R32.gguf", description)
 
     def test_invalid_and_mixed_config_do_not_claim_old_identity(self):
