@@ -2671,10 +2671,9 @@ class RouterState:
     def _compaction_tool_scaffold(
         self, profile: ModelProfile, request: dict[str, Any]
     ) -> ResponseSnapshot | None:
-        """Reuse only this conversation's live tool descriptions, never its tools."""
+        """Preserve this conversation's tool definitions while disabling tool calls."""
         if (
             not _env_bool("MARATHON_COMPACTION_PREFIX_CACHE", True)
-            or not profile.supports_slots
             or _codex_request_kind(request) != "compaction"
             or request.get("tools")
             or request.get("previous_response_id")
@@ -2682,7 +2681,14 @@ class RouterState:
             or not request.get("prompt_cache_key")
         ):
             return None
-        source = self.lineage.get(self.live_slot_by_model.get(profile.slug))
+        # External engines (including Spark TensorFold) also prefix-match the
+        # rendered prompt. Dropping tool definitions invalidates that prefix
+        # even though the engine does not expose llama.cpp's slot API.
+        sources = (
+            self.live_slot_by_model if profile.supports_slots
+            else self.last_response_by_model
+        )
+        source = self.lineage.get(sources.get(profile.slug))
         if (
             source is None
             or source.profile_slug != profile.slug

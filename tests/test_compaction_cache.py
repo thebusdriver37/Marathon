@@ -1,6 +1,7 @@
 """Compaction must reuse only its own prompt and must never run tools."""
 import asyncio
 import copy
+import itertools
 import json
 import sys
 import threading
@@ -45,11 +46,12 @@ def request():
 
 class CompactionCacheTests(unittest.TestCase):
     def test_scaffold_selection_requires_same_conversation_model_and_instructions(self):
-        for change in ({}, {"prompt_cache_key": "different"}, {"prompt_cache_key": ""},
+        for supports_slots, change in itertools.product((True, False), (
+                       {}, {"prompt_cache_key": "different"}, {"prompt_cache_key": ""},
                        {"instructions": "new policy"}, {"tools": TOOLS},
                        {"client_metadata": {}}, {"previous_response_id": "previous"},
-                       {"generate": False}):
-            with self.subTest(change=change), mock.patch.dict(
+                       {"generate": False})):
+            with self.subTest(supports_slots=supports_slots, change=change), mock.patch.dict(
                 router.os.environ, {"MARATHON_COMPACTION_PREFIX_CACHE": "1"}
             ):
                 state = object.__new__(router.RouterState)
@@ -57,9 +59,11 @@ class CompactionCacheTests(unittest.TestCase):
                 source.tool_scaffold["instructions"] = "must not replace the current policy"
                 state.lineage = {"previous": source}
                 state.live_slot_by_model = {"test": "previous"}
+                state.last_response_by_model = {"test": "previous"}
                 body = request() | copy.deepcopy(change)
                 before = copy.deepcopy(body)
-                selected = state._compaction_tool_scaffold(profile(), body)
+                selected = state._compaction_tool_scaffold(
+                    replace(profile(), supports_slots=supports_slots), body)
                 if change:
                     self.assertIsNone(selected)
                     self.assertEqual(body, before)
@@ -85,6 +89,7 @@ class CompactionCacheTests(unittest.TestCase):
                 state = object.__new__(router.RouterState)
                 state.lineage = {"previous": source} if source else {}
                 state.live_slot_by_model = {"test": "previous"}
+                state.last_response_by_model = {}
                 body = request()
                 before = copy.deepcopy(body)
                 self.assertIsNone(state._compaction_tool_scaffold(
@@ -92,12 +97,16 @@ class CompactionCacheTests(unittest.TestCase):
                 self.assertEqual(body, before)
 
     def test_compaction_uses_live_slot_but_does_not_trust_a_lost_slot(self):
-        for slot_valid, switched in ((True, False), (False, False), (True, True)):
-            with self.subTest(slot_valid=slot_valid, switched=switched), mock.patch.dict(
+        for supports_slots, slot_valid, switched in (
+            (True, True, False), (True, False, False), (True, True, True),
+            (False, False, False),
+        ):
+            with self.subTest(supports_slots=supports_slots, slot_valid=slot_valid, switched=switched), mock.patch.dict(
                 router.os.environ, {"MARATHON_COMPACTION_PREFIX_CACHE": "1"}
             ):
                 state = object.__new__(router.RouterState)
-                state.ensure_model_async = mock.AsyncMock(return_value=profile())
+                state.ensure_model_async = mock.AsyncMock(
+                    return_value=replace(profile(), supports_slots=supports_slots))
                 state.lineage_lock = asyncio.Lock()
                 state.lineage = {"previous": snapshot()}
                 state.last_response_by_model = {"test": "previous"}
@@ -131,7 +140,7 @@ class CompactionCacheTests(unittest.TestCase):
                 self.assertEqual(forwarded["tools"], TOOLS)
                 self.assertEqual(forwarded["tool_choice"], "none")
                 self.assertEqual(forwarded["input"], request()["input"])
-                if slot_valid and not switched:
+                if not supports_slots or (slot_valid and not switched):
                     state.prepare_starter_cache.assert_not_awaited()
                     state.prepare_conversation_checkpoint.assert_not_awaited()
                 else:
