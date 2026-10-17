@@ -30,6 +30,10 @@ def main() -> int:
     parser.add_argument("--typing-delay", type=float, default=0.0)
     parser.add_argument("--catalog-requests", type=int, default=0,
                         help="measure live model-picker HTTP refreshes after readiness")
+    parser.add_argument("--no-live-handoff", action="store_true",
+                        help="exercise fresh conversations using disk starter caches only")
+    parser.add_argument("--router-source", type=Path,
+                        help="alternate router source for an isolated baseline comparison")
     args = parser.parse_args()
     if not args.run_gpu:
         parser.error("live inference is opt-in; pass --run-gpu")
@@ -59,6 +63,29 @@ def main() -> int:
             MARATHON_AUTO_INSTALL_CLI="0",
         )
         environment.pop("PYTHONPATH", None)
+        if args.no_live_handoff or args.router_source:
+            router_source = (args.router_source.resolve() if args.router_source else
+                             launcher.parent.parent / "scripts/routers/codex_local_router.py")
+            wrapper = trial / "router-python"
+            wrapper.write_text(f"#!{sys.executable}\n" + f'''
+import sys
+from pathlib import Path
+sys.argv = sys.argv[1:]
+__file__ = sys.argv[0]
+sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parents[2]))
+__name__ = "evaluation_router"
+sys.modules[__name__] = sys.modules["__main__"]
+exec(compile(Path({str(router_source)!r}).read_text(), __file__, "exec"), globals())
+if {args.no_live_handoff!r}:
+    async def no_handoff(self, *args):
+        self.retained_slot_hint = None
+        return False
+    RouterState._adopt_retained_slot = no_handoff
+main()
+''')
+            wrapper.chmod(0o700)
+            environment["MARATHON_ROUTER_PYTHON"] = str(wrapper)
         # Use normal worker selection and session preparation, including an
         # automatic instance relaunch when other Marathon sessions are open.
         started = time.monotonic_ns()
@@ -132,10 +159,10 @@ def main() -> int:
                                 # Other sessions may share this home. Only our
                                 # deliberately unique reply completes this check.
                                 if payload.get("last_agent_message", "").strip() == expected:
-                                    return True
+                                    return payload
                 return False
 
-            terminal.wait(reply, args.timeout)
+            completed_turn = terminal.wait(reply, args.timeout)
             completed = time.monotonic_ns()
             terminal.wait(
                 # Incremental terminal rendering can reuse the existing input
@@ -150,6 +177,16 @@ def main() -> int:
                        prompt_reply_seconds=round((completed - prompted) / 1e9, 3),
                        typing_delay_seconds=args.typing_delay,
                        milestones=milestones)
+            first_token_ms = completed_turn.get("time_to_first_token_ms")
+            if isinstance(first_token_ms, (int, float)):
+                row["first_activity_seconds"] = first_token_ms / 1000
+            trace = next((event["data"] for event in reversed(events())
+                          if event.get("event") == "router.response.completed"
+                          and event.get("data", {}).get("backend_timings")), None)
+            if trace:
+                row["backend_timings"] = trace["backend_timings"]
+                row["slot_prepare_mode"] = trace.get("slot", {}).get("prepare_mode")
+            row["live_handoff_disabled"] = args.no_live_handoff
             if catalog_ms:
                 row["catalog_ms"] = catalog_ms
                 row["catalog_median_ms"] = statistics.median(catalog_ms)

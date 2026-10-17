@@ -568,6 +568,38 @@ def _starter_scaffold_chat_body(
     return body
 
 
+def _starter_context_chat_body(
+    request: dict[str, Any],
+    user_content: str = STARTER_CACHE_SENTINEL,
+) -> dict[str, Any]:
+    """Include leading normalized instructions, stopping before user/history data.
+
+    Native startup sends the base instructions as a developer message. They
+    remain chronological user-role envelopes after normalization, rather than
+    living in the top-level system scaffold. Cache their exact existing form.
+    Keep this separate from the conversation scaffold fingerprint: followup
+    deltas omit these messages and must still match their parent's scaffold.
+    """
+    initial = []
+    for item in request.get("input") or []:
+        if not isinstance(item, dict) or item.get("role") != "user":
+            break
+        content = item.get("content")
+        if (not isinstance(content, list) or len(content) != 1
+                or not isinstance(content[0], dict)
+                or content[0].get("type") != "input_text"):
+            break
+        text = content[0].get("text")
+        if (not isinstance(text, str) or not text.endswith("\n</marathon_context>")
+                or not text.startswith(('<marathon_context role="developer">\n',
+                                        '<marathon_context role="system">\n'))):
+            break
+        initial.append(item)
+    if not initial:
+        return _starter_scaffold_chat_body(request, user_content)
+    return _conversation_checkpoint_chat_body({**request, "input": initial}, user_content)
+
+
 def _conversation_checkpoint_chat_body(
     request: dict[str, Any],
     user_content: str = STARTER_CACHE_SENTINEL,
@@ -3870,7 +3902,7 @@ class RouterState:
         restore_only: bool = False,
         expandable_instructions: bool = False,
     ) -> dict[str, Any]:
-        """Restore or create the persistent system-and-tools prompt prefix."""
+        """Restore or create the persistent tools and initial-instructions prefix."""
 
         if not self.starter_cache_enabled or not profile.supports_slots:
             return {
@@ -3896,8 +3928,8 @@ class RouterState:
                 scaffold_requests[1]
             )
         else:
-            scaffold_body = _starter_scaffold_chat_body(request)
-            alternate_scaffold_body = _starter_scaffold_chat_body(
+            scaffold_body = _starter_context_chat_body(request)
+            alternate_scaffold_body = _starter_context_chat_body(
                 request,
                 STARTER_CACHE_ALTERNATE_SENTINEL,
             )
@@ -3941,7 +3973,16 @@ class RouterState:
             }
 
         try:
-            erased = await self.erase_slot(profile)
+            # Upgrade an existing tools-only seed incrementally. Recomputing
+            # those tokens would make the first build of the longer seed slower.
+            seed_result = None
+            if not expandable_instructions and scaffold_body != _starter_scaffold_chat_body(request):
+                seed_result = await self.prepare_starter_cache(
+                    profile, {**request, "input": []}, restore_only=True,
+                    expandable_instructions=expandable_instructions,
+                )
+            erased = (None if seed_result and seed_result.get("status") == "restored"
+                      else await self.erase_slot(profile))
             rendered_prompts: list[str] = []
             for body in (scaffold_body, alternate_scaffold_body):
                 rendered = await self._request_json(
@@ -4002,6 +4043,7 @@ class RouterState:
                 "snapshot_filename": filename,
                 "restore_error": restore_error,
                 "erase_result": erased,
+                "seed_result": seed_result,
                 "prefill_timings": prefilled.get("timings"),
                 "save_result": saved,
                 "prune_result": pruned,

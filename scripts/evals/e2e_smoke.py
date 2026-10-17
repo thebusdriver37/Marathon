@@ -275,12 +275,23 @@ def main():
         assert match, terminal.clean()[-1500:]
         command = match.group(1).strip()
         assert shlex.split(command) == [str(LAUNCHER), "resume", thread_id], command
+        previous_runs = set((output / "runs").rglob("*.jsonl"))
         resumed = Terminal(["bash", "-lc", command], project, environment, output / "resume.terminal.txt")
         terminals.append(resumed)
         # Long conversations render only the visible tail. Readiness must not
         # depend on the original phrase still fitting in the terminal viewport;
         # the recall turn below verifies that the resumed model retained it.
-        resumed.wait(lambda: "Ready" in resumed.clean())
+        # The initial header briefly says Ready before resume loads history and
+        # connects. Typing then can be discarded by the history redraw. Require
+        # the completed connection probe and the subsequent Starting -> Ready.
+        def resume_ready():
+            starting = resumed.text.rfind("| Starting |")
+            return (starting >= 0 and resumed.text.rfind("| Ready |") > starting
+                    and any(event.get("event") == "router.response.completed"
+                            for path in (output / "runs").rglob("*.jsonl") if path not in previous_runs
+                            for event in read_events(path)))
+
+        resumed.wait(resume_ready)
         prompt = "Reply only with the original remembered phrase. Do not use tools."
         completed_before_resume = len(completed(session))
         resumed.send(prompt)

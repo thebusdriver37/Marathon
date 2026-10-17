@@ -340,6 +340,79 @@ Baseline source files were byte-identical to `5ca7f79`. Local evidence is under
 `/tmp/marathon-pass3-smoke`. Source hashes, raw page identity, and test logs are in
 `/tmp/marathon-perf-pass3-20261014`; these are not portable fixtures.
 
+### Fresh-conversation instruction prefix, October 15
+
+Native startup sends Marathon's base instructions as an initial developer
+message. Normalization preserves it as a chronological instruction envelope in
+the input. The starter cache previously saved only top-level instructions and
+tools, leaving this roughly 4,646-token common input prefix uncached even after
+background warmup. A real fresh conversation spent 8.630 s processing 7,063 new
+tokens before its first model activity at 9.438 s.
+
+Starter snapshots now include the exact leading normalized instruction envelopes,
+stopping at the first ordinary user/history item. Their content participates in
+the snapshot identity. The conversation scaffold identity remains unchanged, so
+followup deltas that omit the initial instructions still match their parent.
+On a new seed's first build, an existing tools-only snapshot is reused before
+prefilling the additional instructions. Full inference prompts, model settings,
+and token-exact backend prefix validation are unchanged.
+
+The controlled terminal comparison used three fresh launches per revision on the
+same normally leased Qwen3.8 27B IQ4_XS worker, a loaded model, zero intentional
+typing delay, and **live cache handoff disabled**. Every launch restored its
+persistent starter snapshot rather than relying on a previous conversation's GPU
+state. All six unique exact-answer checks passed. Medians:
+
+| Measurement | Before (`d2dc384`) | After | Reduction |
+| --- | ---: | ---: | ---: |
+| Terminal time to first model token | 9.372 s | 4.493 s | 4.879 s (52.1%) |
+| Router request to first model activity | 8.749 s | 3.949 s | 4.800 s (54.9%) |
+| Prompt submission through complete reply | 9.733 s | 4.856 s | 4.877 s (50.1%) |
+| Tokens reused from the starter snapshot | 6,519 | 11,165 | 4,646 additional cached tokens |
+
+The optimized terminal first-token samples were 4.507, 4.459, and 4.493 s. An
+earlier three-launch candidate check measured 4.431-4.686 s. These are small-sample
+local results, not a guarantee for every prompt or an unloaded model.
+
+**First construction is separate from reuse.** The reported 13.024 s request
+included 8.070 s waiting for the new cache to finish building; subsequent prompt
+processing was already down to 3.221 s. The controlled candidate's first build
+also cost 11.424 s to first token. These builds are retained in the evidence and
+excluded from the restored-cache medians above. The user explicitly accepted a
+slower first cache build. New tool/instruction/backend identities or cache eviction
+can require another build. The larger tested seed uses about 1.0 GiB on disk,
+roughly 315 MiB more than the tools-only seed, within the existing cache limits;
+GPU allocation, context size, and cache budget settings are unchanged.
+
+Seven focused tests cover exact instruction preservation, exclusion of later
+history, identity invalidation, matching followup scaffolds, incremental seed
+creation, restart restore, and non-mutating restore-only misses. The full suite
+ran 540 tests: 526 passed and 14 skipped.
+Five live workflows also passed: conversation recall and cache reuse, file edits
+with shell tests, background cancellation and recovery, resume with fact recall,
+and headless overrides with tools. The initial smoke attempt typed into the
+transient Ready screen before resume finished loading history, so no recall
+request reached the router. The evaluator now waits for the completed connection
+probe and the final Starting-to-Ready transition; the rerun passed all five checks.
+Evidence is in `/tmp/marathon-fresh-smoke-verified-20261015`.
+
+Reproduce the restored-cache comparison with one free worker:
+
+```bash
+.marathon/venv/bin/python scripts/evals/startup.py \
+  --run-gpu --no-live-handoff --repeats 4
+```
+
+Record the first build separately; use three subsequent launches that report a
+restored starter cache for the warm comparison. `--router-source` can load a
+baseline router in an isolated evaluator child. The evaluator records native
+first-token timing and backend cached/prefilled token counts as well as reply
+time. Local evidence is in `/tmp/marathon-fresh-baseline-warm-20261015`,
+`/tmp/marathon-fresh-verified-20261015`, and
+`/tmp/marathon-fresh-candidate-20261015`; baseline source and regression logs are
+in `/tmp/marathon-fresh-20261015`. No existing user sessions were stopped or
+reassigned during these tests.
+
 Keep first-run setup in the README and advanced configuration in [advanced usage](ADVANCED_USAGE.md).
 Document actual tested support separately from expected hardware compatibility.
 Preserve existing user selections and never change power caps or stop unrelated inference services during setup.
