@@ -2544,6 +2544,9 @@ class RouterState:
             ),
         )
         self.web_tool_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+        self.web_tool_locks: dict[tuple[str, str], list[Any]] = {}
+        self.web_fetch_concurrency = max(1, min(8, _env_int("MARATHON_WEB_FETCH_CONCURRENCY", 3)))
+        self.web_fetch_semaphore = asyncio.Semaphore(self.web_fetch_concurrency)
         self.web_turn_progress_max_entries = max(
             1,
             _env_int(
@@ -5235,6 +5238,65 @@ class RouterState:
         fallback_index: int,
         scope: str,
     ) -> dict[str, Any]:
+        # Concurrent duplicate calls (including reconnects) share one result.
+        # Cancellation releases ownership so a waiting caller can retry. Keep
+        # a lock only while it has users, independently of bounded cache eviction.
+        locks = getattr(self, "web_tool_locks", None)
+        if locks is None:
+            locks = self.web_tool_locks = {}
+        key = (scope, _managed_call_signature(item))
+        entry = locks.setdefault(key, [asyncio.Lock(), 0])
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                return await self._execute_managed_call_cache_locked(item, fallback_index, scope)
+        finally:
+            entry[1] -= 1
+            if not entry[1]:
+                del locks[key]
+
+    async def _execute_managed_calls(
+        self, calls: list[dict[str, Any]], scope: str,
+    ) -> list[dict[str, Any]]:
+        """Overlap static fetches; searches and browser calls remain barriers."""
+        semaphore = getattr(self, "web_fetch_semaphore", None)
+        if semaphore is None:
+            limit = max(1, min(8, _env_int("MARATHON_WEB_FETCH_CONCURRENCY", 3)))
+            semaphore = self.web_fetch_semaphore = asyncio.Semaphore(limit)
+
+        async def fetch(item: dict[str, Any], index: int) -> dict[str, Any]:
+            async with semaphore:
+                return await self._execute_managed_call_cached(item, index, scope)
+
+        outputs = []
+        index = 0
+        while index < len(calls):
+            if not is_web_fetch_function_call(calls[index]):
+                outputs.append(await self._execute_managed_call_cached(calls[index], index, scope))
+                index += 1
+                continue
+            tasks = []
+            while index < len(calls) and is_web_fetch_function_call(calls[index]):
+                tasks.append(asyncio.create_task(fetch(calls[index], index)))
+                index += 1
+            try:
+                # gather preserves call order, regardless of completion order.
+                outputs.extend(await asyncio.gather(*tasks))
+            except BaseException:
+                # gather alone leaves siblings running when one fails. Drain
+                # all children before propagating failure or client cancellation.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+        return outputs
+
+    async def _execute_managed_call_cache_locked(
+        self,
+        item: dict[str, Any],
+        fallback_index: int,
+        scope: str,
+    ) -> dict[str, Any]:
         """Execute each exact web action once per user turn, even after reconnect."""
 
         signature = _managed_call_signature(item)
@@ -5755,11 +5817,7 @@ class RouterState:
                 persist_progress()
                 continue
 
-            tool_outputs = []
-            for idx, call in enumerate(pending_calls):
-                tool_outputs.append(
-                    await self._execute_managed_call_cached(call, idx, web_scope)
-                )
+            tool_outputs = await self._execute_managed_calls(pending_calls, web_scope)
             cumulative_items.extend(tool_outputs)
             seen_signatures.update(pending_signatures)
             request = copy.deepcopy(request)

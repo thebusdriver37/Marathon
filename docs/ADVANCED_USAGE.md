@@ -429,6 +429,15 @@ Set `MARATHON_SEARXNG_URL` when the service runs somewhere else.
 Set `MARATHON_WEB_SEARCH_MODE=disabled`, `cached`, or `live` to control Codex's web-search mode.
 Set `MARATHON_WEB_SEARCH_RETRIES` from `0` through `3` to control retries for transient SearXNG transport and server failures.
 Set `MARATHON_WEB_SEARCH_MAX_ITERS` to limit managed research rounds per response (default 12); searches and fetches share this budget.
+
+Independent `web_fetch` calls in the same model response run up to three at a time,
+with results returned in their original call order. Search and browser calls remain
+ordered barriers, preserving search pacing and browser state. Exact duplicate calls
+within a user turn share their result, including after reconnects; a new turn still
+downloads fresh content. Cancellation stops outstanding downloads and retains completed
+results for replay. Set `MARATHON_WEB_FETCH_CONCURRENCY=1` for serial execution or
+choose a limit from 1 through 8. This takes effect on the next router launch.
+
 Exact repeated actions are still guarded against loops.
 When the web budget is exhausted, final output is buffered and checked for tool-only markup.
 One bounded finalization retry is allowed; persistent failure is reported explicitly instead of accepting tool markup as an answer.
