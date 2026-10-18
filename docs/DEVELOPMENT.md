@@ -413,6 +413,74 @@ time. Local evidence is in `/tmp/marathon-fresh-baseline-warm-20261015`,
 in `/tmp/marathon-fresh-20261015`. No existing user sessions were stopped or
 reassigned during these tests.
 
+### Branch cache, streaming, and cached search, October 17
+
+Full-history branches without a saved parent snapshot now retain a verified live
+slot from the same conversation and instruction/tool scaffold. The backend still
+receives the complete branch history and keeps only its token-exact shared prefix.
+Disk checkpoints remain preferred; missing/unknown live state, a failed restore,
+changed scaffolds, different conversation keys, and delta-only requests keep their
+existing fallback paths. New router processes pick up the change.
+
+Text validation skips Markdown parsing when there is no `<` character. Both tool
+markers require that character, so protocol detection, split-marker buffering,
+quoted examples, and executable-tool validation are preserved. Text containing
+`<` still uses the existing parser; this is an ordinary-prose optimization.
+
+Cached searches can now read a committed, unexpired result without taking the
+network-request lock. The optimistic SQLite read runs off the event loop with
+zero lock timeout. Missing/busy databases use the existing locked path, which
+rechecks the cache and preserves request coalescing, pacing, and engine cooldowns.
+Expiry is checked again after the worker-thread read completes.
+
+Synthetic measurements on AiGuy, Python 3.12, and the normally leased Qwen3.8 27B
+IQ4_XS worker on GPU 1 (RTX 3090 Ti):
+
+| Check | Before | After |
+| --- | ---: | ---: |
+| Branch first text, 8,288-token request, median of three per revision | 8.808 s | 0.210 s |
+| Branch tokens prefilled / reused | 8,288 / 0 | 23 / 8,265 |
+| Process a 32 KiB prose stream in four-character chunks, median of three | 5.115 s | 0.053 s |
+| Cached search while an unrelated fetch holds the lock | Test queue timeout at 0.201 s | Hit in 0.00027 s |
+
+The GPU test disabled disk checkpoints, starter caching, and retained-slot
+handoff only in its isolated routers. It compared branches against equivalent
+full-history requests: forwarded-request and answer hashes matched in every
+pair, and all 30 seed, preparation, and measured replies were correct. This
+measures the missing-checkpoint condition, not its frequency in normal usage.
+The prose replay preserved every output/event hash and measures router CPU work,
+not model token-generation speed. The search used a mock blocked fetch and a
+0.2-second test timeout; production's queue timeout remains 45 seconds.
+
+A scratch Rust shared library performed the same marker-presence check through
+an optimized native `memchr`, including UTF-8 conversion and Python call overhead.
+The same 32 KiB replay took 64.5 ms, versus 53.2 ms with the Python fix. Profiling
+the fixed replay attributed about 3 ms to all 8,196 marker checks; event handling
+and JSON serialization accounted for most remaining work. This small experiment
+does not justify a native dependency or establish the speed of a complete router
+rewrite. The frontend already uses Rust and local inference runs in llama.cpp;
+neither is replaced by rewriting the Python coordinator.
+
+Run the focused regression checks without inference:
+
+```bash
+PYTHONPATH=tests .marathon/venv/bin/python -m unittest \
+  test_tool_contract test_warmup_cache test_search_coordinator -v
+```
+
+Those 37 tests passed. The full suite ran 555 tests: 541 passed and 14 optional
+checks skipped. The installed frontend's scripted HTTP research/edit integration
+also passed. Python compilation and tracked shell syntax checks passed.
+All five live terminal workflows passed with synthetic data and isolated homes:
+recall/cache reuse, file edits with tests, background cancellation and recovery,
+resume with recall, and headless overrides with shell tools. These smoke routers
+also disabled persistent cache access; existing saved conversations were not read.
+Local baseline sources, benchmark scripts, JSON measurements, and profiling data
+are in `/tmp/marathon-fixes-20261017`; these temporary evidence paths are not
+portable repository fixtures. The earlier blocked-search baseline is in
+`/tmp/marathon-self-check-8vuylqtg/report.json`. Existing private conversations
+were not used for any test.
+
 Keep first-run setup in the README and advanced configuration in [advanced usage](ADVANCED_USAGE.md).
 Document actual tested support separately from expected hardware compatibility.
 Preserve existing user selections and never change power caps or stop unrelated inference services during setup.

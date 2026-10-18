@@ -1232,6 +1232,10 @@ def _stalled_final_response_recovery_message(
 
 def _has_unquoted_tool_call(text: str) -> bool:
     """Recognize attempted calls without rejecting Markdown protocol examples."""
+    # Streaming calls this on each growing prefix. Ordinary prose cannot contain
+    # either marker, so avoid splitting and reparsing all its Markdown per chunk.
+    if "<" not in text:
+        return False
     fence = None
     for line in text.splitlines():
         stripped = line.lstrip()
@@ -6203,6 +6207,7 @@ class RouterState:
             conversation_checkpoint_result: dict[str, Any] | None = None
             slot_prepare_mode = "erase-root"
             prewarmed_slot_kind: str | None = None
+            live_slot_valid: bool | None = None
             if profile.supports_slots and profile.slug in self.live_slot_by_model:
                 prewarmed_slot_kind = self._consume_prewarmed_slot(
                     profile.slug,
@@ -6394,9 +6399,37 @@ class RouterState:
                         starter=False,
                     )
                 elif not parent_snapshot.snapshot_filename:
-                    slot_prepare_mode = "erase-parent-no-snapshot"
-                    erase_result = await self.erase_slot(profile)
-                    self._clear_live_slot(profile.slug)
+                    if (
+                        conversation_checkpoint_result.get("status") == "skipped"
+                        and not delta_only_restore
+                        and live_slot_valid is True
+                        and self._live_slot_scaffold_matches(
+                            profile.slug,
+                            scaffold_fingerprint,
+                            instructions_hash,
+                            tools_hash,
+                        )
+                        and _can_reuse_reconnect_root(
+                            profile.slug,
+                            prompt_cache_key,
+                            self.live_slot_by_model,
+                            self.live_prompt_cache_key_by_model,
+                            getattr(self, "starter_slot_models", set()),
+                        )
+                    ):
+                        # The full lineage is forwarded. As on reconnect, the
+                        # backend keeps only token-exact shared history and
+                        # discards the divergent suffix. A failed disk restore
+                        # cannot use this path: it may have changed the slot.
+                        slot_prepare_mode = "reuse-live-branch-prefix"
+                        restore_result = {
+                            "status": "skipped",
+                            "reason": "same conversation; backend prefix-matches full branch history",
+                        }
+                    else:
+                        slot_prepare_mode = "erase-parent-no-snapshot"
+                        erase_result = await self.erase_slot(profile)
+                        self._clear_live_slot(profile.slug)
                 else:
                     slot_prepare_mode = "restore-parent"
                     try:

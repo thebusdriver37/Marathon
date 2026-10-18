@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "routers"))
 from marathon_search_coordinator import SearchCoordinator, SearchUnavailable
@@ -138,6 +139,69 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         await c.request({"q": "a"}, self.fetch)
         await c.request({"q": "a"}, self.fetch)
         self.assertEqual(len(self.calls), 2)
+
+    async def test_cached_results_bypass_unrelated_inflight_fetch(self):
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                c = self.coordinator(wait_timeout=0.1)
+                params = {"q": f"cached-{empty}"}
+                async def fetch(_):
+                    return {"results": []} if empty else result()
+                expected = await c.request(params, fetch)
+                entered, release = asyncio.Event(), asyncio.Event()
+                async def slow(_):
+                    entered.set()
+                    await release.wait()
+                    return result()
+                pending = asyncio.create_task(c.request({"q": f"unrelated-{empty}"}, slow))
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    hit = await asyncio.wait_for(c.request(params, self.fetch), 2)
+                    self.assertEqual(hit, dict(expected, marathon_cache_hit=True))
+                    self.assertFalse(pending.done())
+                    self.assertEqual(self.calls, [])
+                finally:
+                    release.set()
+                    await pending
+
+    async def test_expired_hit_cannot_bypass_inflight_fetch(self):
+        c = self.coordinator(wait_timeout=0.1)
+        await c.request({"q": "expired"}, self.fetch)
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE cache SET expires=0")
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow(_):
+            entered.set()
+            await release.wait()
+            return result()
+        pending = asyncio.create_task(c.request({"q": "unrelated"}, slow))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            with self.assertRaisesRegex(SearchUnavailable, "queue"):
+                await c.request({"q": "expired"}, self.fetch)
+            self.assertEqual(len(self.calls), 1)
+        finally:
+            release.set()
+            await pending
+
+    async def test_cache_expiring_before_delivery_is_refetched(self):
+        c = self.coordinator()
+        with mock.patch.object(c, "_read_cached", return_value=(result("stale"), 0)):
+            self.assertEqual((await c.request({"q": "a"}, self.fetch))["results"], result()["results"])
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_optimistic_reader_does_not_create_database_or_wait_for_writer(self):
+        c = self.coordinator()
+        key = c._cache_key({"q": "a"})
+        self.assertIsNone(await asyncio.to_thread(c._read_cached, key))
+        self.assertFalse(self.path.exists())
+        await c.request({"q": "a"}, self.fetch)
+        with sqlite3.connect(self.path) as writer:
+            writer.execute("BEGIN EXCLUSIVE")
+            self.assertIsNone(await asyncio.wait_for(asyncio.to_thread(c._read_cached, key), 1))
+        hit = await c.request({"q": "a"}, self.fetch)
+        self.assertTrue(hit["marathon_cache_hit"])
+        self.assertEqual(len(self.calls), 1)
 
     async def test_transport_failure_and_malformed_result_release_lock(self):
         async def malformed(params):

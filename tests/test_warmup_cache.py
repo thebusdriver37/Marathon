@@ -120,6 +120,69 @@ class WarmupCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reuse-live", mode)
         state.erase_slot.assert_awaited_once()
 
+    async def branch_scenario(self, *, slot_valid=True, key="original",
+                              changed_scaffold=False, changed_live_scaffold=False,
+                              checkpoint="skipped", parent_file=False,
+                              delta_only=False, starter=False):
+        state, _ = await self.scenario()
+        state._slot_has_cached_prompt.return_value = slot_valid
+        state.experimental_delta_only = delta_only
+        state.prepare_conversation_checkpoint.reset_mock()
+        state.prepare_conversation_checkpoint.return_value = {
+            "status": checkpoint, "mode": "restore-conversation-checkpoint"}
+        state.restore_slot = mock.AsyncMock()
+        state._run_responses_loop.side_effect = None
+        state._run_responses_loop.return_value = (
+            {"id": "resp_branch"}, [message("branch answer", "assistant")], 0)
+        if parent_file:
+            state.lineage["resp_seed"].snapshot_filename = "synthetic-parent.bin"
+        if changed_live_scaffold:
+            state.lineage["resp_reply"].scaffold_fingerprint = "other scaffold"
+        if starter:
+            state.starter_slot_models.add(fixture_profile().slug)
+        delta = [message("question from the earlier response")]
+        await state.process_websocket_create({
+            "model": fixture_profile().slug, "tools": [], "prompt_cache_key": key,
+            "instructions": "changed instructions" if changed_scaffold else "stable instructions",
+            "previous_response_id": "resp_seed", "input": delta,
+        })
+        forwarded = state._run_responses_loop.await_args.kwargs["forward_request"]
+        expected = delta if delta_only else [
+            message("original user facts"), message("remembered fact", "assistant"), *delta]
+        self.assertEqual(forwarded["input"], expected)
+        self.assertNotIn("previous_response_id", forwarded)
+        self.assertTrue(forwarded["cache_prompt"])
+        completions = [c.args[1] for c in state.telemetry.emit.call_args_list
+                       if c.args[0] == "router.response.completed"]
+        return state, completions[-1]["slot"]["prepare_mode"]
+
+    async def test_branch_without_snapshot_keeps_verified_shared_prefix(self):
+        state, mode = await self.branch_scenario()
+        self.assertEqual(mode, "reuse-live-branch-prefix")
+        state.prepare_conversation_checkpoint.assert_awaited_once()
+        state.erase_slot.assert_not_awaited()
+        state.restore_slot.assert_not_awaited()
+
+    async def test_branch_reuse_requires_valid_matching_full_prompt_state(self):
+        cases = ({"slot_valid": False}, {"slot_valid": None}, {"key": "other"},
+                 {"key": ""}, {"changed_scaffold": True}, {"changed_live_scaffold": True},
+                 {"delta_only": True}, {"starter": True}, {"checkpoint": "error"})
+        for options in cases:
+            with self.subTest(**options):
+                state, mode = await self.branch_scenario(**options)
+                self.assertNotIn("reuse-live", mode)
+                state.erase_slot.assert_awaited_once()
+
+    async def test_branch_prefers_available_disk_checkpoints(self):
+        for options, expected in (({"checkpoint": "restored"}, "restore-conversation-checkpoint"),
+                                  ({"parent_file": True}, "restore-parent")):
+            with self.subTest(**options):
+                state, mode = await self.branch_scenario(**options)
+                self.assertEqual(mode, expected)
+                state.erase_slot.assert_not_awaited()
+                if options.get("parent_file"):
+                    state.restore_slot.assert_awaited_once()
+
     def test_generated_output_is_never_a_warmup(self):
         snapshot = router.ResponseSnapshot(
             response_id="warm_nonempty", profile_slug="test", parent_response_id=None,

@@ -1,7 +1,8 @@
 """Host-wide search pacing, single-flight cache, and engine cooldowns.
 
-The advisory lock is held across a request, but acquired without blocking the
-event loop. Process death releases it; SQLite transactions never span network IO.
+Cache hits can read without the advisory lock. Misses hold it across a request,
+but acquire it without blocking the event loop. Process death releases it;
+SQLite transactions never span network IO.
 Only callers using the same endpoint share health and cache entries.
 """
 from __future__ import annotations
@@ -33,8 +34,37 @@ class SearchCoordinator:
         self.wait_timeout = max(0.1, wait_timeout)
         self.engines = engines
 
+    def _cache_key(self, params: dict[str, str]) -> str:
+        return hashlib.sha256(json.dumps(
+            [self.endpoint, params, None if params.get("engines") else self.engines],
+            sort_keys=True,
+        ).encode()).hexdigest()
+
+    def _read_cached(self, key: str) -> tuple[dict[str, Any], float] | None:
+        # A writer or a missing database/schema is a miss, never a reason to
+        # block the event loop or create a database outside the advisory lock.
+        try:
+            with closing(sqlite3.connect(
+                self.path.absolute().as_uri() + "?mode=ro", uri=True, timeout=0,
+            )) as db:
+                row = db.execute(
+                    "SELECT body,expires FROM cache WHERE key=? AND expires>?",
+                    (key, time.time()),
+                ).fetchone()
+            if row:
+                body = json.loads(row[0])
+                if isinstance(body, dict) and isinstance(body.get("results"), list):
+                    body["marathon_cache_hit"] = True
+                    return body, row[1]
+        except (OSError, sqlite3.Error, ValueError, TypeError):
+            pass
+        return None
+
     async def request(self, params: dict[str, str],
                       fetch: Callable[[dict[str, str]], Awaitable[Any]]) -> Any:
+        cached = await asyncio.to_thread(self._read_cached, self._cache_key(params))
+        if cached is not None and cached[1] > time.time():
+            return cached[0]
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
         deadline = time.monotonic() + self.wait_timeout
@@ -58,10 +88,8 @@ class SearchCoordinator:
             os.close(fd)
 
     async def _request_locked(self, db, params, fetch):
-        key = hashlib.sha256(json.dumps(
-            [self.endpoint, params, None if params.get("engines") else self.engines],
-            sort_keys=True,
-        ).encode()).hexdigest()
+        # Recheck after acquiring the lock: another caller may have filled it.
+        key = self._cache_key(params)
         cached = db.execute("SELECT body FROM cache WHERE key=? AND expires>?", (key, time.time())).fetchone()
         if cached:
             body = json.loads(cached[0])

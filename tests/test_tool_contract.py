@@ -123,7 +123,8 @@ class ToolContractTests(unittest.TestCase):
 
     def test_plain_text_tool_markup_recovers_without_leaking_split_markers(self):
         for text in ('Preparing the file.\n<tool_call>\n<function=exec_command>\n<parameter=cmd>\necho synthetic',
-                     '<function=exec_command>\n<parameter=cmd>\necho another'):
+                     '<function=exec_command>\n<parameter=cmd>\necho another',
+                     '日本語の説明 🙂\n' * 128 + '<tool_call>'):
             for streaming in (False, True):
                 for repeated in (False, True):
                     with self.subTest(text=text, streaming=streaming, repeated=repeated):
