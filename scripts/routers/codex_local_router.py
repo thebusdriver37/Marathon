@@ -313,8 +313,11 @@ class ModelProfile:
         return None
 
     def upstream_headers(self) -> dict[str, str]:
+        # Foreground Marathon choices may bypass Spark's background idle grace.
+        # The shared adapter still rejects a switch during active inference.
+        headers = {"X-Spark-Interactive": "1"} if self.alias.startswith("spark/") else {}
         if not self.api_key_env and not self.api_key_file:
-            return {}
+            return headers
         api_key = (
             os.environ.get(self.api_key_env, "").strip()
             if self.api_key_env
@@ -344,7 +347,8 @@ class ModelProfile:
             raise RuntimeError(
                 f"external model {self.slug} requires API key from {source}"
             )
-        return {"Authorization": f"Bearer {api_key}"}
+        headers["Authorization"] = f"Bearer {api_key}"
+        return headers
 
 
 @dataclass

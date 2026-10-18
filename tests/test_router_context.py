@@ -414,7 +414,12 @@ reasoning_levels = [
         self.assertTrue(profile.external)
         self.assertFalse(profile.supports_slots)
         self.assertIn("deepseek-spark", available)
-        self.assertEqual(headers, {"Authorization": "Bearer test-secret"})
+        self.assertEqual(headers, {"Authorization": "Bearer test-secret", "X-Spark-Interactive": "1"})
+
+    def test_only_spark_requests_bypass_background_idle_grace(self) -> None:
+        self.assertEqual(fixture_profile().upstream_headers(), {})
+        profile = replace(fixture_profile(), alias="spark/Qwen3.8-Flash-Next-LR7")
+        self.assertEqual(profile.upstream_headers(), {"X-Spark-Interactive": "1"})
 
     def test_external_model_reports_a_missing_api_key_when_selected(self) -> None:
         profile = replace(
