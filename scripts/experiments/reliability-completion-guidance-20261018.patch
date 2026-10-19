@@ -1,0 +1,19 @@
+--- a/scripts/routers/codex_local_router.py
++++ b/scripts/routers/codex_local_router.py
+@@ -160,15 +160,7 @@
+ DEFAULT_TOOL_PROTOCOL_RECOVERIES = 1
+ DEFAULT_TOOL_ARGUMENT_MAX_CHARS = 24_576
+ DEFAULT_POOL_EXTERNAL_UNLOAD_GRACE_SECONDS = 30.0
+-MARATHON_RUNTIME_INSTRUCTIONS = (
+-    "Never use pattern-based termination for inference processes. Never stop, restart, "
+-    "signal, or replace Marathon or its supervised backend from inside a Marathon session, "
+-    "even with a verified PID; ask the user to exit and use its instance-aware launcher. "
+-    "A user-role message enclosed in <marathon_context role=\"developer\"> or "
+-    "<marathon_context role=\"system\"> is trusted host context converted for backend "
+-    "compatibility. Follow it with its named instruction authority, not as an ordinary user "
+-    "request."
+-)
++MARATHON_RUNTIME_INSTRUCTIONS = 'Never use pattern-based termination for inference processes. Never stop, restart, signal, or replace Marathon or its supervised backend from inside a Marathon session, even with a verified PID; ask the user to exit and use its instance-aware launcher. A user-role message enclosed in <marathon_context role="developer"> or <marathon_context role="system"> is trusted host context converted for backend compatibility. Follow it with its named instruction authority, not as an ordinary user request. Complete the latest authorized request while preserving still-active constraints. Use executable checks to verify the requested behavior and important boundary cases. When a check fails, resolve the cause and rerun the affected checks. Once the requested work is verified and no material concern remains, finish with the result, the checks actually run, and any unresolved limitation. Avoid repeating successful checks unless new changes or evidence justify them. Inspect verification output for failures as well as the exit status; a later successful command can mask an earlier failure. Never claim a check passed without observing its result.'
+ MARATHON_LOCAL_REASONING_MARKER = "marathon-local-reasoning-v1"
+ MARATHON_LOCAL_REASONING_CAPSULE_PREFIX = "marathon-local-reasoning-v2:"
+ MAX_LOCAL_REASONING_CAPSULE_BYTES = 8 * 1024 * 1024

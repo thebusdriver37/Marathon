@@ -69,6 +69,147 @@ Direct calls to `scripts/apply_codex_patches.sh` retain immutable patch worktree
 
 ## Live user workflows
 
+### Repeated task-completion gate
+
+```bash
+./bin/marathon eval reliability --run-gpu \
+  --model MODEL_ALIAS_OR_GGUF_BASENAME --profile PROFILE_ID --repeats 3
+```
+
+This suite uses the installed Marathon frontend, normal router, and real inference.
+Specify the model and profile explicitly so a changed remembered selection cannot
+silently change a comparison. It covers code repair, error recovery, respecting
+scope, reporting remaining test failures, finding authoritative requirements,
+atomic CSV reporting, user corrections, compaction, resume, cancelled background work,
+and a six-turn inventory project with cumulative checks after every feature.
+`--cases` selects a smaller set. `--timeout` bounds each turn.
+
+Each run creates a fresh synthetic project and isolated Codex/Marathon homes,
+instructions, skills, and history. Native filesystem permissions expose only the
+fixture, OS dependencies, and the sandbox binary to model tools. Network and
+delegation are disabled. Hidden checkers run outside the model's accessible
+filesystem in a separate bubblewrap sandbox, using disposable copies so grading
+cannot modify the agent's project. Personal conversations and private
+project files are not inputs. The existing global GPU lease mechanism remains
+active; the suite never evicts another workload. Linux, bubblewrap, the installed
+hardened frontend, and an available model worker are required.
+
+Results retain failures, timeouts, infrastructure errors, protected-file changes,
+and failures at earlier project stages. A later repair cannot erase an earlier
+failed stage. A model's assertion that tests passed does not satisfy the hidden
+checks. Scripted corrections and cancellations are part of the task; there are no
+adaptive rescue prompts or manual interventions. The success rate is therefore
+the fraction of complete scenarios passing without operator intervention.
+Failed scenarios stay unresolved; the suite does not guess how many additional
+corrections would recover them.
+
+The command defaults to a 100% success gate and exits nonzero below
+`--min-success-rate`. Raw terminal/session evidence, per-stage grades, and
+`results.json` stay in a new temporary directory outside the checkout. Pass
+`--output-dir` to choose a new evidence directory. The report records the model
+file metadata, frontend hash, source hashes, repetitions, and turn limit. Disk
+starter caches and conversation snapshots are disabled for isolation; live cache
+reuse still operates within each conversation. Timing starts after the frontend
+is ready and includes inference loading if the worker is cold.
+
+For an interleaved baseline/candidate experiment without changing the default
+runtime, supply `--router-source /path/to/baseline.py` and
+`--candidate-router /path/to/candidate.py`. Each scenario runs through both arms;
+the order reverses on alternate repetitions. `comparison.json` reports every
+matched pass-to-fail regression, gains, and the median paired time difference
+only for runs where both arms passed. Any matched regression fails the gate.
+`--instructions-file` supports a standalone prompt experiment. Alternatively,
+`--compare /path/to/baseline/results.json` compares separate runs, requiring the
+same evaluator, scenarios, repetitions, model/profile, and timeout.
+Explicit router and prompt inputs are copied into the evidence directory before
+inference. Incompatible or incomplete comparison reports are rejected before
+allocating a worker.
+
+Use this gate before promoting model, prompt, or runtime changes. Ordinary hosted
+CI tests the evaluator's grading and comparison logic; it does not run GPU
+inference. These fixtures provide a bounded regression check, not a general
+coding-ability score or proof of reliability at the model's context limit.
+
+#### October 18 evaluation
+
+The evaluation used Swift Qwen3.8 27B Uncensored Merge IQ4_XS with the existing
+DFlash2 pool profile, 196K context, medium reasoning, and temperature 1.0. The
+paired trials used the same registered GPU worker. Each of eight scenarios ran
+twice per arm, reversing arm order on the second repetition, with a 240-second
+turn deadline. No model, broker, or production prompt settings were changed.
+
+The candidate appended guidance to verify behavior and boundary cases, resolve
+failed checks, inspect output as well as exit status, and finish without repeating
+successful checks unnecessarily. It was evaluated through an isolated router
+source override. It is not promoted: it introduced a matched correctness
+regression and has not established a reliability improvement.
+
+| Scenario | Baseline | Candidate |
+| --- | ---: | ---: |
+| TTL/LRU cache repair | 2/2 | 2/2 |
+| Report an unrelated failing test honestly | 2/2 | 2/2 |
+| Find and implement the authoritative specification | 1/2 | 0/2 |
+| Atomic CSV reporting | 1/2 | 2/2 |
+| Apply a corrected requirement | 2/2 | 2/2 |
+| Preserve requirements through compaction | 2/2 | 2/2 |
+| Preserve corrections through resume | 2/2 | 2/2 |
+| Cancel background work and finish a new task | 2/2 | 2/2 |
+| **Unassisted completion** | **14/16 (87.5%)** | **14/16 (87.5%)** |
+
+There were no timeouts or infrastructure errors in these 32 paired runs. One
+matched pass became a failure and one failure became a pass. Across the 13 pairs
+where both arms passed, the candidate was 1.1 seconds slower at the median; this
+small sample does not establish a speed benefit. The comparison gate exited
+nonzero. Rechecking all 32 generated projects with the final isolated,
+non-mutating checker reproduced every score.
+
+The exposed failures concern independent correctness, despite successful
+model-written tests: Unicode combining marks were converted into separators
+instead of removed, and one baseline CSV implementation accepted a delimiter-only
+row despite the explicit requirement to validate its cells. The baseline also
+produced the Unicode error in one repetition, so it is an existing weakness the
+candidate did not solve.
+
+The separate six-turn inventory project used a 300-second turn deadline. Its
+first four feature stages passed all cumulative checks, including the stage
+after native compaction. Stage five exceeded the deadline before completing its
+reply, even though its code already passed all 11 independent checks at that
+point. That run remains an unassisted timeout. In a separately recorded recovery,
+one generic continuation prompt completed stage five; the original final feature
+prompt then completed with all 13 cumulative checks passing. Recovery and the
+final feature took another 213 seconds. This demonstrates a completion-latency
+problem under this deadline, not an established permanent stall.
+
+The final Python suite ran 567 tests successfully with 14 optional skips. The
+evaluator's own tests exercise hidden-checker isolation, protected files,
+incorrect implementations, terminal readiness, and comparison rejection.
+
+The rejected candidate is retained only as
+[`reliability-completion-guidance-20261018.patch`](../scripts/experiments/reliability-completion-guidance-20261018.patch).
+To repeat the comparison, apply that patch to a temporary copy of
+`scripts/routers/codex_local_router.py`, then run:
+
+```bash
+./bin/marathon eval reliability --run-gpu \
+  --model Swift-Qwen3.8-27B-Uncensored-Merge-IQ4_XS.gguf \
+  --profile one-gpu-196k-uncensored --repeats 2 \
+  --cases ttl_cache honest_failure doc_buried atomic_report correction compaction resume interruption \
+  --candidate-router /path/to/temporary/candidate.py
+```
+
+Raw paired evidence and frozen evaluator/router inputs are retained at
+`/tmp/marathon-reliability-confirmation-20261018`. The separate six-turn project
+run is at `/tmp/marathon-reliability-project-final-20261018`. Its original timeout
+state was copied to `/tmp/marathon-reliability-project-at-timeout-20261018`
+before resuming; assisted recovery results are at
+`/tmp/marathon-reliability-project-recovery-20261018/result.json`. These are local
+temporary artifacts. Calibration runs are excluded: they uncovered and corrected
+multiline-paste submission and a race between journal completion and the
+terminal's Ready state. One calibration
+contract also needed an explicit literal value for the backup policy.
+
+### Terminal and runtime checks
+
 ```bash
 ./bin/marathon eval smoke --run-gpu
 # Also check allocation of all three workers and rejection of a fourth session:
