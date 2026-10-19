@@ -2519,6 +2519,8 @@ class RouterState:
         self.pending_checkpoints: dict[str, ConversationCheckpointCandidate] = {}
         self.checkpoint_tasks: dict[str, asyncio.Task[Any]] = {}
         self.starter_prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
+        self.spark_prewarm_task: asyncio.Task[Any] | None = None
+        self.spark_prewarm_model: str | None = None
         self.awaiting_post_compaction_checkpoints: set[tuple[str, str]] = set()
         self.checkpoint_maintenance_task: asyncio.Task[Any] | None = None
         self._closing = False
@@ -2846,6 +2848,10 @@ class RouterState:
 
     async def close(self) -> None:
         self._closing = True
+        spark_task = self.spark_prewarm_task
+        if spark_task is not None:
+            spark_task.cancel()
+            await asyncio.gather(spark_task, return_exceptions=True)
         await self._cancel_pool_release()
         starter_tasks = list(self.starter_prewarm_tasks.values())
         self.starter_prewarm_tasks.clear()
@@ -4073,6 +4079,48 @@ class RouterState:
                 "error": str(exc),
                 "erase_result": erased,
             }
+
+    def schedule_spark_prewarm(self, profile: ModelProfile) -> dict[str, Any]:
+        """Load a selected Spark model without holding up the frontend warmup."""
+        if self._closing:
+            return {"status": "skipped"}
+        if self.spark_prewarm_model == profile.alias:
+            return {"status": "already-scheduled", "kind": "model-load"}
+        previous = self.spark_prewarm_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+        self.spark_prewarm_model = profile.alias
+        self.spark_prewarm_task = asyncio.create_task(
+            self._prewarm_spark(profile, previous), name=f"marathon-spark-prewarm-{profile.slug}",
+        )
+        return {"status": "scheduled", "kind": "model-load"}
+
+    async def _prewarm_spark(
+        self, profile: ModelProfile, previous: asyncio.Task[Any] | None,
+    ) -> None:
+        started = time.perf_counter()
+        try:
+            if previous is not None:
+                await asyncio.gather(previous, return_exceptions=True)
+            # One synthetic token triggers normal broker loading. The authenticated
+            # interactive route still protects active requests on another model.
+            await self._request_json(profile, "POST", "/v1/chat/completions", {
+                "model": profile.alias,
+                "messages": [{"role": "user", "content": "Reply OK."}],
+                "max_tokens": 1, "stream": False, "reasoning_effort": "none",
+            })
+            self.telemetry.emit("router.model.prewarm_completed", {
+                "profile_slug": profile.slug,
+                "duration_ms": (time.perf_counter() - started) * 1000.0,
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self.spark_prewarm_model == profile.alias:
+                self.spark_prewarm_model = None
+            self.telemetry.emit("router.model.prewarm_failed", {
+                "profile_slug": profile.slug, "error": str(exc),
+            }, level="warning")
 
     def schedule_starter_cache_prewarm(
         self,
@@ -6095,17 +6143,23 @@ class RouterState:
         if generate is False:
             response_id = preset_response_id or self.mint_response_id("warm")
             slot_prepare_start = time.perf_counter()
-            starter_cache_result = self.schedule_starter_cache_prewarm(
-                profile,
-                forward_request,
-                response_id,
-                prompt_cache_key,
-            )
+            if profile.alias.startswith("spark/"):
+                starter_cache_result = self.schedule_spark_prewarm(profile)
+            else:
+                if getattr(self, "spark_prewarm_task", None) is not None:
+                    self.spark_prewarm_task.cancel()
+                    self.spark_prewarm_task = None
+                self.spark_prewarm_model = None
+                starter_cache_result = self.schedule_starter_cache_prewarm(
+                    profile, forward_request, response_id, prompt_cache_key,
+                )
             slot_prepare_mode = (
                 "warmup-background-prefix-cache"
                 if starter_cache_result.get("status") == "scheduled"
                 else "warmup-deferred-prefix-cache"
             )
+            if starter_cache_result.get("kind") == "model-load":
+                slot_prepare_mode = "warmup-background-model-load"
             slot_prepare_ms = (time.perf_counter() - slot_prepare_start) * 1000.0
             async with self.lineage_lock:
                 self._store_response_snapshot(

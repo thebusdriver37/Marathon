@@ -1,0 +1,79 @@
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -587,6 +587,8 @@
+                     reply,
+                 } => {
+                     let _settings_guard = thread_settings::acquire_persistence_lock(&sess).await;
++                    let prewarm_model = thread_settings.model.is_some()
++                        && sess.get_config().await.model_provider_id == "marathon-local";
+                     let thread_settings = WithTurnExtensionData {
+                         request: thread_settings,
+                         turn_extension_init: sub.turn_extension_init,
+@@ -598,6 +600,15 @@
+                                 let _ = reply.send(Ok(()));
+                             }
+                             thread_settings::emit_applied(&sess, sub.id.clone(), snapshot).await;
++                            if prewarm_model {
++                                if let Some(prewarm) = sess.take_session_startup_prewarm().await {
++                                    prewarm.abort().await;
++                                }
++                                sess.schedule_startup_prewarm(
++                                    super::startup_prewarm::PrewarmInput::ModelSelection,
++                                )
++                                .await;
++                            }
+                         }
+                         Err(error) => {
+                             let message = format!("invalid thread settings override: {error}");
+--- a/codex-rs/core/src/session/startup_prewarm.rs
++++ b/codex-rs/core/src/session/startup_prewarm.rs
+@@ -36,6 +36,7 @@
+ pub(crate) enum PrewarmInput {
+     Base,
+     History,
++    ModelSelection,
+ }
+ 
+ impl PrewarmInput {
+@@ -43,6 +44,7 @@
+         match self {
+             Self::Base => "base",
+             Self::History => "history",
++            Self::ModelSelection => "model_selection",
+         }
+     }
+ }
+@@ -308,6 +310,9 @@
+ ) -> CodexResult<ModelClientSession> {
+     let prewarm_started_at = Instant::now();
+     let mut client_session = session.services.model_client.new_session();
++    if matches!(input, PrewarmInput::ModelSelection) {
++        client_session.reset_for_model_prewarm();
++    }
+     let websocket_ready = client_session.is_websocket_prewarmed().await;
+     // Count the decision before preparation can fail; fresh clients also need prewarm.
+     session.services.session_telemetry.counter(
+@@ -396,7 +401,7 @@
+     )?;
+     let build_prompt_started_at = Instant::now();
+     let prompt_input = match input {
+-        PrewarmInput::Base => Vec::new(),
++        PrewarmInput::Base | PrewarmInput::ModelSelection => Vec::new(),
+         PrewarmInput::History => {
+             // Use the same history projection and tool metadata as a sampling request.
+             // The real turn still checks this prefix before reusing the prepared response.
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2158,6 +2158,12 @@
+         ));
+         let websocket_telemetry: Arc<dyn WebsocketTelemetry> = telemetry;
+         websocket_telemetry
++    }
++
++    /// A deliberate model choice needs a new generate=false request, even when
++    /// the previous model left a healthy cached connection.
++    pub(crate) fn reset_for_model_prewarm(&mut self) {
++        self.websocket_session.reset(Some("other"));
+     }
+ 
+     /// Whether a previous request prepared a connection that is not known to be closed.
