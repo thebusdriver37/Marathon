@@ -132,6 +132,8 @@ HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS = float(
     os.getenv("MARATHON_HTTP_STREAM_KEEPALIVE_INTERVAL_SECONDS", "15")
 )
 ROUTER_MAX_REQUEST_BYTES = 32 * 1024 * 1024
+# Bound incomplete upstream events while allowing large completion/reasoning payloads.
+ROUTER_MAX_SSE_FRAME_BYTES = 64 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_MAX_COUNT = 8
 DEFAULT_SLOT_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024 * 1024
 DEFAULT_SLOT_SNAPSHOT_TTL_SECONDS = 2 * 24 * 60 * 60
@@ -1578,6 +1580,60 @@ def _pop_sse_frame(buffer: bytes) -> tuple[bytes | None, bytes]:
     return buffer[:idx], buffer[idx + marker_len :]
 
 
+class _SseFrameBuffer:
+    """Incremental framing shared by decoded Responses and raw HTTP streams."""
+
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+        self.scan = 0
+
+    @staticmethod
+    def _check_size(size: int) -> None:
+        if size > ROUTER_MAX_SSE_FRAME_BYTES:
+            raise RuntimeError(
+                f"backend SSE frame exceeded {ROUTER_MAX_SSE_FRAME_BYTES:,} bytes"
+            )
+
+    def feed(self, chunk: bytes):
+        buffer = self.buffer
+        buffer.extend(chunk)
+        start = 0
+        while True:
+            lf = buffer.find(b"\n\n", self.scan)
+            crlf = buffer.find(b"\r\n\r\n", self.scan)
+            if lf < 0 and crlf < 0:
+                # Retain three bytes of overlap for a delimiter split by a read.
+                self.scan = max(start, len(buffer) - 3)
+                self._check_size(len(buffer) - start - 3)
+                break
+            end, width = (lf, 2) if lf >= 0 and (crlf < 0 or lf < crlf) else (crlf, 4)
+            self._check_size(end - start)
+            consumed = end + width
+            # Copy just this frame, including its original delimiter. The temporary
+            # view is released before yielding, allowing subsequent buffer resizing.
+            frame = bytes(memoryview(buffer)[start:consumed])
+            if consumed == len(buffer):
+                # Do not retain a second copy of a completed large event while
+                # downstream backpressure pauses the consumer at yield.
+                buffer.clear()
+                self.scan = 0
+                yield frame
+                return
+            start = consumed
+            self.scan = start
+            yield frame
+        if start:
+            del buffer[:start]
+            self.scan -= start
+
+    def finish(self) -> bytes:
+        self._check_size(len(self.buffer))
+        tail = bytes(self.buffer)
+        self.buffer.clear()
+        self.scan = 0
+        return tail
+
+
 def _parse_sse_frame(frame: bytes) -> SseEvent | None:
     text = frame.decode("utf-8", errors="replace")
     event_name: str | None = None
@@ -1786,14 +1842,19 @@ def _has_runaway_repetition(value: str) -> bool:
     if len(value) < 2_048:
         return False
     tail = value[-8_192:]
-    for width in range(1, 129):
+    # Every repeating suffix must repeat its last 32 characters at its period.
+    # Search those possible offsets in C before allocating full repeated spans.
+    # Include overlapping matches so periods shorter than 32 remain detectable.
+    suffix = tail[-32:]
+    start = len(tail) - 32 - 128
+    end = len(tail) - 1
+    while (position := tail.rfind(suffix, start, end)) >= 0:
+        width = len(tail) - 32 - position
         repeats = max(32, (2_048 + width - 1) // width)
         span = width * repeats
-        if span > len(tail):
-            continue
-        unit = tail[-width:]
-        if tail[-span:] == unit * repeats:
+        if span <= len(tail) and tail[-span:] == tail[-width:] * repeats:
             return True
+        end = position + 31
     return False
 
 
@@ -3038,6 +3099,8 @@ class RouterState:
         raw_body_bytes: int | None = None,
         normalized_body_bytes: int | None = None,
     ) -> None:
+        if not self.debug and not self.telemetry.enabled:
+            return
         telemetry_started = time.perf_counter()
         raw_input = raw_request.get("input")
         normalized_input = normalized_request.get("input")
@@ -3131,6 +3194,38 @@ class RouterState:
                 except Exception:
                     pass
 
+    async def _acquire_pool_worker(self):
+        # Cancelling to_thread does not stop its worker. Transfer lease ownership
+        # under a lock so a cancelled caller cannot abandon a late acquisition.
+        abandoned = threading.Event()
+        ownership = threading.Lock()
+        acquired = []
+        backend = self.pool_backend
+        runtime_dir = Path(os.environ["MARATHON_POOL_RUNTIME_DIR"])
+        instance = os.getenv("MARATHON_INSTANCE") or None
+
+        def acquire():
+            lease = acquire_pool_worker(backend, runtime_dir, instance)
+            with ownership:
+                if not abandoned.is_set():
+                    acquired.append(lease)
+                    return lease
+            release_pool_worker(lease[0])
+            return None
+
+        try:
+            lease = await asyncio.to_thread(acquire)
+        except asyncio.CancelledError:
+            with ownership:
+                abandoned.set()
+                lease = acquired.pop() if acquired else None
+            if lease is not None:
+                release_pool_worker(lease[0])
+            raise
+        # A None result only occurs after this coroutine has been cancelled.
+        assert lease is not None
+        return lease
+
     @asynccontextmanager
     async def pool_request(self, requested_model: str | None, *, generate: bool = True):
         """Keep routing and worker ownership stable for the entire request."""
@@ -3143,10 +3238,7 @@ class RouterState:
                 await self._cancel_pool_release()
                 if self.pool_handle is None:
                     try:
-                        self.pool_handle, self.pool_model = acquire_pool_worker(
-                            self.pool_backend, Path(os.environ["MARATHON_POOL_RUNTIME_DIR"]),
-                            os.getenv("MARATHON_INSTANCE") or None,
-                        )
+                        self.pool_handle, self.pool_model = await self._acquire_pool_worker()
                     except RuntimeError:
                         if generate:
                             raise
@@ -3388,13 +3480,9 @@ class RouterState:
         raise RuntimeError(f"backend {method} {path} connection failed: {last_connection_error}")
 
     async def _iter_sse_json(self, response: Any) -> Any:
-        buffer = b""
+        frames = _SseFrameBuffer()
         async for chunk in response.content.iter_chunked(8192):
-            buffer += chunk
-            while True:
-                frame, buffer = _pop_sse_frame(buffer)
-                if frame is None:
-                    break
+            for frame in frames.feed(chunk):
                 event = _parse_sse_frame(frame)
                 if event is None:
                     continue
@@ -3407,6 +3495,7 @@ class RouterState:
                 if isinstance(payload, dict):
                     yield payload
 
+        buffer = frames.finish()
         if buffer.strip():
             event = _parse_sse_frame(buffer)
             if event is not None and event.data != "[DONE]":
@@ -6737,7 +6826,7 @@ async def _iter_proxy_content(
     """Read one upstream body without treating healthy SSE silence as a disconnect."""
 
     pending: asyncio.Task[bytes] | None = None
-    buffer = b""
+    frames = _SseFrameBuffer()
     try:
         while True:
             pending = asyncio.create_task(content.read(8192))
@@ -6758,16 +6847,12 @@ async def _iter_proxy_content(
                 continue
             # Upstream reads can end inside a data line, or between data lines
             # belonging to one event. Keepalives are safe only between frames.
-            buffer += chunk
-            while True:
-                frame, remainder = _pop_sse_frame(buffer)
-                if frame is None:
-                    break
-                consumed = len(buffer) - len(remainder)
-                yield buffer[:consumed]
-                buffer = remainder
-        if buffer:
-            yield buffer
+            for frame in frames.feed(chunk):
+                yield frame
+        if frame_sse:
+            tail = frames.finish()
+            if tail:
+                yield tail
     finally:
         if pending is not None and not pending.done():
             pending.cancel()

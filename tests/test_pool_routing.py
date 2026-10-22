@@ -4,6 +4,7 @@ import asyncio
 import fcntl
 import os
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -52,6 +53,64 @@ class PoolRoutingTests(unittest.IsolatedAsyncioTestCase):
         handle, worker = acquire_pool_worker(self.backend, self.root, instance)
         self.addCleanup(handle.close)
         return handle, worker
+
+    async def test_slow_acquisition_does_not_block_loop_and_cancellation_releases_late_lease(self):
+        started, proceed = threading.Event(), threading.Event()
+        released = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def delayed_acquire(*args):
+            started.set()
+            if not proceed.wait(2):
+                raise AssertionError('event loop blocked during worker acquisition')
+            return acquire_pool_worker(*args)
+
+        def release(handle):
+            release_pool_worker(handle)
+            loop.call_soon_threadsafe(released.set)
+
+        async def request():
+            async with self.state.pool_request('local'):
+                self.fail('cancelled request must not adopt a lease')
+
+        async def wait_started():
+            while not started.is_set():
+                await asyncio.sleep(.001)
+
+        with mock.patch.object(router_module, 'acquire_pool_worker', side_effect=delayed_acquire), \
+                mock.patch.object(router_module, 'release_pool_worker', side_effect=release):
+            task = asyncio.create_task(request())
+            try:
+                await asyncio.wait_for(wait_started(), 1)
+                self.assertFalse(task.done())
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertIsNone(self.state.pool_handle)
+                self.assertFalse(self.state.pool_request_lock.locked())
+                proceed.set()
+                await asyncio.wait_for(released.wait(), 1)
+                self.assertEqual(self.reserve('next-session')[1], 'worker-1')
+            finally:
+                proceed.set()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_cancellation_after_thread_completion_releases_unadopted_lease(self):
+        to_thread = asyncio.to_thread
+
+        async def cancel_before_delivery(function):
+            result = await to_thread(function)
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+            return result
+
+        with mock.patch.object(router_module.asyncio, 'to_thread', side_effect=cancel_before_delivery):
+            task = asyncio.create_task(self.state._acquire_pool_worker())
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertIsNone(self.state.pool_handle)
+        self.assertEqual(self.reserve('next-session')[1], 'worker-1')
 
     async def test_discovery_warmup_and_remote_work_when_local_pool_is_full(self):
         for i in range(3):
