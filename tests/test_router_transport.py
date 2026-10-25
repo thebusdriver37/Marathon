@@ -298,6 +298,101 @@ class RouterTransportRegressions(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(requests), 3)
                         self.assertEqual(state._execute_managed_call.await_count, 1)
 
+    async def test_recovery_sampler_rejection_falls_back_without_publishing_invalid_calls(self):
+        for transport in ("http", "stream", "websocket"):
+            with self.subTest(transport=transport):
+                requests = []
+                tools = [{"type": "function", "name": "exec_command", "parameters": {
+                    "type": "object", "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"]}}]
+                valid = call("exec_command", "valid", {"cmd": "echo harmless"})
+                invalid = call("exec_command", "invalid", {"cmd": 42})
+                scripted = scripted_backend(lambda data, n: [invalid] if n == 1 else [valid], requests)
+                async def backend(request):
+                    data = await request.json()
+                    if data.get("tool_choice") == "required":
+                        requests.append(data)
+                        if len(requests) == 2:
+                            # Reproduce llama.cpp closing the reused connection
+                            # before it sends the grammar rejection headers.
+                            request.transport.close()
+                            return web.Response()
+                        return web.json_response({"error": {
+                            "message": "Failed to initialize samplers: std::exception",
+                            "type": "invalid_request_error"}}, status=400)
+                    return await scripted(request)
+                async with serving(backend) as (state, http, server):
+                    if transport == "websocket":
+                        events = await websocket_turn(http, server, tools)
+                        self.assertEqual(events[-1]["type"], "response.completed", events)
+                        items = [e["item"] for e in events if e["type"] == "response.output_item.done"]
+                    else:
+                        async with http.post(server.make_url("/v1/responses"), json={
+                            "input": "Run a harmless command.", "tools": tools,
+                            "stream": transport == "stream"}) as response:
+                            self.assertEqual(response.status, 200)
+                            if transport == "stream":
+                                events = events_from_bytes(await response.read())
+                                self.assertEqual(events[-1]["type"], "response.completed", events)
+                                items = [e["item"] for e in events if e["type"] == "response.output_item.done"]
+                            else:
+                                items = (await response.json())["output"]
+                    self.assertEqual([i["call_id"] for i in items if i.get("call_id")], ["valid"])
+                    self.assertEqual([r.get("tool_choice", "auto") for r in requests],
+                                     ["auto", "required", "required", "auto"])
+                    self.assertEqual(requests[1], requests[2])
+                    self.assertEqual(requests[1]["input"], requests[3]["input"])
+                    self.assertEqual(requests[1]["tools"], requests[3]["tools"])
+
+    async def test_sampler_fallback_is_bounded_and_preserves_client_constraints(self):
+        for choice in ("auto", "required", {"type": "function", "name": "exec_command"}):
+            for message in ("Failed to initialize samplers: std::exception", "unrelated backend error", "disconnect"):
+                with self.subTest(choice=choice, message=message):
+                    requests = []
+                    async def backend(request):
+                        data = await request.json()
+                        requests.append(data)
+                        if len(requests) == 1:
+                            return web.json_response({"output": [call("exec_command", "bad", {"cmd": 42})]})
+                        if message == "disconnect":
+                            request.transport.close()
+                            return web.Response()
+                        return web.json_response({"error": {"message": message}}, status=400)
+                    async with serving(backend) as (state, http, server):
+                        profile = state.available_profiles[fixture_profile().slug]
+                        with self.assertRaises((RuntimeError, router.ServerDisconnectedError)):
+                            await state._run_responses_loop(profile=profile, forward_request={
+                                "input": [], "tool_choice": choice, "tools": [{"type": "function",
+                                    "name": "exec_command", "parameters": {"type": "object",
+                                        "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}}],
+                            }, web_search_enabled=False)
+                    expected = 3 if message == "disconnect" or (
+                        choice == "auto" and message.startswith("Failed to initialize")) else 2
+                    self.assertEqual(len(requests), expected)
+
+    async def test_recovery_does_not_retry_a_truncated_response_body(self):
+        requests = []
+        first = scripted_backend(lambda data, n: [call("exec_command", "bad", {"cmd": 42})], requests)
+        async def backend(request):
+            if not requests:
+                return await first(request)
+            data = await request.json()
+            requests.append(data)
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(b'data: {"type":"response.created"}\n\n')
+            request.transport.close()
+            return response
+        async with serving(backend) as (state, http, server):
+            async with http.post(server.make_url("/v1/responses"), json={
+                "input": "Run a harmless command.", "stream": True,
+                "tools": [{"type": "function", "name": "exec_command", "parameters": {
+                    "type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}}],
+            }) as response:
+                events = events_from_bytes(await response.read())
+                self.assertEqual(events[-1]["type"], "response.failed", events)
+        self.assertEqual(len(requests), 2)
+
     async def test_http_preserves_web_execution_and_patch_translation(self):
         for streaming in (False, True):
             for repetition in range(2):

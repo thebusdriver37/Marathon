@@ -38,7 +38,7 @@ from urllib.parse import quote
 from pathlib import Path
 from typing import Any
 
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ServerDisconnectedError
 from aiohttp import ClientTimeout
 from aiohttp import WSMsgType
 from aiohttp import web
@@ -259,6 +259,22 @@ def _bound_request_images(request: dict[str, Any], limit: int) -> int:
 
 class ToolProtocolError(RuntimeError):
     """The backend stopped making valid, bounded tool-call progress."""
+
+
+class BackendSamplerError(RuntimeError):
+    """The backend rejected the request before generating any output."""
+
+
+def _backend_sampler_error(status: int, body: str) -> bool:
+    if status != 400:
+        return False
+    try:
+        error = json.loads(body).get("error")
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(error, dict) and error.get("message") == (
+        "Failed to initialize samplers: std::exception"
+    )
 
 
 def _backend_tool_protocol_error_reason(status: int, body: str) -> str | None:
@@ -3456,6 +3472,8 @@ class RouterState:
                 ) as response:
                     text = await response.text()
                     if response.status >= 400:
+                        if _backend_sampler_error(response.status, text):
+                            raise BackendSamplerError("Backend failed to initialize samplers")
                         image_limit = _backend_image_limit(response.status, text)
                         if image_limit is not None:
                             raise BackendImageLimitError(image_limit)
@@ -3473,6 +3491,8 @@ class RouterState:
             except RuntimeError:
                 raise
             except Exception as exc:
+                if isinstance(exc, ServerDisconnectedError) and not retry_connection_error:
+                    raise
                 last_connection_error = exc
                 if attempt + 1 >= attempts:
                     break
@@ -3622,6 +3642,8 @@ class RouterState:
         ) as response:
             if response.status >= 400:
                 text = await response.text()
+                if _backend_sampler_error(response.status, text):
+                    raise BackendSamplerError("Backend failed to initialize samplers")
                 image_limit = _backend_image_limit(response.status, text)
                 if image_limit is not None:
                     raise BackendImageLimitError(image_limit)
@@ -5646,10 +5668,36 @@ class RouterState:
             )
             response = None
             try:
-                response = await self._request_with_image_limit(
-                    profile, request,
-                    None if finalizing or is_compaction else event_sink,
-                )
+                sink = None if finalizing or is_compaction else event_sink
+                try:
+                    try:
+                        response = await self._request_with_image_limit(profile, request, sink)
+                    except ServerDisconnectedError:
+                        # llama.cpp can close a reused HTTP connection before
+                        # returning its rejection. Retry the identical recovery
+                        # once on a fresh connection to obtain that response.
+                        # aiohttp reports interrupted bodies as ClientPayloadError,
+                        # not ServerDisconnectedError; never retry partial output.
+                        if not recovery_tool_choice:
+                            raise
+                        self.telemetry.emit("router.response.recovery_connection_retry", {
+                            "profile_slug": profile.slug,
+                        }, level="warning")
+                        response = await self._request_with_image_limit(profile, request, sink)
+                except BackendSamplerError:
+                    # Some XML tool templates fail grammar initialization for
+                    # required calls. Relax only our own recovery hint, after
+                    # an explicit pre-generation rejection. Never weaken a
+                    # client's required/named tool choice or retry emitted work.
+                    if (not recovery_tool_choice or request.get("tool_choice") != "required"
+                            or forward_request.get("tool_choice", "auto") != "auto"):
+                        raise
+                    request = copy.deepcopy(request)
+                    request["tool_choice"] = "auto"
+                    self.telemetry.emit("router.response.recovery_sampler_fallback", {
+                        "profile_slug": profile.slug, "tool_choice": "auto",
+                    }, level="warning")
+                    response = await self._request_with_image_limit(profile, request, sink)
                 accounting.add(response)
                 finalization_hit_output_limit = _response_stalled_at_output_limit(
                     response,
