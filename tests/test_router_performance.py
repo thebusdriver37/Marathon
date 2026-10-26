@@ -182,3 +182,55 @@ class RepetitionAndTracingTests(unittest.TestCase):
                     self.assertEqual(state._trace_seq, int(debug or enabled))
                     if debug:
                         self.assertIn('input_hash', state.trace_log_path.read_text())
+
+
+class IncrementalToolMarkupTests(unittest.TestCase):
+    def test_every_prefix_matches_original_guard(self):
+        from bench_stream_markup import full_prefix_guard
+        cases = [
+            '', 'plain text', 'x < y', '<tool_call>', '  <function=exec_command>',
+            'Use `<tool_call>` literally.', '<tool_`discard`call>',
+            '> <tool_call>\r\nordinary text',
+            '```xml\n<tool_call>\n```\n<function=exec_command>',
+            '````xml\n```\n<tool_call>\n````\n<tool_call>',
+            '~~~xml\n```\n<tool_call>\n~~~suffix\n<tool_call>\n~~~\n',
+            '```\nexample\n```still fenced\n<tool_call>\n```\n',
+            'Use ``a ` <tool_call> b`` literally.',
+        ]
+        rng = random.Random(20261025)
+        fragments = ['<', '<tool_call>', '<function=', '`', '```', '~~~~', 'x < y',
+                     '> quote', 'é漢😀', ' ', '\n', '\r', '\r\n', '\v', '\f',
+                     '\x1c', '\x1d', '\x1e', '\x85', '\u2028', '\u2029']
+        cases += [''.join(rng.choices(fragments, k=40)) for _ in range(160)]
+        for text in cases:
+            for width in (1, 2, 7, 31, max(1, len(text))):
+                scanner = router._ToolMarkupScanner()
+                prefix = ''
+                for start in range(0, len(text), width):
+                    delta = text[start:start + width]
+                    prefix += delta
+                    self.assertEqual(scanner.feed(delta), full_prefix_guard(prefix),
+                                     (repr(prefix), width))
+                    self.assertEqual(router._has_unquoted_tool_call(prefix), full_prefix_guard(prefix))
+                self.assertEqual(scanner.feed(''), full_prefix_guard(prefix))
+
+    def test_completed_lines_are_not_rescanned(self):
+        text = 'x < y\n' + '```python\n' + ('    assert left < right\n' * 1000) + '```\n'
+        scanned = 0
+        original = router._tool_markup_line
+        def count(line, fence):
+            nonlocal scanned
+            scanned += len(line)
+            return original(line, fence)
+        scanner = router._ToolMarkupScanner()
+        with mock.patch.object(router, '_tool_markup_line', side_effect=count):
+            for start in range(0, len(text), 8):
+                self.assertFalse(scanner.feed(text[start:start + 8]))
+        self.assertLess(scanned, 4 * len(text))
+        self.assertEqual(scanner.partial, '')
+
+    def test_empty_deltas_do_not_accumulate(self):
+        scanner = router._ToolMarkupScanner()
+        for _ in range(1000):
+            self.assertFalse(scanner.feed(''))
+        self.assertEqual(scanner.prefix, [])

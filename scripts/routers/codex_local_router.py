@@ -1252,36 +1252,79 @@ def _stalled_final_response_recovery_message(
     }
 
 
+def _tool_markup_line(line: str, fence: str | None) -> tuple[bool, str | None]:
+    """Apply the protocol guard's Markdown rules to one logical line."""
+    stripped = line.lstrip()
+    if stripped.startswith(">"):
+        return False, fence
+    marker = re.match(r"(`{3,}|~{3,})", stripped)
+    if marker:
+        delimiter = marker.group(1)
+        if fence is None:
+            fence = delimiter
+        elif (
+            delimiter[0] == fence[0]
+            and len(delimiter) >= len(fence)
+            and not stripped[len(delimiter):].strip()
+        ):
+            fence = None
+        return False, fence
+    if fence is not None or "<" not in line:
+        return False, fence
+    # Inline code is quoted task data, too.
+    unquoted = re.sub(r"(`+).*?\1", "", line) if "`" in line else line
+    return "<tool_call>" in unquoted or bool(re.match(r"\s*<function=", unquoted)), fence
+
+
 def _has_unquoted_tool_call(text: str) -> bool:
     """Recognize attempted calls without rejecting Markdown protocol examples."""
-    # Streaming calls this on each growing prefix. Ordinary prose cannot contain
-    # either marker, so avoid splitting and reparsing all its Markdown per chunk.
     if "<" not in text:
         return False
     fence = None
     for line in text.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith(">"):
-            continue
-        marker = re.match(r"(`{3,}|~{3,})", stripped)
-        if marker:
-            delimiter = marker.group(1)
-            if fence is None:
-                fence = delimiter
-            elif (
-                delimiter[0] == fence[0]
-                and len(delimiter) >= len(fence)
-                and not stripped[len(delimiter):].strip()
-            ):
-                fence = None
-            continue
-        if fence is not None:
-            continue
-        # Inline code is quoted task data, too.
-        unquoted = re.sub(r"(`+).*?\1", "", line)
-        if "<tool_call>" in unquoted or re.match(r"\s*<function=", unquoted):
+        found, fence = _tool_markup_line(line, fence)
+        if found:
             return True
     return False
+
+
+class _ToolMarkupScanner:
+    """Parse completed lines once; reconsider only the unfinished line.
+
+    A partial fence or inline quote may change meaning on the next delta, so
+    its state must not be committed until the line ends. Complete-response
+    validation still checks the backend's final item independently.
+    """
+
+    def __init__(self) -> None:
+        self.fence: str | None = None
+        self.partial = ""
+        self.found = False
+        self.prefix: list[str] | None = []
+
+    def feed(self, delta: str) -> bool:
+        if self.prefix is not None:
+            # Most answers never contain a marker. Retain their chunks without
+            # copying or parsing the growing prefix until the first '<'.
+            if "<" not in delta:
+                if delta:
+                    self.prefix.append(delta)
+                return False
+            delta = "".join(self.prefix) + delta
+            self.prefix = None
+        lines = (self.partial + delta).splitlines(keepends=True)
+        self.partial = ""
+        for line in lines:
+            if line.endswith((
+                "\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029",
+            )):
+                line = line[:-2] if line.endswith("\r\n") else line[:-1]
+                found, self.fence = _tool_markup_line(line, self.fence)
+                self.found = self.found or found
+            else:
+                self.partial = line
+        found, _ = _tool_markup_line(self.partial, self.fence)
+        return self.found or found
 
 
 def _compaction_summary_error(items: list[dict[str, Any]]) -> str | None:
@@ -3555,7 +3598,7 @@ class RouterState:
         generation_events = 0
         stream_completed_at: float | None = None
         pending_tool_events: list[dict[str, Any]] = []
-        message_stream_text: dict[str, str] = {}
+        message_markup_scanners: dict[str, _ToolMarkupScanner] = {}
         held_text_events: dict[str, list[dict[str, Any]]] = {}
 
         async def send_event(event: dict[str, Any]) -> None:
@@ -3570,9 +3613,10 @@ class RouterState:
                 if kind == "response.output_text.delta":
                     key = str(event.get("item_id") or "")
                     delta = str(event.get("delta") or "")
-                    text = message_stream_text.get(key, "") + delta
-                    message_stream_text[key] = text
-                    if _has_unquoted_tool_call(text):
+                    scanner = message_markup_scanners.get(key)
+                    if scanner is None:
+                        scanner = message_markup_scanners[key] = _ToolMarkupScanner()
+                    if scanner.feed(delta):
                         raise ToolProtocolError("assistant text contained tool-call markup, not a structured tool call; that text was not executed")
                     if key in held_text_events or "<" in delta:
                         held_text_events.setdefault(key, []).append(copy.deepcopy(event))
@@ -3586,7 +3630,7 @@ class RouterState:
                         for held in held_text_events.pop(key, []):
                             if not await event_sink(held):
                                 raise ConnectionError("websocket client disconnected")
-                        message_stream_text.pop(key, None)
+                        message_markup_scanners.pop(key, None)
             # A later malformed call can reject this entire backend attempt.
             # Do not let Codex execute an earlier call that recovery will forget.
             # Text/reasoning still stream normally; executable calls commit only

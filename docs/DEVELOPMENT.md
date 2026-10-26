@@ -13,6 +13,49 @@ Machine-specific overrides belong in `~/.config/marathon/catalog.toml`, not in t
 The CI workflow runs shell syntax checks and the Python suite on Python 3.10 and 3.12.
 Set `MARATHON_NETWORK_TESTS=1` to also test real pip bootstrap and interrupted-environment recovery; CI enables this check.
 
+## Streaming tool-protocol guard benchmark
+
+The incremental guard keeps Markdown fence state across completed lines rather
+than reparsing the entire answer for every streamed delta. It rechecks the
+unfinished line because a partial fence or inline quote can change meaning as
+more text arrives. Final response validation and withholding of possible
+plain-text tool calls remain in place. Ordinary text takes a deferred parsing
+path until the first `<` character.
+
+Run the synthetic benchmark against the pre-change router:
+
+```bash
+git show f655a0c:scripts/routers/codex_local_router.py > /tmp/marathon-router-before.py
+python scripts/benchmarks/bench_stream_markup.py --repeats 7 \
+  --baseline-router /tmp/marathon-router-before.py \
+  --output /tmp/marathon-stream-markup.json
+```
+
+The benchmark first compares guard decisions, then replays identical generated
+SSE bytes through the real streaming router methods and checks the complete
+returned response and forwarded events for equality. No model, credentials,
+existing conversation, or runtime configuration is used. Timing is cumulative
+CPU-side processing with an immediately available stream, not token generation
+or total task latency. Arbitrarily long unfinished lines still need rescanning;
+the change removes repeated scans of completed lines, not all worst-case
+quadratic behavior.
+
+The [October 25 evidence](stream-markup-20261025.json) records seven
+interleaved runs per CPU case. For approximately 24 KB answers delivered in
+eight-character deltas, full router replay had these median wall times:
+
+| Synthetic answer | Previous router | Incremental guard |
+| --- | ---: | ---: |
+| Ordinary prose | 29.92 ms | 28.58 ms |
+| Prose following `x < y` | 1,911.62 ms | 46.31 ms |
+| Fenced code containing comparisons | 497.78 ms | 44.73 ms |
+| One long comparison-containing line | 483.85 ms | 72.45 ms |
+
+The complete returned responses and forwarded events matched. Regression tests
+also compare every streamed prefix with the original guard over randomized
+Markdown, Unicode, and chunk boundaries. The full Python suite passed 588 tests
+with 14 optional skips; compilation and shell syntax checks passed.
+
 ## Releases
 
 Set `marathon_app.__version__` to the release version, commit it, and push the matching `vX.Y.Z` tag.
