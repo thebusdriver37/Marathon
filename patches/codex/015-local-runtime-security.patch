@@ -139,7 +139,7 @@ index 0000000000..e9f22bc6b3
 +    );
 +}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 1eb2cdf83f..a9380a49b6 100644
+index 38832d1f16..9acb83c9c4 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -165,6 +165,7 @@ use toml_edit::DocumentMut;
@@ -150,19 +150,10 @@ index 1eb2cdf83f..a9380a49b6 100644
  mod managed_features;
  mod metrics;
  mod network_config;
-@@ -4303,7 +4304,7 @@ impl Config {
-         )
-         .map_err(std::io::Error::from)?;
-         let otel = otel::resolve_config(cfg.otel.unwrap_or_default(), &mut startup_warnings);
--        let config = Self {
-+        let mut config = Self {
-             prefer_mxc,
-             model,
-             daybreak_enabled: cfg.daybreak.unwrap_or(false),
-@@ -4600,6 +4601,9 @@ impl Config {
-                 .unwrap_or_default(),
-             otel,
-         };
+@@ -4797,6 +4798,9 @@ impl Config {
+             tracing::warn!("{message}");
+             config.startup_warnings.push(message.to_string());
+         }
 +        if codex_http_client::local_runtime_enabled() {
 +            local_runtime::enforce(&mut config)?;
 +        }
@@ -170,18 +161,18 @@ index 1eb2cdf83f..a9380a49b6 100644
          })
          .await
 diff --git a/codex-rs/http-client/src/lib.rs b/codex-rs/http-client/src/lib.rs
-index 5eb01f021b..65b8dee68a 100644
+index c982757788..7513dee18a 100644
 --- a/codex-rs/http-client/src/lib.rs
 +++ b/codex-rs/http-client/src/lib.rs
-@@ -5,6 +5,7 @@ mod client_builder;
- mod client_tls;
+@@ -9,6 +9,7 @@ mod client_tls;
  mod custom_ca;
  mod error;
+ mod native_roots;
 +mod local_runtime;
  mod network_policy;
  mod outbound_proxy;
  mod request;
-@@ -36,6 +37,8 @@ pub use crate::custom_ca::build_rustls_client_config_with_custom_ca;
+@@ -40,6 +41,8 @@ pub use crate::custom_ca::build_rustls_client_config_with_custom_ca;
  pub use crate::custom_ca::maybe_build_rustls_client_config_with_custom_ca;
  pub use crate::error::StreamError;
  pub use crate::error::TransportError;
@@ -273,10 +264,10 @@ index 0000000000..1d4bec482c
 +    }
 +}
 diff --git a/codex-rs/http-client/src/outbound_proxy.rs b/codex-rs/http-client/src/outbound_proxy.rs
-index 7668333c6a..89e8cdc8f6 100644
+index c8831f60ea..a72a6db30f 100644
 --- a/codex-rs/http-client/src/outbound_proxy.rs
 +++ b/codex-rs/http-client/src/outbound_proxy.rs
-@@ -280,6 +280,10 @@ impl HttpClientFactory {
+@@ -281,6 +281,10 @@ impl HttpClientFactory {
          &self,
          request_url: String,
      ) -> io::Result<OutboundProxyRoute> {
@@ -287,25 +278,7 @@ index 7668333c6a..89e8cdc8f6 100644
          if matches!(
              self.outbound_proxy_policy,
              OutboundProxyPolicy::ReqwestDefault
-@@ -329,6 +333,17 @@ impl HttpClientFactory {
-         request_url: &str,
-         route_class: ClientRouteClass,
-     ) -> Result<reqwest::Client, BuildRouteAwareHttpClientError> {
-+        if crate::local_runtime_enabled() {
-+            crate::validate_local_runtime_url(request_url)
-+                .map_err(BuildRouteAwareHttpClientError::LocalRuntime)?;
-+            // This non-pooled client cannot revalidate redirect destinations.
-+            return build_reqwest_client_with_custom_ca(
-+                builder
-+                    .no_proxy()
-+                    .redirect(reqwest::redirect::Policy::none()),
-+            )
-+            .map_err(Into::into);
-+        }
-         build_reqwest_client_for_route(
-             builder,
-             request_url,
-@@ -437,6 +452,8 @@ fn proxy_resolution_url(request_url: &str) -> Cow<'_, str> {
+@@ -423,6 +427,8 @@ fn proxy_resolution_url(request_url: &str) -> Cow<'_, str> {
  /// Error while building a resolver-aware reqwest client.
  #[derive(Debug, Error)]
  pub enum BuildRouteAwareHttpClientError {
@@ -314,7 +287,7 @@ index 7668333c6a..89e8cdc8f6 100644
      #[error(transparent)]
      CustomCa(#[from] BuildCustomCaTransportError),
  
-@@ -450,6 +467,7 @@ pub enum BuildRouteAwareHttpClientError {
+@@ -436,6 +442,7 @@ pub enum BuildRouteAwareHttpClientError {
  impl From<BuildRouteAwareHttpClientError> for io::Error {
      fn from(error: BuildRouteAwareHttpClientError) -> Self {
          match error {
@@ -323,7 +296,7 @@ index 7668333c6a..89e8cdc8f6 100644
              BuildRouteAwareHttpClientError::InvalidProxyConfig { .. }
              | BuildRouteAwareHttpClientError::ExplicitTls(_) => io::Error::other(error),
 diff --git a/codex-rs/http-client/src/route_aware_client_pool.rs b/codex-rs/http-client/src/route_aware_client_pool.rs
-index 905aaf8f0d..bb75bdbe91 100644
+index dee6fea261..4630cc6061 100644
 --- a/codex-rs/http-client/src/route_aware_client_pool.rs
 +++ b/codex-rs/http-client/src/route_aware_client_pool.rs
 @@ -141,7 +141,8 @@ impl RouteAwareRequestError {
@@ -336,7 +309,7 @@ index 905aaf8f0d..bb75bdbe91 100644
              | Self::Request(_)
              | Self::Policy(_)
              | Self::Build(_)
-@@ -507,7 +508,7 @@ impl RouteAwareClientPool {
+@@ -521,7 +522,7 @@ impl RouteAwareClientPool {
              let _build_permit = build_permit;
              let client = match (
                  pool.http_client_factory.outbound_proxy_policy(),
@@ -345,7 +318,7 @@ index 905aaf8f0d..bb75bdbe91 100644
              ) {
                  (_, CustomCaFallback::LegacyDirect) => {
                      Ok(client_builder.build_with_custom_ca_fallback(ProxyRouting::Direct))
-@@ -550,6 +551,7 @@ impl RouteAwareClientPool {
+@@ -564,6 +565,7 @@ impl RouteAwareClientPool {
              && (self.http_client_factory.outbound_proxy_policy()
                  == OutboundProxyPolicy::RespectSystemProxy
                  || self.http_client_factory.network_policy().is_managed()
@@ -354,10 +327,10 @@ index 905aaf8f0d..bb75bdbe91 100644
      }
  
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index f66d6bfa9a..a2284473ca 100644
+index 49c47948f9..e0c05136fa 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -1170,7 +1170,9 @@ async fn run_ratatui_app(
+@@ -1216,7 +1216,9 @@ async fn run_ratatui_app(
      let workload_identity_selected = is_workload_identity_selected();
      color_eyre::install()?;
  

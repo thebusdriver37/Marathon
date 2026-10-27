@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index a5e5a31113..0a574e2362 100644
+index 3b629fbd0a..ff0ee02962 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -401,6 +401,7 @@ mod turn_lifecycle;
+@@ -408,6 +408,7 @@ mod turn_lifecycle;
  mod turn_runtime;
  use self::turn_lifecycle::TurnLifecycleState;
  mod turn_throughput;
@@ -11,10 +11,10 @@ index a5e5a31113..0a574e2362 100644
  mod usage;
  mod user_messages;
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 1724a4757c..68225cd883 100644
+index 5391e79a1b..85c0ae365c 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
-@@ -113,6 +113,21 @@ impl ChatWidget {
+@@ -117,6 +117,21 @@ impl ChatWidget {
                  self.handle_turn_completed_notification(notification, replay_kind);
              }
              ServerNotification::ItemStarted(notification) => {
@@ -36,7 +36,7 @@ index 1724a4757c..68225cd883 100644
                  self.handle_item_started_notification(notification, replay_kind);
              }
              ServerNotification::ItemCompleted(notification) => {
-@@ -120,7 +135,7 @@ impl ChatWidget {
+@@ -124,7 +139,7 @@ impl ChatWidget {
              }
              ServerNotification::AgentMessageDelta(notification) => {
                  if !from_replay {
@@ -45,7 +45,7 @@ index 1724a4757c..68225cd883 100644
                  }
                  self.restore_realtime_transcripts_before_turn(&notification.turn_id);
                  if !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
-@@ -135,14 +150,14 @@ impl ChatWidget {
+@@ -141,14 +156,14 @@ impl ChatWidget {
              }
              ServerNotification::PlanDelta(notification) => {
                  if !from_replay {
@@ -62,7 +62,7 @@ index 1724a4757c..68225cd883 100644
                  }
                  if !self.is_realtime_delegated_reasoning_item(
                      &notification.turn_id,
-@@ -155,7 +170,7 @@ impl ChatWidget {
+@@ -161,7 +176,7 @@ impl ChatWidget {
              }
              ServerNotification::ReasoningTextDelta(notification) => {
                  if !from_replay {
@@ -72,10 +72,10 @@ index 1724a4757c..68225cd883 100644
                  if self.config.show_raw_agent_reasoning
                      && !self.is_realtime_delegated_reasoning_item(
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index ef1476c327..481eb60d23 100644
+index c4a2477af5..7c2cb47f37 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -449,10 +449,15 @@ impl ChatWidget {
+@@ -455,10 +455,15 @@ impl ChatWidget {
      }
  
      pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
@@ -94,10 +94,10 @@ index ef1476c327..481eb60d23 100644
  
      pub(super) fn status_line_limit_display(
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 035ff17ad4..f8f1f434f7 100644
+index 5c9461d06b..8a4470e68f 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3050,8 +3050,11 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3104,8 +3104,11 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
      let started_at = Instant::now() - Duration::from_secs(200);
      chat.turn_throughput.start_turn();
@@ -111,7 +111,7 @@ index 035ff17ad4..f8f1f434f7 100644
      let response_usage = TokenUsage {
          total_tokens: 4_200,
          output_tokens: 4_200,
-@@ -3081,6 +3084,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+@@ -3135,6 +3138,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
      );
  }
  
@@ -141,11 +141,11 @@ index 035ff17ad4..f8f1f434f7 100644
  async fn status_line_legacy_context_usage_renders_context_used_percent() {
      let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-index 609eabf91c..08f311e859 100644
+index 2a99c28823..fbc3981c63 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
 +++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
-@@ -115,8 +115,13 @@ impl ChatWidget {
-         self.request_redraw();
+@@ -127,8 +127,13 @@ impl ChatWidget {
+         }
      }
  
 -    pub(super) fn record_turn_output_delta(&mut self, delta: &str) {

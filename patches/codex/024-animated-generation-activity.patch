@@ -1,8 +1,8 @@
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index 01a59c276b..c7d760ef23 100644
+index 6f13a068ff..704337a074 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -401,6 +401,7 @@ mod turn_lifecycle;
+@@ -408,6 +408,7 @@ mod turn_lifecycle;
  mod turn_runtime;
  use self::turn_lifecycle::TurnLifecycleState;
  mod turn_throughput;
@@ -10,19 +10,19 @@ index 01a59c276b..c7d760ef23 100644
  use self::turn_throughput::GenerationStage;
  use self::turn_throughput::TurnThroughput;
  mod usage;
-@@ -1185,6 +1186,7 @@ impl ChatWidget {
+@@ -1209,6 +1210,7 @@ impl ChatWidget {
              self.refresh_terminal_title();
          }
          self.refresh_status_line_if_workspace_headline_due();
 +        self.refresh_active_generation_status_line();
          self.refresh_thread_usage_if_settlement_due();
+         self.refresh_terminal_program_status();
      }
- 
 diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
-index b5b0ab1283..1c23e244f5 100644
+index 6cee067236..6432cb2b54 100644
 --- a/codex-rs/tui/src/chatwidget/status_controls.rs
 +++ b/codex-rs/tui/src/chatwidget/status_controls.rs
-@@ -450,12 +450,23 @@ impl ChatWidget {
+@@ -456,12 +456,23 @@ impl ChatWidget {
  
      pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
          if let Some(stage) = self.turn_throughput.generation_stage() {
@@ -47,7 +47,7 @@ index b5b0ab1283..1c23e244f5 100644
                  if progress.line_count > 0 {
                      let unit = if progress.line_count == 1 {
                          "line"
-@@ -466,16 +477,16 @@ impl ChatWidget {
+@@ -472,16 +483,16 @@ impl ChatWidget {
                  }
                  label.push_str(&format!(
                      " · {}",
@@ -68,7 +68,7 @@ index b5b0ab1283..1c23e244f5 100644
              });
          }
  
-@@ -496,6 +507,23 @@ impl ChatWidget {
+@@ -502,6 +513,23 @@ impl ChatWidget {
          Some(label)
      }
  
@@ -93,10 +93,10 @@ index b5b0ab1283..1c23e244f5 100644
          &self,
          window: Option<&RateLimitWindowDisplay>,
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index f28c6a4d9c..797d75a7ec 100644
+index f6fbf9c7e4..e2802864b1 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-@@ -3137,27 +3137,84 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
+@@ -3191,27 +3191,84 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
      handle_turn_started(&mut chat, "turn-stage");
      chat.refresh_status_line();
      assert!(
@@ -190,7 +190,7 @@ index f28c6a4d9c..797d75a7ec 100644
      );
  }
  
-@@ -3187,7 +3244,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3241,7 +3298,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
  
      let drafting = status_line_text(&chat).expect("drafting status");
      assert!(
@@ -199,7 +199,7 @@ index f28c6a4d9c..797d75a7ec 100644
          "unexpected drafting status: {drafting}"
      );
  
-@@ -3206,7 +3263,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3260,7 +3317,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
      );
      assert!(
          status_line_text(&chat).is_some_and(|status| {
@@ -208,7 +208,7 @@ index f28c6a4d9c..797d75a7ec 100644
          }),
          "patch application should replace the drafting stage"
      );
-@@ -3225,8 +3282,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+@@ -3279,8 +3336,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
          None,
      );
      assert!(

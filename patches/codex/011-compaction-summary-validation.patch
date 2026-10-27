@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index f4db71b688..eb09451f7c 100644
+index 163e7d53e4..7d0a82e6e4 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -22,7 +22,7 @@ use crate::responses_metadata::CompactionTurnMetadata;
@@ -11,7 +11,7 @@ index f4db71b688..eb09451f7c 100644
  use crate::session::turn_context::TurnContext;
  use crate::state::AutoCompactWindowIds;
  use crate::util::backoff;
-@@ -46,6 +46,7 @@ use codex_protocol::models::AgentMessageInputContent;
+@@ -49,6 +49,7 @@ use codex_protocol::models::AgentMessageInputContent;
  use codex_protocol::models::BaseInstructions;
  use codex_protocol::models::ContentItem;
  use codex_protocol::models::ContentItemKind;
@@ -19,7 +19,7 @@ index f4db71b688..eb09451f7c 100644
  use codex_protocol::models::ResponseInputItem;
  use codex_protocol::models::ResponseItem;
  use codex_protocol::protocol::EventMsg;
-@@ -369,17 +370,7 @@ async fn run_compact_task_inner_impl(
+@@ -389,17 +390,7 @@ async fn run_compact_task_inner_impl(
  
      let history_snapshot = sess.clone_history().await;
      let history_items = history_snapshot.annotated_items();
@@ -38,7 +38,7 @@ index f4db71b688..eb09451f7c 100644
      let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
      let user_messages = collect_annotated_user_messages(history_items);
  
-@@ -765,7 +756,7 @@ fn build_compacted_history_with_limit(
+@@ -815,7 +806,7 @@ fn build_compacted_history_with_limit(
  
  struct CompactionResponse {
      response_id: String,
@@ -47,7 +47,7 @@ index f4db71b688..eb09451f7c 100644
  }
  
  async fn drain_to_completed(
-@@ -795,6 +786,7 @@ async fn drain_to_completed(
+@@ -847,6 +838,7 @@ async fn drain_to_completed(
          )
          .await?;
      let mut output = Vec::new();
@@ -55,39 +55,25 @@ index f4db71b688..eb09451f7c 100644
      loop {
          let maybe_event = stream.next().await;
          let Some(event) = maybe_event else {
-@@ -804,24 +796,14 @@ async fn drain_to_completed(
+@@ -856,7 +848,16 @@ async fn drain_to_completed(
          };
          match event {
-             Ok(ResponseEvent::OutputItemDone(item)) => {
--                if matches!(phase, CompactionPhase::PostTurn) {
--                    // Commit post-turn summaries only after success; failures must leave both
--                    // the live history and persisted rollout intact.
--                    output.push(item);
--                } else {
--                    sess.record_annotated_conversation_items(
--                        turn_context,
--                        turn_context.model_info(),
--                        vec![ResponseItemEnvelope {
--                            item,
--                            metadata: Some(CodexHarnessMetadata {
--                                compaction_output: true,
--                                ..Default::default()
--                            }),
--                        }],
--                    )
--                    .await;
+             // Keep each attempt isolated until the response completes successfully.
+-            Ok(ResponseEvent::OutputItemDone(item)) => output.push(item),
++            Ok(ResponseEvent::OutputItemDone(item)) => {
 +                if !matches!(&item, ResponseItem::Message {
 +                    phase: Some(MessagePhase::Commentary), ..
 +                }) && let Some(message) = last_assistant_message_from_item(&item, false)
 +                    && !message.trim().is_empty()
 +                {
 +                    summary = Some(message);
-                 }
++                }
 +                output.push(item);
-             }
++            }
              Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                  sess.set_server_reasoning_included(included).await;
-@@ -844,9 +826,25 @@ async fn drain_to_completed(
+             }
+@@ -894,9 +895,25 @@ async fn drain_to_completed(
                  .await;
                  sess.update_token_usage_info(turn_context, token_usage.as_ref())
                      .await?;
@@ -115,10 +101,10 @@ index f4db71b688..eb09451f7c 100644
              }
              Ok(_) => continue,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 64e8786a15..69b6ab4c7b 100644
+index 65cbd64a18..4b7c299c38 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -45,7 +45,6 @@ use crate::stream_events_utils::TurnItemContributorPolicy;
+@@ -49,7 +49,6 @@ use crate::stream_events_utils::TurnItemContributorPolicy;
  use crate::stream_events_utils::finalize_non_tool_response_item;
  use crate::stream_events_utils::handle_non_tool_response_item;
  use crate::stream_events_utils::handle_output_item_done;
@@ -126,7 +112,7 @@ index 64e8786a15..69b6ab4c7b 100644
  use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
  use crate::stream_events_utils::raw_assistant_output_text_from_item;
  use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
-@@ -3190,17 +3189,6 @@ async fn try_run_sampling_request(
+@@ -3455,17 +3454,6 @@ async fn try_run_sampling_request(
      outcome
  }
  
@@ -145,10 +131,10 @@ index 64e8786a15..69b6ab4c7b 100644
  #[path = "turn_tests.rs"]
  mod tests;
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
-index b46bc107e9..f41ce2dbb9 100644
+index b3522a09b2..6d5e210bd4 100644
 --- a/codex-rs/core/tests/suite/compact.rs
 +++ b/codex-rs/core/tests/suite/compact.rs
-@@ -4152,6 +4152,200 @@ async fn manual_compact_retries_after_context_window_error() {
+@@ -4456,6 +4456,200 @@ async fn manual_compact_retries_after_context_window_error() {
      }
  }
  

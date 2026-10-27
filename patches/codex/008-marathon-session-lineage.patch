@@ -1,17 +1,20 @@
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index d9536c84f8..f66d6bfa9a 100644
+index 238fef5d02..49c47948f9 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -799,7 +799,21 @@ async fn lookup_session_target_with_app_server(
+@@ -833,10 +833,21 @@ async fn lookup_session_target_with_app_server(
              .thread_read(thread_id, /*include_turns*/ false)
              .await
          {
--            Ok(thread) => Ok(session_target_from_app_server_thread(thread)),
+-            Ok(thread) => Ok(session_target_from_app_server_thread(
+-                app_server.backend_id(),
+-                thread,
+-            )),
 +            Ok(thread)
 +                if app_server.uses_remote_workspace()
 +                    || thread.model_provider == config.model_provider_id =>
 +            {
-+                Ok(session_target_from_app_server_thread(thread))
++                Ok(session_target_from_app_server_thread(app_server.backend_id(), thread))
 +            }
 +            Ok(thread) => {
 +                warn!(

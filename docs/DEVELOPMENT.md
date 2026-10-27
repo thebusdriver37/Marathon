@@ -70,7 +70,7 @@ Both runtime patchers preserve upstream sources and existing worktree edits, and
 ## Cached frontend builds
 
 The Codex baseline is pinned by both `config/codex.ref` and the `codex` submodule.
-The current baseline is `rust-v0.162.1` (`092d3acd6bec3e3a14bdc7e7a2810ab628ab759d`).
+The current baseline is `rust-v0.165.0` (`360319d8dee62d87e2d59fc0c21805d79519cfed`).
 Its patch rebase preserves per-step model usage accounting, validated compaction
 summaries with upstream compaction metadata, provider-filtered session lookup,
 and local-only routing through the asynchronous HTTP client builder. The terminal
@@ -78,6 +78,14 @@ uses upstream's current layout with Marathon branding and performance indicators
 Protocol export bundles and the generated Python response types must be regenerated
 when Marathon's response metrics schema changes. Native patch tests use synthetic
 fixtures and temporary homes, not personal conversation history.
+The 0.165.0 rebase also retains upstream replay timers and incomplete-response
+spending accounting, and moves the child-output sandbox fix to
+`linux-sandbox/src/seccomp.rs`.
+
+The update passed 614 selected native tests and the 588-test Python suite
+(14 optional skips), plus six opt-in binary resume and sandbox checks. The
+hardened release passed the offline startup, tool, and resume trace with a
+75-second idle interval and zero non-loopback connections.
 
 Marathon resumes each conversation with its persisted model and reasoning effort.
 The launcher sets `MARATHON_RESTORE_THREAD_MODEL=1` so its startup defaults do not
