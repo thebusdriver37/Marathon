@@ -38,6 +38,27 @@ def fixture_profile(context_window: int = 262_144) -> router_module.ModelProfile
 
 
 class RouterContextTests(unittest.TestCase):
+    def test_external_alias_resolution_requires_unique_match_and_prefers_catalog_id(self):
+        profile = replace(fixture_profile(), alias="spark/LR7", external=True)
+        state = object.__new__(router_module.RouterState)
+        state.default_model = profile.slug
+        state.available_profiles = {profile.slug: profile}
+        state._refresh_profiles = lambda: state.available_profiles
+        self.assertIs(state.resolve_model(" spark/LR7 "), profile)
+        self.assertIs(state.resolve_model(None), profile)
+        with self.assertRaisesRegex(ValueError, "unknown or unavailable"):
+            state.resolve_model("missing")
+        other = replace(profile, slug="second-profile")
+        state.available_profiles[other.slug] = other
+        with self.assertRaisesRegex(ValueError, "ambiguous external model"):
+            state.resolve_model(profile.alias)
+        exact = replace(profile, slug=profile.alias, alias="different", external=False)
+        state.available_profiles[exact.slug] = exact
+        self.assertIs(state.resolve_model(exact.slug), exact)
+        state.available_profiles = {profile.slug: replace(profile, external=False)}
+        with self.assertRaisesRegex(ValueError, "unknown or unavailable"):
+            state.resolve_model(profile.alias)
+
     def test_image_limit_error_classification_is_specific(self):
         error = json.dumps({"error": {"error": {"message": "a request supports at most 4 images"}}})
         self.assertEqual(router_module._backend_image_limit(400, error), 4)

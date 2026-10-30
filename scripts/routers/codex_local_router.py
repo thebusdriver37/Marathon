@@ -3453,6 +3453,16 @@ class RouterState:
         model_key = (requested_model or self.default_model).strip()
         if model_key in self.available_profiles:
             return self.available_profiles[model_key]
+        # CLI callers may use the broker's public model name instead of the
+        # Marathon catalog ID. Only resolve an unambiguous external alias.
+        matches = [profile for profile in self.available_profiles.values()
+                   if profile.external and profile.alias == model_key]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise ValueError(
+                f"ambiguous external model '{model_key}'; use a Marathon catalog ID"
+            )
         raise ValueError(f"unknown or unavailable local model '{model_key}'")
 
     async def ensure_model_async(self, requested_model: str | None) -> ModelProfile:
@@ -6168,7 +6178,8 @@ class RouterState:
                         self.lineage.move_to_end(previous_response_id)
             if parent_snapshot is None:
                 raise RuntimeError(f"unknown previous_response_id: {previous_response_id}")
-            if requested_model and requested_model != parent_snapshot.profile_slug:
+            if (requested_model and requested_model != parent_snapshot.profile_slug and
+                    self.resolve_model(requested_model).slug != parent_snapshot.profile_slug):
                 raise RuntimeError(
                     f"previous_response_id {previous_response_id} belongs to model "
                     f"{parent_snapshot.profile_slug}, not {requested_model}"

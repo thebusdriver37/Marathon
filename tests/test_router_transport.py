@@ -49,16 +49,17 @@ def events_from_bytes(wire):
 
 
 @asynccontextmanager
-async def serving(backend):
+async def serving(backend, *, alias=None):
     upstream = web.Application()
     upstream.router.add_post("/v1/responses", backend)
     upstream.router.add_post("/v1/chat/completions", backend)
     async def models(_request):
-        return web.json_response({"data": [{"id": fixture_profile().alias}]})
+        return web.json_response({"data": [{"id": alias or fixture_profile().alias}]})
     upstream.router.add_get("/v1/models", models)
     with tempfile.TemporaryDirectory() as temporary:
         async with TestServer(upstream) as upstream_server, ClientSession() as http:
             profile = replace(fixture_profile(), supports_slots=False,
+                              alias=alias or fixture_profile().alias, external=bool(alias),
                               target=str(upstream_server.make_url("")))
             with mock.patch.object(router, "_available_profiles", return_value={profile.slug: profile}), \
                     mock.patch.dict(os.environ, {"MARATHON_LAZY_POOL_BACKEND": "",
@@ -114,6 +115,43 @@ async def websocket_turn(http, server, tools):
 
 
 class RouterTransportRegressions(unittest.IsolatedAsyncioTestCase):
+    async def test_external_alias_and_catalog_id_share_response_lineage(self):
+        alias = "spark/Qwen3.8-Flash-Next-LR7"
+        for transport in ("http", "websocket"):
+            with self.subTest(transport=transport):
+                requests = []
+                backend = scripted_backend(lambda data, count: [answer()], requests)
+                async with serving(backend, alias=alias) as (state, http, server):
+                    previous = None
+                    for model in (alias, alias, fixture_profile().slug):
+                        payload = {"model": model, "input": [{"role": "user", "content": "Reply OK."}]}
+                        if previous:
+                            payload["previous_response_id"] = previous
+                        if transport == "websocket":
+                            async with http.ws_connect(server.make_url('/v1/responses')) as ws:
+                                await ws.send_json(dict(payload, type="response.create"))
+                                while True:
+                                    event = await asyncio.wait_for(ws.receive_json(), 5)
+                                    if event["type"] in {"response.completed", "response.failed"}:
+                                        break
+                                self.assertEqual(event["type"], "response.completed", event)
+                                body = event["response"]
+                        else:
+                            async with http.post(server.make_url('/v1/responses'), json=payload) as response:
+                                body = await response.json()
+                                self.assertEqual(response.status, 200, body)
+                        previous = body["id"]
+                        self.assertEqual(state.lineage[previous].profile_slug, fixture_profile().slug)
+                    self.assertEqual([r['model'] for r in requests], [alias] * 3)
+                    other = replace(state.available_profiles[fixture_profile().slug], slug="another-model")
+                    state.available_profiles[other.slug] = other
+                    async with http.post(server.make_url('/v1/responses'), json={
+                        "model": other.slug, "previous_response_id": previous, "input": []
+                    }) as response:
+                        body = await response.json()
+                        self.assertIn("belongs to model", json.dumps(body))
+                    self.assertEqual(len(requests), 3)
+
     async def test_image_limit_recovers_history_for_http_and_websocket(self):
         def image_item(index):
             return {"type": "message", "role": "user", "content": [
