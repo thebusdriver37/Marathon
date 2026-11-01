@@ -159,3 +159,38 @@ class ToolContractTests(unittest.TestCase):
             return True
         asyncio.run(state._request_responses_stream(fixture_profile(), {'tools': TOOLS, 'input': []}, event_sink=sink))
         self.assertEqual(''.join(e.get('delta', '') for e in received if e['type'] == 'response.output_text.delta'), text)
+
+    def test_safe_comparisons_and_quoted_code_stream_before_completion(self):
+        for parts in (
+            ['For comparison, x <', ' y.\n', 'The answer keeps streaming.'],
+            ['Example:\n```python\n', 'if x <', ' y:\n', '    print(x)\n', '```\n'],
+            ['Example:\n```xml\n', '<tool_call>\n', '<function=exec_command>\n', '```\n'],
+            ['Use `x < y` in the comparison.\n', 'Then keep streaming.'],
+            ['A trailing less-than sign: <', '\n', 'Ordinary next line.'],
+        ):
+            with self.subTest(parts=parts):
+                state = object.__new__(router.RouterState)
+                context = mock.MagicMock()
+                context.__aenter__.return_value = SimpleNamespace(status=200, content=None)
+                state.http_client = mock.Mock()
+                state.http_client.post.return_value = context
+                received = []
+                text = ''.join(parts)
+
+                async def events(_content):
+                    yield {'type': 'response.output_item.added', 'item': message('')}
+                    prefix = ''
+                    for part in parts:
+                        prefix += part
+                        yield {'type': 'response.output_text.delta', 'item_id': 'synthetic-message', 'delta': part}
+                        if not prefix.endswith('<'):
+                            self.assertEqual(''.join(e.get('delta', '') for e in received), prefix)
+                    yield {'type': 'response.output_item.done', 'item': message(text)}
+                    yield {'type': 'response.completed', 'response': {'output': [message(text)], 'usage': {}}}
+
+                async def sink(event):
+                    received.append(event)
+                    return True
+
+                state._iter_sse_json = events
+                asyncio.run(state._request_responses_stream(fixture_profile(), {'tools': TOOLS}, event_sink=sink))

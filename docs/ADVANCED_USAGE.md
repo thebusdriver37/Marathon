@@ -98,7 +98,9 @@ Marathon retains up to eight starter snapshots within a 16 GiB default limit.
 The optional `MARATHON_STARTER_CACHE_MAX_COUNT` and `MARATHON_STARTER_CACHE_MAX_BYTES` environment variables adjust those limits.
 
 Rolling conversation checkpoints are separate from the starter cache and are enabled by default for llama.cpp backends with slot support.
-Marathon waits for 60 seconds of conversation inactivity before saving, which keeps the large disk write off the response path.
+Marathon waits for 60 seconds of conversation inactivity before attempting a background save.
+If a new reply arrives during checkpoint preparation, the checkpoint yields and retries after another idle period.
+A slot write already in progress finishes before the reply uses that slot, preserving the atomic snapshot and its sidecars.
 Before writing the checkpoint, Marathon moves the live slot to a token boundary that any next user turn can extend.
 This preserves disk-cache reuse for recurrent and hybrid models whose generated tail cannot be rolled backward after a restore.
 For multimodal conversations, Marathon saves the already validated live slot directly because rebuilding a text-only boundary would discard every token after the first image.

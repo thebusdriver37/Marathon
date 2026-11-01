@@ -211,6 +211,10 @@ class BackendImageLimitError(RuntimeError):
         super().__init__(f"Backend accepts at most {limit} images per request")
 
 
+class _CheckpointDeferred(RuntimeError):
+    """An idle checkpoint yielded before starting its next slot operation."""
+
+
 def _backend_image_limit(status: int, text: str) -> int | None:
     if status != 400:
         return None
@@ -1325,6 +1329,21 @@ class _ToolMarkupScanner:
                 self.partial = line
         found, _ = _tool_markup_line(self.partial, self.fence)
         return self.found or found
+
+    def pending_marker(self) -> bool:
+        """Hold only a suffix that could become an unquoted protocol marker."""
+        if self.prefix is not None or self.fence is not None:
+            return False
+        line = self.partial
+        stripped = line.lstrip()
+        if stripped.startswith(">") or re.match(r"(`{3,}|~{3,})", stripped):
+            return False
+        unquoted = re.sub(r"(`+).*?\1", "", line) if "`" in line else line
+        marker = "<tool_call>"
+        if any(unquoted.endswith(marker[:length]) for length in range(1, len(marker))):
+            return True
+        stripped = unquoted.lstrip()
+        return bool(stripped) and "<function=".startswith(stripped)
 
 
 def _compaction_summary_error(items: list[dict[str, Any]]) -> str | None:
@@ -2502,6 +2521,7 @@ class RouterState:
         self.lock = threading.Lock()
         self.model_lock = threading.Lock()
         self.backend_lock = asyncio.Lock()
+        self._generation_requests = 0
         self.backend_image_limits: dict[tuple[str, str], int] = {}
         self.lineage_lock = asyncio.Lock()
         self.debug = debug
@@ -3614,9 +3634,8 @@ class RouterState:
         async def send_event(event: dict[str, Any]) -> None:
             if event_sink is None:
                 return
-            # Hold text from the first '<' until the message is validated.
-            # This catches markers split across arbitrary SSE chunks without
-            # delaying ordinary prose or interpreting text as executable code.
+            # Hold ambiguous protocol prefixes across chunks, releasing them
+            # as soon as they resolve to ordinary text or quoted code.
             kind = event.get("type")
             item = event.get("item")
             if request.get("tools"):
@@ -3628,9 +3647,12 @@ class RouterState:
                         scanner = message_markup_scanners[key] = _ToolMarkupScanner()
                     if scanner.feed(delta):
                         raise ToolProtocolError("assistant text contained tool-call markup, not a structured tool call; that text was not executed")
-                    if key in held_text_events or "<" in delta:
+                    if scanner.pending_marker():
                         held_text_events.setdefault(key, []).append(copy.deepcopy(event))
                         return
+                    for held in held_text_events.pop(key, []):
+                        if not await event_sink(held):
+                            raise ConnectionError("websocket client disconnected")
                 elif isinstance(item, dict) and _is_assistant_message_item(item):
                     error = _response_tool_protocol_error({"output": [item]}, tool_argument_limit, request.get("tools", []))
                     if error:
@@ -3945,6 +3967,8 @@ class RouterState:
         payload = {"filename": filename} if filename is not None else None
         # Serialize on-disk save/restore with cross-model retention cleanup.
         async with self.slot_checkpoint_store.lock_io():
+            if action == "save":
+                self._defer_idle_checkpoint()
             result = await self._request_json(
                 profile,
                 "POST",
@@ -4661,40 +4685,59 @@ class RouterState:
             "priority": "post-compaction" if post_compaction else "normal",
         }
 
+    def _defer_idle_checkpoint(self) -> None:
+        if (
+            getattr(self, "_generation_requests", 0)
+            and asyncio.current_task() in getattr(self, "checkpoint_tasks", {}).values()
+        ):
+            raise _CheckpointDeferred("incoming generation takes priority over an idle checkpoint")
+
     async def _save_checkpoint_after_idle(self, profile_slug: str) -> None:
         current_task = asyncio.current_task()
         try:
-            if self.slot_snapshot_idle_seconds > 0:
-                await asyncio.sleep(self.slot_snapshot_idle_seconds)
-            candidate = self.pending_checkpoints.get(profile_slug)
-            if candidate is None:
-                return
-            result = await self._save_conversation_checkpoint(
-                candidate,
-                force=candidate.post_compaction,
-            )
-            self.telemetry.emit(
-                "router.conversation_checkpoint.completed",
-                {
-                    "profile_slug": profile_slug,
-                    "status": result.get("status"),
-                    "reason": result.get("reason"),
-                    "size_bytes": result.get("size_bytes"),
-                    "context_tokens": result.get("context_tokens"),
-                    "priority": (
-                        "post-compaction" if candidate.post_compaction else "normal"
-                    ),
-                },
-            )
-            if (
-                result.get("status") != "error"
-                and self.pending_checkpoints.get(profile_slug) == candidate
-            ):
-                self.pending_checkpoints.pop(profile_slug, None)
-                if candidate.post_compaction:
-                    self._post_compaction_checkpoint_keys().discard(
-                        (candidate.profile_slug, candidate.prompt_cache_key)
+            while True:
+                if self.slot_snapshot_idle_seconds > 0:
+                    await asyncio.sleep(self.slot_snapshot_idle_seconds)
+                candidate = self.pending_checkpoints.get(profile_slug)
+                if candidate is None:
+                    return
+                try:
+                    result = await self._save_conversation_checkpoint(
+                        candidate,
+                        force=candidate.post_compaction,
                     )
+                except _CheckpointDeferred as exc:
+                    self.telemetry.emit("router.conversation_checkpoint.deferred", {
+                        "profile_slug": profile_slug, "reason": str(exc),
+                    })
+                    # Retain the candidate and retry after another idle period.
+                    # A completed generation replaces it with its latest history.
+                    if self.slot_snapshot_idle_seconds <= 0:
+                        await asyncio.sleep(0.1)
+                    continue
+                self.telemetry.emit(
+                    "router.conversation_checkpoint.completed",
+                    {
+                        "profile_slug": profile_slug,
+                        "status": result.get("status"),
+                        "reason": result.get("reason"),
+                        "size_bytes": result.get("size_bytes"),
+                        "context_tokens": result.get("context_tokens"),
+                        "priority": (
+                            "post-compaction" if candidate.post_compaction else "normal"
+                        ),
+                    },
+                )
+                if (
+                    result.get("status") != "error"
+                    and self.pending_checkpoints.get(profile_slug) == candidate
+                ):
+                    self.pending_checkpoints.pop(profile_slug, None)
+                    if candidate.post_compaction:
+                        self._post_compaction_checkpoint_keys().discard(
+                            (candidate.profile_slug, candidate.prompt_cache_key)
+                        )
+                return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4789,6 +4832,7 @@ class RouterState:
                 body,
                 retry_connection_error=True,
             )
+            self._defer_idle_checkpoint()
             prompt = rendered.get("prompt")
             if not isinstance(prompt, str) or not prompt:
                 raise RuntimeError(
@@ -4806,6 +4850,7 @@ class RouterState:
                 retry_connection_error=True,
             )
             tokenized_prompts.append(_token_ids(tokenized))
+            self._defer_idle_checkpoint()
 
         prompt_tokens = _starter_common_token_prefix(*tokenized_prompts)
         prefilled = await self._request_json(
@@ -4851,6 +4896,7 @@ class RouterState:
     ) -> dict[str, Any]:
         """Save a checkpoint while the caller owns ``backend_lock``."""
 
+        self._defer_idle_checkpoint()
         profile = self.available_profiles.get(candidate.profile_slug)
         if profile is None or not profile.supports_slots:
             return {"status": "skipped", "reason": "model no longer supports slots"}
@@ -4872,6 +4918,7 @@ class RouterState:
             backend_cache_id=self.backend_cache_id,
             scaffold_fingerprint=candidate.scaffold_fingerprint,
         )
+        self._defer_idle_checkpoint()
         if existing is not None and existing.metadata is not None:
             metadata = existing.metadata
             if (
@@ -4991,6 +5038,9 @@ class RouterState:
                         candidate.checkpoint_request,
                     )
                 )
+            self._defer_idle_checkpoint()
+            # Once sent, a slot write must finish before generation can use it.
+            # Yield above (and after acquiring the I/O lock), never mid-write.
             await self.save_slot(profile, pending_filename)
             saved_context_tokens = int(boundary_result["context_tokens"])
             result = await asyncio.to_thread(
@@ -6125,10 +6175,17 @@ class RouterState:
             payload = flatten_request(payload, names)
         async def translated(event):
             return await event_sink(restore_calls(event, names))
-        result = await self._process_translated_create(
-            payload, preset_response_id=preset_response_id,
-            event_sink=translated if names and event_sink is not None else event_sink,
-        )
+        generate = payload.get("generate") is not False
+        if generate:
+            self._generation_requests = getattr(self, "_generation_requests", 0) + 1
+        try:
+            result = await self._process_translated_create(
+                payload, preset_response_id=preset_response_id,
+                event_sink=translated if names and event_sink is not None else event_sink,
+            )
+        finally:
+            if generate:
+                self._generation_requests -= 1
         return restore_calls(result, names) if names else result
 
     async def _process_translated_create(
