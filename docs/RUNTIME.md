@@ -80,6 +80,65 @@ These are llama.cpp source changes, not a redistribution of model weights or per
 The upstream license remains with the fetched source.
 Review the licenses of each model repository separately before redistributing weights.
 
+## CPU-checked DFlash host-staging candidate
+
+GPU follow-up on 2026-10-31 is complete: **do not promote this candidate**. Warm decode throughput averaged 0.49% lower across 8K, 32K, 128K and 186K occupied context, with matching token sequences. Original application/lifecycle checks and a frozen-source application rerun passed. The patch remains experimental; no production runtime or broker configuration changed, and no further testing is planned for this candidate. See [the result record](host-staging-gpu-20261031.json) for scope, exclusions, source consistency and privacy notes.
+
+`scripts/experiments/dflash-host-staging.patch` is an experimental follow-up to
+the 14 default Qwen patches. It is outside `patches/llama.cpp/qwen38/`, so setup
+and ordinary builds do not select it. No production runtime, model, power
+setting, broker, or existing worker was changed during this review.
+
+The patch reuses DFlash's per-sequence indexing vectors, uses the injection
+batch's position storage for the small encoder call, and sizes the small
+injection batch to `n_ubatch` instead of `n_batch`. Every injection chunk is
+already bounded by `n_ubatch`. The encoded embedding allocation therefore
+shrinks from `n_batch * n_embd_dec * sizeof(float)` to
+`n_ubatch * n_embd_dec * sizeof(float)`, with corresponding reductions to the
+position and sequence metadata. This is host memory, not a KV-cache or VRAM
+reduction. The patch changes no CUDA kernel, arithmetic, draft policy, context
+length, or cache serialization.
+
+This follows the allocation and scheduling review prompted by
+[Elpis](https://github.com/gildrb/elpis/tree/13e8b593ea4c65f605b5fe7ac7d5ebb7a24f3c19).
+Elpis's power-of-two scratch allocation is specific to its ExLlamaV3 path;
+Marathon does not have that same allocation to patch.
+
+CPU validation on 2026-10-29 used the pinned llama.cpp base plus all 14 default
+patches, fetched into a new temporary source checkout. The candidate passed
+C++17 syntax checking and 6,400 paired host-staging and draft-batch cases under
+AddressSanitizer and UndefinedBehaviorSanitizer. The checker extracts the real
+before/after method bodies and compares encoder/decoder inputs through API
+doubles. Cases exercise repeated calls, multiple sequences, microbatch tails,
+the fused-injection threshold, M-RoPE position jumps, image guards, and encoder
+and decoder failures. It neither loads a model nor links a GPU backend.
+
+Reproduce against a source checkout containing the default patches, without the
+candidate applied:
+
+```bash
+python3 scripts/experiments/check_dflash_host_staging.py \
+  --source /path/to/patched-llama.cpp
+```
+
+The source argument is read-only. The checker applies the candidate and compiles
+one test executable in its own temporary directory. It prints source and patch
+hashes with the result. It requires Git and a C++17 compiler with ASan/UBSan.
+These checks establish host-side equivalence within the fixture; they do not
+establish model-output equality, GPU correctness, or a throughput improvement.
+Before promotion, compare a separately built candidate with the current runtime
+on synthetic text, tool continuations, media, and checkpoint restore, at both
+short and long occupied context, using identical hardware/power and model files.
+
+Tree verification remains unimplemented. The pinned DFlash interface emits a
+linear token list. Supporting Elpis-style branches requires a tree descriptor
+through target attention, parent-specific recurrent/GDN state, accepted-path
+KV/state commit and rewind, and compatible media/checkpoint behavior. Changing
+only the selector would not implement tree verification. Elpis's tree guarantees
+are for its greedy path; Marathon's nonzero-temperature sampling also requires
+its own design and validation. No tree or new attention-kernel option is enabled
+by this candidate.
+
 ## Reproducibility boundary
 
 The original production image was `a6b27f3fd9c59d2756e447d8cc35576a541fb1db61624f18681199e297b97561`, a local Docker image ID rather than a published registry digest.

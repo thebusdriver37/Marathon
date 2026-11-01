@@ -67,6 +67,70 @@ Normal frontend installation builds and smoke-tests the binary without requiring
 To run the native patch suite as part of a build, install a recent `just` and `cargo-nextest`, then run `MARATHON_CODEX_RUN_TESTS=1 ./bin/marathon build-codex`.
 Both runtime patchers preserve upstream sources and existing worktree edits, and reuse unchanged patch stacks.
 
+## Matched runtime measurements
+
+`scripts/benchmarks/bench_openai.py` defaults to an offline plan. It sends no
+request, reads no credentials, and writes no results until `--run-inference` is
+supplied. It never starts workers or acquires GPU leases. When hardware becomes
+available, reserve isolated scratch workers separately before executing a plan.
+The existing `post_json` helper remains callable by the guarded cache benchmark.
+
+For example, this command only prints a plan:
+
+```bash
+python3 scripts/benchmarks/bench_openai.py \
+  --url http://127.0.0.1:19998/v1/chat/completions \
+  --candidate-url http://127.0.0.1:19999/v1/chat/completions \
+  --model qwen3.8-27b-uncensored \
+  --baseline-id CURRENT_BUILD_HASH --candidate-id CANDIDATE_BUILD_HASH \
+  --prompt 'Explain how to implement a bounded queue with cancellation.' \
+  --cache-mode cold --runs 6 --require-identical
+```
+
+Use `--prompt-file` for an explicitly selected public or synthetic long-context
+fixture. Record the exact target/drafter revisions, backend and patch hashes,
+launch arguments, GPU power and clocks alongside the build identities. The
+benchmark does not inspect these machine settings. Use the same inputs and
+output budgets for both arms; repeat at roughly 8K, 32K, 128K, and the supported
+upper context, leaving room for the output. Recorded prompt counts are actual
+server usage, not character-count estimates.
+
+When run explicitly, baseline/candidate order alternates between repetitions.
+`cold` requests disable llama.cpp prompt caching, `warm` requests enable it and
+require warmups, and `server-default` omits the llama.cpp cache extension. Inspect
+the reported cache counts: a requested cache policy is not proof that a backend
+honored it. Warmups are recorded separately. Paired latency is reported only
+when all pairs have complete, identical outputs and matching known input/cache
+counts. This checks counts, not token-ID or tokenizer equivalence.
+
+Schema version 2 separates whole-request `request_tps` from
+`backend_decode_tps` and `backend_prefill_tps`. Native phase timings follow
+llama.cpp's convention that its first generated token belongs to prefill.
+Missing counters stay null, with explicit metric coverage; there is no fallback
+from words to tokens or from request latency to decode time. The nonstreaming
+client does not measure time to first token or per-verification-round duration,
+and it does not infer round counts from variable-length draft proposals.
+Native drafted/accepted counters and acceptance ratios are retained when present.
+
+Failures and truncated responses remain in the report and fail its completion
+check. `--require-identical` also fails on differing message/finish hashes, with
+server-generated tool-call IDs excluded. This is an equivalence check, not a
+task-correctness or general model-quality score. Use the existing synthetic
+speculation-quality and reliability evaluators for promotion decisions. No
+prompt or response text is written to the benchmark report. `--save-json` needs
+a new path, and authentication uses `--api-key-env` rather than a key in argv.
+The previous ambiguous `tok_s_*` summary fields have been replaced by explicit
+metrics; callers must opt into inference with the new flag.
+
+CPU-only checks for this client:
+
+```bash
+python3 -m unittest discover -s tests -p test_bench_openai.py -v
+```
+
+The DFlash allocation candidate and its independent CPU differential are
+described in [runtime packaging](RUNTIME.md#cpu-checked-dflash-host-staging-candidate).
+
 ## Cached frontend builds
 
 The Codex baseline is pinned by both `config/codex.ref` and the `codex` submodule.

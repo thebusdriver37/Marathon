@@ -1,0 +1,64 @@
+{
+  "date": "2026-10-31",
+  "decision": "Do not promote; no demonstrated performance benefit. Testing complete; no further work planned on this candidate.",
+  "warm_decode_change_geomean_pct": -0.48502560180564425,
+  "gpu": "RTX 3090, GPU 3, unchanged 250 W cap",
+  "warm_decode": [
+    {
+      "context": 8192,
+      "control_tps": 80.36059877250837,
+      "candidate_tps": 80.06933873547229,
+      "change_pct": -0.36244134748250056,
+      "tokens_identical": true
+    },
+    {
+      "context": 32768,
+      "control_tps": 76.32952527960335,
+      "candidate_tps": 75.92526988919674,
+      "change_pct": -0.5296186356796739,
+      "tokens_identical": true
+    },
+    {
+      "context": 131072,
+      "control_tps": 55.124246707986146,
+      "candidate_tps": 54.8735965871078,
+      "change_pct": -0.45470031038452596,
+      "tokens_identical": true
+    },
+    {
+      "context": 186000,
+      "control_tps": 48.29823986458015,
+      "candidate_tps": 48.011737974405065,
+      "change_pct": -0.593193232255218,
+      "tokens_identical": true
+    }
+  ],
+  "native_requests": 68,
+  "original_app_stages_passed": 8,
+  "original_app_stages": 8,
+  "lifecycle_checks_passed": 13,
+  "frozen_app_stages_passed": 4,
+  "frozen_revision": "fcb22634176020928711cb3029f401a667d9dcd7",
+  "production_config_unchanged": true,
+  "test_worker_removed": true,
+  "gpu_after_cleanup": "1, 0, 250.00",
+  "evidence_directory": "/tmp/marathon-elpis-gpu-uKQwWK",
+  "limitations": {
+    "concurrent_router_edits_observed": true,
+    "rule": "Retain original task grades and timing evidence, but do not attribute app wall-time differences to the runtime patch. Repeat application checks with a frozen source revision.",
+    "frozen_revision": "fcb22634176020928711cb3029f401a667d9dcd7"
+  },
+  "timing_exclusions": [
+    {
+      "window": "window-2-candidate",
+      "depth": 131072,
+      "cache": "cold",
+      "repeat": -1,
+      "reason": "Concurrent model-metadata helper ran for roughly 10 seconds during this cold prefill; retain output validation, exclude this row from speed comparison."
+    }
+  ],
+  "privacy": {
+    "inference_and_grading": "New synthetic inputs and caches only; no existing private conversations or snapshots opened.",
+    "controller_lookup": "One model-metadata helper consulted the machine-local model metadata cache and may have refreshed it. Its overlapping cold 128K timing is excluded. Future runs isolate HOME/XDG/Docker configuration."
+  }
+}

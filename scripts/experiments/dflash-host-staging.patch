@@ -1,0 +1,136 @@
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -952,12 +952,20 @@
+ 
+     // scratch buffer for concatenated target features [n_tokens, n_embd_enc]
+     std::vector<float> features_buf;
++    std::vector<int32_t> i_batch_beg;
++    std::vector<int32_t> i_batch_end;
++    std::vector<int32_t> i_block_beg;
++    std::vector<int32_t> n_block;
+ 
+     common_speculative_impl_draft_dflash(const common_params_speculative & params, uint32_t n_seq,
+             common_speculative_type type = COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH)
+         : common_speculative_impl(type, n_seq, params.draft.n_max)
+         , params(params.draft)
+         , is_dspark(type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK)
++        , i_batch_beg(n_seq, -1)
++        , i_batch_end(n_seq, -1)
++        , i_block_beg(n_seq, -1)
++        , n_block(n_seq, 0)
+     {
+         auto * ctx_tgt = this->params.ctx_tgt;
+         auto * ctx_dft = this->params.ctx_dft;
+@@ -1020,7 +1028,7 @@
+         this->n_max = this->params.n_max;
+ 
+         batch              = llama_batch_init(llama_n_batch(ctx_dft), 0,          n_seq);
+-        batch_inject       = llama_batch_init(llama_n_batch(ctx_dft), n_embd_dec, n_seq);
++        batch_inject       = llama_batch_init(llama_n_ubatch(ctx_dft), n_embd_dec, n_seq);
+         batch_inject_fused = llama_batch_init(llama_n_ubatch(ctx_dft), n_embd_enc, n_seq);
+ 
+         // embd batches on an M-RoPE draft need 4 position rows per token
+@@ -1028,7 +1036,7 @@
+         media_arithmetic_supported = llama_supports_single_column_arithmetic(ctx_tgt);
+         if (is_mrope) {
+             free(batch_inject.pos);
+-            batch_inject.pos = (llama_pos *) malloc(sizeof(llama_pos) * 4 * llama_n_batch(ctx_dft));
++            batch_inject.pos = (llama_pos *) malloc(sizeof(llama_pos) * 4 * llama_n_ubatch(ctx_dft));
+             free(batch_inject_fused.pos);
+             batch_inject_fused.pos = (llama_pos *) malloc(sizeof(llama_pos) * 4 * llama_n_ubatch(ctx_dft));
+         }
+@@ -1130,8 +1138,8 @@
+         const int32_t n_tokens = batch_in.n_tokens;
+ 
+         // per-seq inclusive batch range (assumes each seq's tokens are contiguous in the batch)
+-        std::vector<int32_t> i_batch_beg(n_seq, -1);
+-        std::vector<int32_t> i_batch_end(n_seq, -1);
++        std::fill(i_batch_beg.begin(), i_batch_beg.end(), -1);
++        std::fill(i_batch_end.begin(), i_batch_end.end(), -1);
+         for (int32_t k = 0; k < n_tokens; ++k) {
+             GGML_ASSERT(batch_in.n_seq_id[k] == 1);
+             const llama_seq_id seq_id = batch_in.seq_id[k][0];
+@@ -1181,41 +1189,6 @@
+                     }
+                 }
+ 
+-                if (!use_fused_injection) {
+-                    std::vector<llama_pos> enc_pos;
+-                    if (is_mrope) {
+-                        enc_pos.resize((size_t) 4 * n_chunk);
+-                        for (int32_t i = 0; i < n_chunk; ++i) {
+-                            const llama_pos p = batch_in.pos[i_batch_beg[seq_id] + offset + i];
+-                            enc_pos[0 * n_chunk + i] = p;
+-                            enc_pos[1 * n_chunk + i] = p;
+-                            enc_pos[2 * n_chunk + i] = p;
+-                            enc_pos[3 * n_chunk + i] = 0;
+-                        }
+-                    }
+-
+-                    llama_batch enc_batch = {
+-                        /*.n_tokens =*/ n_chunk,
+-                        /*.token    =*/ nullptr,
+-                        /*.embd     =*/ features_buf.data(),
+-                        /*.pos      =*/ is_mrope ? enc_pos.data() : nullptr,
+-                        /*.n_seq_id =*/ nullptr,
+-                        /*.seq_id   =*/ nullptr,
+-                        /*.logits   =*/ nullptr,
+-                    };
+-
+-                    const int32_t rc = llama_encode(ctx_dft, enc_batch);
+-                    if (rc != 0) {
+-                        LOG_ERR("%s: llama_encode(ctx_dft) failed rc=%d (n_tokens=%d, offset=%d)\n",
+-                                __func__, rc, (int) n_chunk, (int) offset);
+-                        return false;
+-                    }
+-
+-                    const float * inp_g = llama_get_embeddings_nextn(ctx_dft);
+-                    GGML_ASSERT(inp_g && "DFlash encoder produced no output.");
+-                    std::memcpy(inject_batch.embd, inp_g, (size_t) n_chunk * n_embd_dec * sizeof(float));
+-                }
+-
+                 for (int32_t i = 0; i < n_chunk; ++i) {
+                     const llama_pos p = batch_in.pos[i_batch_beg[seq_id] + offset + i];
+                     inject_batch.pos[i] = p;
+@@ -1228,6 +1201,30 @@
+                     inject_batch.seq_id[i][0] = seq_id;
+                     inject_batch.logits[i]    = false;
+                 }
++
++                if (!use_fused_injection) {
++                    llama_batch enc_batch = {
++                        /*.n_tokens =*/ n_chunk,
++                        /*.token    =*/ nullptr,
++                        /*.embd     =*/ features_buf.data(),
++                        /*.pos      =*/ is_mrope ? inject_batch.pos : nullptr,
++                        /*.n_seq_id =*/ nullptr,
++                        /*.seq_id   =*/ nullptr,
++                        /*.logits   =*/ nullptr,
++                    };
++
++                    const int32_t rc = llama_encode(ctx_dft, enc_batch);
++                    if (rc != 0) {
++                        LOG_ERR("%s: llama_encode(ctx_dft) failed rc=%d (n_tokens=%d, offset=%d)\n",
++                                __func__, rc, (int) n_chunk, (int) offset);
++                        return false;
++                    }
++
++                    const float * inp_g = llama_get_embeddings_nextn(ctx_dft);
++                    GGML_ASSERT(inp_g && "DFlash encoder produced no output.");
++                    std::memcpy(inject_batch.embd, inp_g, (size_t) n_chunk * n_embd_dec * sizeof(float));
++                }
++
+                 llama_set_dflash_fused_injection(ctx_dft, use_fused_injection);
+                 const int32_t rc = llama_decode(ctx_dft, inject_batch);
+                 llama_set_dflash_fused_injection(ctx_dft, false);
+@@ -1249,8 +1246,8 @@
+ 
+         // build one batch holding every drafting sequence's noise block into a single decode)
+         // record where each block starts and its size
+-        std::vector<int32_t> i_block_beg(n_seq, -1);
+-        std::vector<int32_t> n_block    (n_seq,  0);
++        std::fill(i_block_beg.begin(), i_block_beg.end(), -1);
++        std::fill(n_block.begin(), n_block.end(), 0);
+ 
+         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+             auto & dp = dparams[seq_id];
