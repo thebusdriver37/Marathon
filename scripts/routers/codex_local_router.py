@@ -324,6 +324,7 @@ class ModelProfile:
     supported_reasoning_levels: tuple[tuple[str, str], ...] = ()
     input_modalities: tuple[str, ...] = ("text",)
     external: bool = False
+    reasoning_transport: str = "chat_template"
     api_key_env: str | None = None
     api_key_file: str | None = None
 
@@ -1528,6 +1529,7 @@ def _external_model_profiles() -> dict[str, ModelProfile]:
             ),
             input_modalities=configured.input_modalities,
             external=True,
+            reasoning_transport=configured.reasoning_transport,
             api_key_env=configured.api_key_env,
             api_key_file=configured.api_key_file,
         )
@@ -2308,6 +2310,10 @@ def _apply_reasoning_effort(
             f"reasoning effort {effort!r} is not supported by {profile.slug}; "
             f"choose one of: {choices}"
         )
+
+    if profile.reasoning_transport == "responses":
+        data["reasoning"] = {**(reasoning or {}), "effort": effort}
+        return
 
     template_kwargs = data.get("chat_template_kwargs")
     if template_kwargs is not None and not isinstance(template_kwargs, dict):
@@ -6009,15 +6015,16 @@ class RouterState:
                 ]
                 request["input"] = list(request.get("input") or []) + recovery_items
                 request_suffix.extend(copy.deepcopy(recovery_items))
-                template_kwargs = request.get("chat_template_kwargs")
-                template_kwargs = (
-                    copy.deepcopy(template_kwargs)
-                    if isinstance(template_kwargs, dict)
-                    else {}
-                )
-                template_kwargs.pop("reasoning_effort", None)
-                template_kwargs["enable_thinking"] = False
-                request["chat_template_kwargs"] = template_kwargs
+                if profile.reasoning_transport == "chat_template":
+                    template_kwargs = request.get("chat_template_kwargs")
+                    template_kwargs = (
+                        copy.deepcopy(template_kwargs)
+                        if isinstance(template_kwargs, dict)
+                        else {}
+                    )
+                    template_kwargs.pop("reasoning_effort", None)
+                    template_kwargs["enable_thinking"] = False
+                    request["chat_template_kwargs"] = template_kwargs
                 if tools_available:
                     request["tool_choice"] = "required"
                     recovery_tool_choice = True

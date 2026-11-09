@@ -810,6 +810,41 @@ context = 32768
             },
         )
 
+    def test_external_reasoning_transport_catalog_validation(self) -> None:
+        raw = {"id": "maya-test", "model": "synthetic-model",
+               "base_url": "http://127.0.0.1:19241/v1", "context": 65536}
+        self.assertEqual(router_module.external_models({"external_models": [raw]})[0].reasoning_transport,
+                         "chat_template")
+        raw["reasoning_transport"] = "responses"
+        configured = router_module.external_models({"external_models": [raw]})[0]
+        with mock.patch.object(router_module, "external_models", return_value=(configured,)):
+            self.assertEqual(router_module._external_model_profiles()["maya-test"].reasoning_transport,
+                             "responses")
+        raw["reasoning_transport"] = "unsupported"
+        with self.assertRaisesRegex(ValueError, "reasoning_transport"):
+            router_module.external_models({"external_models": [raw]})
+
+    def test_responses_reasoning_transport_omits_llama_extension(self) -> None:
+        profile = replace(
+            fixture_profile(), external=True, reasoning_transport="responses",
+            default_reasoning_level="high",
+            supported_reasoning_levels=(("high", "Deep"), ("low", "Fast")),
+        )
+        for reasoning, expected in ((None, "high"), ({"effort": "low", "summary": "auto"}, "low")):
+            with self.subTest(reasoning=reasoning):
+                request = {"input": []}
+                if reasoning is not None:
+                    request["reasoning"] = reasoning
+                normalized = router_module.normalize_responses_request(request, profile)
+                self.assertNotIn("chat_template_kwargs", normalized)
+                self.assertEqual(normalized["reasoning"]["effort"], expected)
+                if reasoning is not None:
+                    self.assertEqual(normalized["reasoning"]["summary"], "auto")
+        with self.assertRaisesRegex(ValueError, "not supported"):
+            router_module.normalize_responses_request(
+                {"input": [], "reasoning": {"effort": "unsupported"}}, profile,
+            )
+
     def test_compaction_effort_override_is_scoped_and_validated(self) -> None:
         profile = replace(
             fixture_profile(), default_reasoning_level="xhigh",
@@ -4337,6 +4372,27 @@ context = 32768
             },
             level="warning",
         )
+
+    def test_strict_responses_stalled_recovery_preserves_standard_reasoning(self):
+        profile = replace(fixture_profile(), external=True, reasoning_transport="responses")
+        state = object.__new__(router_module.RouterState)
+        state.web_search_settings = SimpleNamespace(max_iterations=3)
+        state.telemetry = mock.Mock()
+        recovered = {"output": [{"type": "function_call", "name": "lookup_value",
+                     "call_id": "call_1", "arguments": "{}"}], "usage": {"output_tokens": 10}}
+        state._request_json = mock.AsyncMock(side_effect=[
+            {"output": [], "usage": {"output_tokens": 100}}, recovered])
+        asyncio.run(state._run_responses_loop(
+            profile=profile,
+            forward_request={"input": [], "reasoning": {"effort": "high"},
+                             "tools": [{"type": "function", "name": "lookup_value"}],
+                             "max_output_tokens": 1024},
+            web_search_enabled=False,
+        ))
+        retry = state._request_json.await_args_list[1].args[3]
+        self.assertNotIn("chat_template_kwargs", retry)
+        self.assertEqual(retry["reasoning"], {"effort": "high"})
+        self.assertEqual(retry["tool_choice"], "required")
 
     def test_compaction_recovers_prose_prefixed_tool_call_without_publishing_it(self):
         # Exact failed response observed in the live two-cycle compaction audit.

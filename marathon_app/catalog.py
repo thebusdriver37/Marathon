@@ -174,6 +174,7 @@ class ExternalModel:
     input_modalities: tuple[str, ...] = ("text",)
     reasoning_levels: tuple[ReasoningLevel, ...] = ()
     default_reasoning_level: str | None = None
+    reasoning_transport: str = "chat_template"
 
 
 def _reasoning_configuration(
@@ -392,6 +393,9 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
             raw,
             f"external model {model_id}",
         )
+        reasoning_transport = raw.get("reasoning_transport", "chat_template")
+        if reasoning_transport not in ("chat_template", "responses"):
+            raise ValueError(f"external model {model_id} has invalid reasoning_transport")
         temperature_raw = raw.get("temperature")
         result.append(
             ExternalModel(
@@ -419,6 +423,7 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
                 input_modalities=modalities,
                 reasoning_levels=reasoning_levels,
                 default_reasoning_level=default_reasoning_level,
+                reasoning_transport=reasoning_transport,
             )
         )
     return tuple(result)
