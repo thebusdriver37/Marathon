@@ -1332,8 +1332,13 @@ context = 32768
 
     def test_patch_schema_requires_action_specific_fields(self) -> None:
         tool = router_module._apply_patch_function_tool()
-        variants = tool["parameters"]["properties"]["operations"]["items"]["oneOf"]
+        variants = tool["parameters"]["properties"]["operations"]["items"]["anyOf"]
 
+        # anyOf is equivalent to oneOf only because no action can match two branches.
+        actions = [variant["properties"]["action"]["enum"] for variant in variants]
+        self.assertEqual(actions, [["add"], ["replace"], ["delete"]])
+        self.assertTrue(all(variant["additionalProperties"] is False for variant in variants))
+        self.assertNotIn("oneOf", json.dumps(tool))
         self.assertTrue(tool["strict"])
         self.assertEqual(
             [variant["required"] for variant in variants],

@@ -1843,7 +1843,9 @@ def _apply_patch_function_tool() -> dict[str, Any]:
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                        "oneOf": [
+                        # The distinct action enums make these branches disjoint.
+                        # anyOf preserves oneOf semantics and works with strict Responses servers.
+                        "anyOf": [
                             {
                                 "type": "object",
                                 "properties": {
