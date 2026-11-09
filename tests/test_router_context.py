@@ -4174,15 +4174,30 @@ context = 32768
             clear=False,
         ):
             self.assertEqual(
-                router_module._tool_thinking_budget_for_turn(request, tool_output),
+                router_module._tool_thinking_budget_for_turn(request, tool_output, fixture_profile()),
                 1_024,
             )
             self.assertIsNone(
                 router_module._tool_thinking_budget_for_turn(
                     request,
                     [{"type": "message", "role": "user", "content": []}],
+                    fixture_profile(),
                 )
             )
+
+    def test_strict_responses_never_inherits_native_tool_thinking_budget(self):
+        profile = replace(fixture_profile(), external=True, reasoning_transport="responses",
+                          default_reasoning_level="high", supported_reasoning_levels=(("high", "Deep"),))
+        request = {"tools": [{"type": "function", "name": "exec_command"}],
+                   "input": [], "thinking_budget_tokens": 2048,
+                   "chat_template_kwargs": {"enable_thinking": True}}
+        tool_output = [{"type": "function_call_output", "call_id": "test", "output": "OK"}]
+        with mock.patch.dict("os.environ", {"MARATHON_MODEL_TOOL_THINKING_BUDGET_TOKENS": "2048"}):
+            self.assertIsNone(router_module._tool_thinking_budget_for_turn(request, tool_output, profile))
+            normalized = router_module.normalize_responses_request(request, profile)
+            self.assertNotIn("thinking_budget_tokens", normalized)
+            self.assertNotIn("chat_template_kwargs", normalized)
+            self.assertEqual(normalized["reasoning"]["effort"], profile.default_reasoning_level)
 
     def test_output_budget_stall_requires_no_followup_work(self) -> None:
         stalled = {

@@ -113,6 +113,28 @@ class RouterAccountingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accounting.timed_backend_calls, 1)
         self.assertEqual(accounting.decode_tokens, 20)
 
+    async def test_buffered_external_events_do_not_report_decode_speed(self):
+        async def backend(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await asyncio.sleep(0.04)
+            events = [{"type": "response.reasoning_text.delta", "delta": "one"},
+                      {"type": "response.reasoning_text.delta", "delta": "two"}]
+            await response.write("".join(f"data: {json.dumps(e)}\n\n" for e in events).encode())
+            await asyncio.sleep(0.02)  # A delayed terminal event is not token pacing.
+            event = {"type": "response.completed", "response": {
+                "output": [], "usage": {"output_tokens": 2000}}}
+            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            return response
+        app = web.Application()
+        app.router.add_post("/v1/responses", backend)
+        async with TestServer(app) as server, ClientSession() as http:
+            state = object.__new__(router_module.RouterState)
+            state.http_client = http
+            profile = replace(fixture_profile(), external=True, target=str(server.make_url("")))
+            response = await state._request_responses_stream(profile, {})
+        self.assertNotIn("marathon_stream_timing", response)
+
     async def test_websocket_tool_loop_counts_all_calls_and_preserves_context(self):
         calls = []
         usage = [

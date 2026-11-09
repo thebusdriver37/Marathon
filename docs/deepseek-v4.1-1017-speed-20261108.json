@@ -1,0 +1,1071 @@
+{
+  "model": "deepseek-v4.1-flash-1017-iq3-s",
+  "date": "2026-11-08",
+  "hardware": "AiGuy: 2 RTX 3090, 2 RTX 3090 Ti, EPYC 7402, 251 GiB RAM",
+  "runtime": "Project Maya 1.1.56, pinned existing binary",
+  "method": {
+    "prompts": "fixed synthetic coding prompts, 512/512/384 generated-token caps; fresh 13245-token prefill case",
+    "sampling": "temperature 0, high reasoning; production and Marathon validation retain temperature 1 and high reasoning",
+    "timing": "native engine clocks, plus request wall time; warmup/cold load excluded",
+    "placement": "fresh expert placement per restart, no private learned profile reads",
+    "energy": "approximate aggregate GPU power sampled every 2 seconds, includes unrelated ChartSmash; excludes CPU and host energy",
+    "limitations": [
+      "small synthetic workload, not a universal optimum or a general capability benchmark",
+      "ChartSmash retained approximately 3 GB on GPU 1 throughout; shared-machine timing noise",
+      "fixed-output speed probes intentionally end incomplete; separate correctness tests require completion",
+      "Agent workflow timings are stochastic and combine conversation caching with a thinking cap; they do not isolate the causal effect of the cap.",
+      "High reasoning is retained, but the backend thinking cap can affect difficult tasks beyond these correctness fixtures."
+    ]
+  },
+  "results": [
+    {
+      "name": "tp4-fast262-t18",
+      "short_decode_tps": 32.7,
+      "prefill_tps": 573.5,
+      "total_seconds": 69.60854547997587,
+      "cases": 3,
+      "approx_gpu_energy_wh": 11.82,
+      "context": 262144,
+      "tp_requested": 4,
+      "cpu_threads": 18,
+      "dspark": "none",
+      "suffix_draft": 3,
+      "prefill_chunk": "16384",
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+        "MAYA_DS4_TP_CHECK": "1",
+        "DS4_FLOW_TP": "1",
+        "MAYA_DS4_FLOW_DOWN_PART": "1",
+        "MAYA_DS4_TP_BORROW": "1",
+        "DS4_FLOW_COPY_DMA": "1"
+      }
+    },
+    {
+      "name": "tp1-borrow262-t24",
+      "short_decode_tps": 30.4,
+      "prefill_tps": 575.9,
+      "total_seconds": 72.76069523501792,
+      "cases": 3,
+      "approx_gpu_energy_wh": 11.19,
+      "context": 262144,
+      "tp_requested": 1,
+      "cpu_threads": 24,
+      "dspark": "none",
+      "suffix_draft": 3,
+      "prefill_chunk": "16384",
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "DS4_FLOW_COPY_DMA": "1",
+        "DS4_BORROW": "1"
+      }
+    },
+    {
+      "name": "baseline",
+      "short_decode_tps": 23.0,
+      "prefill_tps": 477.1,
+      "total_seconds": 89.53443330797018,
+      "cases": 3,
+      "approx_gpu_energy_wh": 13.39,
+      "context": 65536,
+      "tp_requested": 1,
+      "cpu_threads": 18,
+      "dspark": "none",
+      "suffix_draft": 0,
+      "prefill_chunk": null,
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0"
+      }
+    },
+    {
+      "name": "tp4-dspark262",
+      "short_decode_tps": 30.1,
+      "prefill_tps": 495.0,
+      "total_seconds": 74.82570470901555,
+      "cases": 3,
+      "approx_gpu_energy_wh": 12.08,
+      "context": 262144,
+      "tp_requested": 4,
+      "cpu_threads": 18,
+      "dspark": "on",
+      "suffix_draft": 3,
+      "prefill_chunk": null,
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+        "MAYA_DS4_TP_CHECK": "1",
+        "DS4_FLOW_TP": "1",
+        "MAYA_DS4_DRAFT_DEV": "0,2,3"
+      }
+    },
+    {
+      "name": "baseline-confirm",
+      "short_decode_tps": 29.05,
+      "prefill_tps": 577.6,
+      "total_seconds": 74.96309031700366,
+      "cases": 3,
+      "approx_gpu_energy_wh": 11.41,
+      "context": 65536,
+      "tp_requested": 1,
+      "cpu_threads": 18,
+      "dspark": "none",
+      "suffix_draft": 0,
+      "prefill_chunk": null,
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0"
+      }
+    },
+    {
+      "name": "final-selected",
+      "short_decode_tps": 34.45,
+      "prefill_tps": 575.0,
+      "total_seconds": 66.57567839697003,
+      "cases": 3,
+      "approx_gpu_energy_wh": 11.53,
+      "context": 262144,
+      "tp_requested": 4,
+      "cpu_threads": 24,
+      "dspark": "none",
+      "suffix_draft": 3,
+      "prefill_chunk": "16384",
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+        "MAYA_DS4_TP_CHECK": "1",
+        "DS4_FLOW_TP": "1",
+        "MAYA_DS4_FLOW_DOWN_PART": "1",
+        "MAYA_DS4_TP_BORROW": "1",
+        "DS4_FLOW_COPY_DMA": "1"
+      }
+    },
+    {
+      "name": "tp4-fast262-t14",
+      "short_decode_tps": 31.75,
+      "prefill_tps": 576.9,
+      "total_seconds": 71.66096269001719,
+      "cases": 3,
+      "approx_gpu_energy_wh": 12.26,
+      "context": 262144,
+      "tp_requested": 4,
+      "cpu_threads": 14,
+      "dspark": "none",
+      "suffix_draft": 3,
+      "prefill_chunk": "16384",
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+        "MAYA_DS4_TP_CHECK": "1",
+        "DS4_FLOW_TP": "1",
+        "MAYA_DS4_FLOW_DOWN_PART": "1",
+        "MAYA_DS4_TP_BORROW": "1",
+        "DS4_FLOW_COPY_DMA": "1"
+      }
+    },
+    {
+      "name": "tp4-context262",
+      "short_decode_tps": 32.0,
+      "prefill_tps": 530.2,
+      "total_seconds": 71.97088294601417,
+      "cases": 3,
+      "approx_gpu_energy_wh": 12.21,
+      "context": 262144,
+      "tp_requested": 4,
+      "cpu_threads": 18,
+      "dspark": "none",
+      "suffix_draft": 3,
+      "prefill_chunk": null,
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+        "MAYA_DS4_TP_CHECK": "1",
+        "DS4_FLOW_TP": "1"
+      }
+    },
+    {
+      "name": "selected-confirm",
+      "short_decode_tps": 32.7,
+      "prefill_tps": 575.1,
+      "total_seconds": 68.87878729196382,
+      "cases": 3,
+      "approx_gpu_energy_wh": 11.72,
+      "context": 262144,
+      "tp_requested": 4,
+      "cpu_threads": 24,
+      "dspark": "none",
+      "suffix_draft": 3,
+      "prefill_chunk": "16384",
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+        "MAYA_DS4_TP_CHECK": "1",
+        "DS4_FLOW_TP": "1",
+        "MAYA_DS4_FLOW_DOWN_PART": "1",
+        "MAYA_DS4_TP_BORROW": "1",
+        "DS4_FLOW_COPY_DMA": "1"
+      }
+    },
+    {
+      "name": "tp4",
+      "short_decode_tps": 31.650000000000002,
+      "prefill_tps": 529.4,
+      "total_seconds": 73.06612776202383,
+      "cases": 3,
+      "approx_gpu_energy_wh": 12.34,
+      "context": 65536,
+      "tp_requested": 4,
+      "cpu_threads": 18,
+      "dspark": "none",
+      "suffix_draft": 3,
+      "prefill_chunk": null,
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+        "MAYA_DS4_TP_CHECK": "1",
+        "DS4_FLOW_TP": "1"
+      }
+    },
+    {
+      "name": "tp4-fast262-t24",
+      "short_decode_tps": 33.25,
+      "prefill_tps": 579.0,
+      "total_seconds": 67.72591477999231,
+      "cases": 3,
+      "approx_gpu_energy_wh": 11.64,
+      "context": 262144,
+      "tp_requested": 4,
+      "cpu_threads": 24,
+      "dspark": "none",
+      "suffix_draft": 3,
+      "prefill_chunk": "16384",
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+        "MAYA_DS4_TP_CHECK": "1",
+        "DS4_FLOW_TP": "1",
+        "MAYA_DS4_FLOW_DOWN_PART": "1",
+        "MAYA_DS4_TP_BORROW": "1",
+        "DS4_FLOW_COPY_DMA": "1"
+      }
+    },
+    {
+      "name": "tp4-fast262-t9",
+      "short_decode_tps": 27.3,
+      "prefill_tps": 577.8,
+      "total_seconds": 79.93694913500804,
+      "cases": 3,
+      "approx_gpu_energy_wh": 13.3,
+      "context": 262144,
+      "tp_requested": 4,
+      "cpu_threads": 9,
+      "dspark": "none",
+      "suffix_draft": 3,
+      "prefill_chunk": "16384",
+      "environment": {
+        "MAYA_DS4_PROMPT_SKIP": "0",
+        "DS4_YOCO": "0",
+        "DS4_RAM_MARGIN_GB": "24",
+        "MAYA_UPDATE_CHECK": "0",
+        "DS4_COPY_DIRECT": "1",
+        "MAYA_DS4_LOAD_DROP_CACHE": "0",
+        "DS4_COPY_DROP_CACHE": "0",
+        "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+        "MAYA_DS4_TP_CHECK": "1",
+        "DS4_FLOW_TP": "1",
+        "MAYA_DS4_FLOW_DOWN_PART": "1",
+        "MAYA_DS4_TP_BORROW": "1",
+        "DS4_FLOW_COPY_DMA": "1"
+      }
+    }
+  ],
+  "rejected": [
+    {
+      "name": "tp2",
+      "reason": "requested TP2 formed four singleton groups and failed the no-split-layer check; no inference performance claim"
+    }
+  ],
+  "long_context_baseline": {
+    "passed": true,
+    "prompt_tokens_local": 251023,
+    "seconds": 495.70706116899964,
+    "usage": {
+      "input_tokens": 251053,
+      "output_tokens": 105,
+      "total_tokens": 251158,
+      "input_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "output_tokens_details": {
+        "reasoning_tokens": 77
+      }
+    },
+    "answer": "{\"amber\":\"CEDAR-84729\",\"cobalt\":\"RIVER-31685\",\"violet\":\"STONE-96243\"}",
+    "status": "completed",
+    "timings": {
+      "cache_n": 0,
+      "prompt_n": 251053,
+      "prompt_ms": 491090.8,
+      "prompt_per_token_ms": 1.956,
+      "prompt_per_second": 511.2,
+      "predicted_n": 105,
+      "predicted_ms": 4087.7,
+      "predicted_per_token_ms": 38.93,
+      "predicted_per_second": 25.7,
+      "draft_n": 24,
+      "draft_n_accepted": 4,
+      "at": 1794197162
+    }
+  },
+  "evidence_directory": "/var/tmp/maya-speed-20261108",
+  "selection": {
+    "name": "tp4-fast262-t24",
+    "screen_seconds": 67.72591477999231,
+    "candidates": [
+      [
+        67.72591477999231,
+        "tp4-fast262-t24"
+      ],
+      [
+        69.60854547997587,
+        "tp4-fast262-t18"
+      ],
+      [
+        71.66096269001719,
+        "tp4-fast262-t14"
+      ],
+      [
+        71.97088294601417,
+        "tp4-context262"
+      ],
+      [
+        74.82570470901555,
+        "tp4-dspark262"
+      ],
+      [
+        79.93694913500804,
+        "tp4-fast262-t9"
+      ]
+    ],
+    "first_pass_selection": "tp4-fast262-t24",
+    "paired_baseline_note": "Later baseline is faster with OS lookup caches warmed; use confirmed comparison, not initial screening, for speedup."
+  },
+  "long_context_final": {
+    "passed": true,
+    "prompt_tokens_local": 251023,
+    "seconds": 380.55899174002116,
+    "usage": {
+      "input_tokens": 251053,
+      "input_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "output_tokens": 128,
+      "output_tokens_details": {
+        "reasoning_tokens": 100
+      },
+      "total_tokens": 251181
+    },
+    "answer": "{\"amber\":\"CEDAR-84729\",\"cobalt\":\"RIVER-31685\",\"violet\":\"STONE-96243\"}",
+    "status": "completed",
+    "timings": {
+      "cache_n": 0,
+      "prompt_n": 251053,
+      "prompt_ms": 375531.5,
+      "prompt_per_token_ms": 1.496,
+      "prompt_per_second": 668.5,
+      "predicted_n": 128,
+      "predicted_ms": 4458.1,
+      "predicted_per_token_ms": 34.829,
+      "predicted_per_second": 28.7,
+      "draft_n": 50,
+      "draft_n_accepted": 25,
+      "at": 1794203262
+    }
+  },
+  "long_context_followup": {
+    "passed": true,
+    "seconds": 2.1154095960082486,
+    "answer": "RIVER-31685",
+    "usage": {
+      "input_tokens": 251093,
+      "input_tokens_details": {
+        "cached_tokens": 251052,
+        "cache_write_tokens": 0
+      },
+      "output_tokens": 35,
+      "output_tokens_details": {
+        "reasoning_tokens": 29
+      },
+      "total_tokens": 251128
+    },
+    "timings": {
+      "cache_n": 251052,
+      "prompt_n": 41,
+      "prompt_ms": 949.9,
+      "prompt_per_token_ms": 23.168,
+      "prompt_per_second": 43.2,
+      "predicted_n": 35,
+      "predicted_ms": 1097.2,
+      "predicted_per_token_ms": 31.349,
+      "predicted_per_second": 31.9,
+      "draft_n": 12,
+      "draft_n_accepted": 6,
+      "at": 1794203264
+    }
+  },
+  "marathon_patch": {
+    "entrypoint": "bin/marathon",
+    "model": "deepseek-v4.1-flash-1017-maya",
+    "native_budget_environment": 2048,
+    "passed": true,
+    "checks": {
+      "preserved:notes.txt": true,
+      "patch_used": true,
+      "independent_contract": true
+    },
+    "grade": {
+      "passed": true,
+      "exit_code": 0,
+      "output": ""
+    },
+    "answer": "Updated `settings.json` using `apply_patch`:\n\n- `retry.attempts` = `5`\n- `retry.delay_ms` = `375`\n- `servers` = `[\"east\", \"west\", \"central\"]`\n- Preserved `label` and left `notes.txt` untouched\n\nJSON validated successfully with `jq`. No commit was made.",
+    "error": null,
+    "followup": "ATTEMPTS_5",
+    "seconds": 79.14079860699712
+  },
+  "marathon_cold_launch": {
+    "entrypoint": "bin/marathon",
+    "model": "deepseek-v4.1-flash-1017-maya",
+    "native_budget_environment": 2048,
+    "passed": true,
+    "checks": {
+      "preserved:notes.txt": true,
+      "patch_used": true,
+      "independent_contract": true
+    },
+    "grade": {
+      "passed": true,
+      "exit_code": 0,
+      "output": ""
+    },
+    "answer": "Updated `settings.json` with `apply_patch`:\n\n- `retry.attempts` \u2192 `5`\n- `retry.delay_ms` \u2192 `375`\n- `servers` \u2192 `[\"east\", \"west\", \"central\"]`\n- `label` unchanged; `notes.txt` untouched\n\nVerification: `json.load` parses the file and asserts all expected values (`OK`). Nothing was committed.",
+    "error": null,
+    "followup": "ATTEMPTS_5",
+    "seconds": 215.1922036219912
+  },
+  "deployment": {
+    "promoted": "tp4-fast262-t24",
+    "broker_healthy": true,
+    "discovery_did_not_preload": true,
+    "context": 262144,
+    "auto_compact": 229376,
+    "ttl_seconds": 900,
+    "thinking_budget": 4096,
+    "conversation_cache": {
+      "ram_gb": 1,
+      "disk_gb": 2,
+      "days": 1
+    },
+    "rollback": "/home/deforest/Documents/DEV/gpu-control/runtime/maya-deepseek/config-baseline-65k.json"
+  },
+  "cache_bias_correction": "The first baseline was slower with colder OS lookup caches. All three baseline outputs were identical on repetition. Use baseline-confirm against selected-confirm/final-selected for the primary comparison; first-pass percentages are not the promoted claim.",
+  "frontier": {
+    "speed": "tp4-fast262-t24",
+    "lower_gpu_energy": "tp1-borrow262-t24",
+    "scope": "nominal frontier of tested warm synthetic workloads; small differences and GPU energy readings are noisy; only selected deployment gets complete final correctness gates"
+  },
+  "benchmark_harness_source": "import sys,json,time,urllib.request,urllib.error,copy,subprocess,threading\nfrom pathlib import Path\nROOT=Path('/home/deforest/Documents/DEV/Marathon');sys.path[:0]=[str(ROOT/'scripts/routers'),str(ROOT)]\nimport codex_local_router as router\nOUT=Path(__file__).parent\nLIVE=Path('/home/deforest/.config/maya-deepseek/config.json')\nMODEL='deepseek-v4.1-flash-1017-iq3-s'\nheaders=router._external_model_profiles()['deepseek-v4.1-flash-1017-maya'].upstream_headers()\ndef req(path,data=None,direct=False,timeout=1200):\n h=dict(headers) if not direct else {}\n if data is not None:h['Content-Type']='application/json'\n r=urllib.request.Request(('http://127.0.0.1:19241' if direct else 'http://127.0.0.1:9292')+path,data=None if data is None else json.dumps(data).encode(),headers=h)\n with urllib.request.urlopen(r,timeout=timeout) as f:\n  b=f.read();return json.loads(b) if b.lstrip().startswith((b'{',b'[')) else b.decode()\ndef status():return req('/v1/status',direct=True,timeout=5)\ndef run(name,changes,restart=True):\n dest=OUT/name;dest.mkdir(exist_ok=True)\n if not (OUT/'original.json').exists():(OUT/'original.json').write_bytes(LIVE.read_bytes())\n cfg=json.loads((OUT/'original.json').read_text())\n if restart:\n  try:\n   s=status();assert s['activity']['in_flight']==0 and s['activity']['queue']['waiting']==0,'active request - do not restart'\n  except urllib.error.URLError:pass\n  running=req('/running');print('running',running,flush=True)\n  for k,v in changes.get('args',{}).items():\n   if k in cfg['args']:cfg['args'][cfg['args'].index(k)+1]=str(v)\n   else:cfg['args'] += [k,str(v)]\n  cfg['args'] += ['--expert-profile','none']\n  cfg['env'].update(changes.get('env',{}));cfg['log']=str(dest/'engine.log')\n  (dest/'config.json').write_text(json.dumps(cfg,indent=2)+'\\n')\n  req('/api/models/unload/'+MODEL,{})\n  for _ in range(60):\n   state=subprocess.run(['systemctl','--user','show','maya-deepseek-worker.service','-p','ActiveState','--value'],capture_output=True,text=True).stdout.strip()\n   if state in ('inactive','failed',''):break\n   time.sleep(3)\n  else:raise RuntimeError('worker did not stop')\n  LIVE.write_text(json.dumps(cfg,indent=2)+'\\n')\n prompts=[('warm','Return exactly READY.',32),('decode_a','Write a detailed Python implementation of a stable topological sort, with type annotations, cycle detection, complexity explanation and tests. Begin immediately with the code.',512),('decode_b','Implement an LRU cache in Python using a linked list and a dictionary. Include invariants, edge cases, and tests. Begin immediately with code.',512),('prefill', '\\n'.join(f'Record {i:04d}: component node_{i} depends on node_{max(0,i-1)}; weight {(i*37)%991}; state healthy.' for i in range(600))+'\\nSummarize how to validate this dependency graph and provide Python code for validation.',384)]\n results=[]\n for label,prompt,n in prompts:\n  payload={'model':MODEL,'input':prompt,'reasoning':{'effort':'high'},'temperature':0,'max_output_tokens':n,'store':False}\n  t=time.monotonic();wall=time.time()\n  try:\n   response=req('/v1/responses',payload);elapsed=time.monotonic()-t\n   s=status();row={'name':name,'case':label,'seconds':elapsed,'started_at':wall,'usage':response.get('usage'),'status':response.get('status'),'timings':s.get('last_timings'),'context':s.get('context'),'cache_max_tokens':s.get('cache_max_tokens')}\n   (dest/(label+'-response.json')).write_text(json.dumps(response,indent=2))\n  except Exception as e:\n   row={'name':name,'case':label,'seconds':time.monotonic()-t,'error':str(e)}\n   if isinstance(e,urllib.error.HTTPError):row['detail']=e.read().decode()[:1500]\n  print(json.dumps(row),flush=True);results.append(row);(dest/'results.json').write_text(json.dumps(results,indent=2))\n  if 'error' in row:break\n return results\nif __name__=='__main__':\n name=sys.argv[1];candidates={'baseline':{},'suffix':{'args':{'--suffix-draft':3}},'tp2':{'args':{'--tp':2,'--suffix-draft':3},'env':{'MAYA_DS4_TP_GGUF_UNEVEN':'1','MAYA_DS4_TP_CHECK':'1','DS4_FLOW_TP':'1'}},'tp4':{'args':{'--tp':4,'--suffix-draft':3},'env':{'MAYA_DS4_TP_GGUF_UNEVEN':'1','MAYA_DS4_TP_CHECK':'1','DS4_FLOW_TP':'1'}},'context262':{'args':{'--max-context':262144,'--suffix-draft':3}}}\n run(name,candidates[name])\n",
+  "long_context_harness_source": "import json,time,sys\nfrom pathlib import Path\nfrom bench import req,status,MODEL,OUT\nimport os,urllib.request\nif os.environ.get('MAYA_SPEED_ROUTER_URL'):\n MODEL='deepseek-v4.1-flash-1017-maya'\n def req(path,data=None,timeout=1800,**kwargs):\n  request=urllib.request.Request(os.environ['MAYA_SPEED_ROUTER_URL']+path,data=json.dumps(data).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+os.environ['MAYA_SPEED_ROUTER_TOKEN']})\n  with urllib.request.urlopen(request,timeout=timeout) as response:return json.load(response)\nsys.path.insert(0,'/home/deforest/AI/backends/project-maya-v1.1.56/tools')\nimport strata_tokenizer as ST\ntok=ST.Tokenizer.from_dir(Path('/home/deforest/models/DeepSeek-V4.1-Flash-1017-IQ3_S/UD-IQ3_S/maya-ds4/tokenizer'))\nlines=[f'Archive {i}: the survey describes a quiet meadow, a cedar tree, a stream, and a stone bridge.' for i in range(10500)]\nneedles={'amber':'CEDAR-84729','cobalt':'RIVER-31685','violet':'STONE-96243'}\nfor ix,(k,v) in zip([525,5250,9975],needles.items()):lines[ix]=f'Official lookup record: key {k} has secret code {v}. Preserve this exact mapping.'\nprompt='Read this synthetic archive and find the three official lookup records.\\n'+'\\n'.join(lines)+'\\nReturn only a JSON object mapping amber, cobalt, and violet to their exact secret codes.'\ncount=len(tok.encode(prompt));assert 131072<count<258000,count\n(OUT/'long-context-prompt.txt').write_text(prompt)\nagent_tools=[{'type':'function','name':'unused','description':'No tool call is needed for this retrieval check.','parameters':{'type':'object','properties':{},'additionalProperties':False},'strict':True}]\nt=time.monotonic();resp=req('/v1/responses',{'model':MODEL,'input':prompt,'reasoning':{'effort':'high'},'temperature':0,'max_output_tokens':1024,'store':False,'tools':agent_tools,'tool_choice':'none'},timeout=1800)\ntext=''.join(c.get('text','') for o in resp.get('output',[]) if o.get('type')=='message' for c in o.get('content',[]))\ntry:passed=json.loads(text)==needles\nexcept Exception:passed=False\nreport={'passed':passed,'prompt_tokens_local':count,'seconds':time.monotonic()-t,'usage':resp.get('usage'),'answer':text,'status':resp.get('status'),'timings':status().get('last_timings')}\n(OUT/'long-context-result.json').write_text(json.dumps(report,indent=2));(OUT/'long-context-response.json').write_text(json.dumps(resp,indent=2));print(json.dumps(report),flush=True)\nif passed:\n t=time.monotonic();follow=req('/v1/responses',{'model':MODEL,'input':[{'role':'user','content':prompt},*resp.get('output',[]),{'role':'user','content':'Return only the cobalt code. No explanation.'}],'reasoning':{'effort':'high'},'temperature':0,'max_output_tokens':256,'store':False,'tools':agent_tools,'tool_choice':'none'},timeout=1800)\n answer=''.join(c.get('text','') for o in follow.get('output',[]) if o.get('type')=='message' for c in o.get('content',[]))\n row={'passed':answer.strip()==needles['cobalt'],'seconds':time.monotonic()-t,'answer':answer,'usage':follow.get('usage'),'timings':status().get('last_timings')}\n (OUT/'long-context-followup.json').write_text(json.dumps(row,indent=2));print(json.dumps(row),flush=True)\n",
+  "long_context_final_transport": "isolated Marathon Responses router -> llama-swap -> Maya",
+  "runtime_only_gauntlet_timeout": {
+    "entrypoint": "bin/marathon",
+    "model": "deepseek-v4.1-flash-1017-maya",
+    "native_budget_environment": 2048,
+    "passed": false,
+    "error": "TimeoutError('Marathon did not complete the expected action; see transcript')",
+    "seconds": 720.010942702007
+  },
+  "cache_before": {
+    "passed": true,
+    "a": {
+      "seconds": 9.515883861022303,
+      "answer": "READY_A",
+      "usage": {
+        "input_tokens": 3895,
+        "output_tokens": 19,
+        "total_tokens": 3914,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 15
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 3895,
+        "prompt_ms": 8845.2,
+        "prompt_per_token_ms": 2.271,
+        "prompt_per_second": 440.4,
+        "predicted_n": 19,
+        "predicted_ms": 632.5,
+        "predicted_per_token_ms": 33.289,
+        "predicted_per_second": 30.0,
+        "draft_n": 0,
+        "draft_n_accepted": 0,
+        "at": 1794200530
+      }
+    },
+    "b": {
+      "seconds": 8.179802630998893,
+      "answer": "READY_B",
+      "usage": {
+        "input_tokens": 3895,
+        "output_tokens": 16,
+        "total_tokens": 3911,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 12
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 3895,
+        "prompt_ms": 7649.9,
+        "prompt_per_token_ms": 1.964,
+        "prompt_per_second": 509.2,
+        "predicted_n": 16,
+        "predicted_ms": 512.7,
+        "predicted_per_token_ms": 32.044,
+        "predicted_per_second": 31.2,
+        "draft_n": 0,
+        "draft_n_accepted": 0,
+        "at": 1794200538
+      }
+    },
+    "a_return": {
+      "seconds": 8.63091002299916,
+      "answer": "BIRCH-731",
+      "usage": {
+        "input_tokens": 3918,
+        "output_tokens": 28,
+        "total_tokens": 3946,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 22
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 3918,
+        "prompt_ms": 7697.0,
+        "prompt_per_token_ms": 1.965,
+        "prompt_per_second": 509.0,
+        "predicted_n": 28,
+        "predicted_ms": 925.1,
+        "predicted_per_token_ms": 33.039,
+        "predicted_per_second": 30.3,
+        "draft_n": 6,
+        "draft_n_accepted": 2,
+        "at": 1794200546
+      }
+    }
+  },
+  "cache_after": {
+    "passed": true,
+    "a": {
+      "seconds": 9.19615609801258,
+      "answer": "READY_A",
+      "usage": {
+        "input_tokens": 3895,
+        "output_tokens": 19,
+        "total_tokens": 3914,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 15
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 3895,
+        "prompt_ms": 8177.7,
+        "prompt_per_token_ms": 2.1,
+        "prompt_per_second": 476.3,
+        "predicted_n": 19,
+        "predicted_ms": 935.6,
+        "predicted_per_token_ms": 49.242,
+        "predicted_per_second": 20.3,
+        "draft_n": 2,
+        "draft_n_accepted": 1,
+        "at": 1794200750
+      }
+    },
+    "b": {
+      "seconds": 7.79582378800842,
+      "answer": "READY_B",
+      "usage": {
+        "input_tokens": 3895,
+        "output_tokens": 19,
+        "total_tokens": 3914,
+        "input_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 15
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 3895,
+        "prompt_ms": 6953.3,
+        "prompt_per_token_ms": 1.785,
+        "prompt_per_second": 560.2,
+        "predicted_n": 19,
+        "predicted_ms": 824.8,
+        "predicted_per_token_ms": 43.411,
+        "predicted_per_second": 23.0,
+        "draft_n": 1,
+        "draft_n_accepted": 1,
+        "at": 1794200758
+      }
+    },
+    "a_return": {
+      "seconds": 1.8376376449887175,
+      "answer": "BIRCH-731",
+      "usage": {
+        "input_tokens": 3918,
+        "output_tokens": 29,
+        "total_tokens": 3947,
+        "input_tokens_details": {
+          "cached_tokens": 3894,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 23
+        }
+      },
+      "timings": {
+        "cache_n": 3894,
+        "prompt_n": 24,
+        "prompt_ms": 561.5,
+        "prompt_per_token_ms": 23.396,
+        "prompt_per_second": 42.7,
+        "predicted_n": 29,
+        "predicted_ms": 1265.7,
+        "predicted_per_token_ms": 43.645,
+        "predicted_per_second": 22.9,
+        "draft_n": 10,
+        "draft_n_accepted": 5,
+        "at": 1794200759
+      }
+    }
+  },
+  "budget4096_cases": [
+    {
+      "case": "test-gauntlet-cap4096.py",
+      "entrypoint": "bin/marathon",
+      "model": "deepseek-v4.1-flash-1017-maya",
+      "native_budget_environment": 2048,
+      "passed": true,
+      "checks": {
+        "preserved:tests/test_miniboard.py": true,
+        "independent_contract": true
+      },
+      "grade": {
+        "passed": true,
+        "exit_code": 0,
+        "output": "........\n----------------------------------------------------------------------\nRan 8 tests in 0.094s\n\nOK\n"
+      },
+      "answer": "Implemented the fix in `miniboard/core.py`:\n\n- `slugify` now normalizes punctuation/spaces, handles empty titles, and deduplicates with `-2`, `-3`, etc.\n- `parse_cards` validates estimates with card context and trims tag/dependency lists.\n- `schedule_cards` validates capacity/card sizes, topologically orders dependencies, and detects unknown or cyclic dependencies.\n- `render_report` emits the expected Markdown format with 1-based sprint numbers, owners, tags, and dependency notes.\n\n`python3 -m unittest discover -s tests -v` passes all 8 tests.",
+      "error": null,
+      "seconds": 500.5592616070062
+    },
+    {
+      "case": "test-budget4096-ledger.py",
+      "entrypoint": "bin/marathon",
+      "model": "deepseek-v4.1-flash-1017-maya",
+      "native_budget_environment": 2048,
+      "passed": true,
+      "checks": {
+        "preserved:SPEC.md": true,
+        "preserved:test_ledger.py": true,
+        "independent_contract": true
+      },
+      "grade": {
+        "passed": true,
+        "exit_code": 0,
+        "output": ""
+      },
+      "answer": "Implemented the ledger in `ledger.py` with transactional batch updates, idempotent event IDs, validation, intermediate nonnegative checks, and defensive copies.\n\n**Verification**\n- Reproduced failure before editing: duplicate event returned `{'cash': 6}` instead of `{'cash': 3}`.\n- `python3 -m unittest -v`: 2 tests passed.\n- Custom spec matrix: all assertions passed, covering rollback, conflicts, negative intermediates, iterable exceptions, zero balances, and mutation isolation.\n- `python3 -m py_compile ledger.py`: passed.\n- `SPEC.md` and `test_ledger.py` unchanged; no dependencies or commits.",
+      "error": null,
+      "seconds": 202.14773284702096
+    },
+    {
+      "case": "test-budget4096-atomic_report.py",
+      "entrypoint": "bin/marathon",
+      "model": "deepseek-v4.1-flash-1017-maya",
+      "native_budget_environment": 2048,
+      "passed": false,
+      "error": "TimeoutError('Marathon did not complete the expected action; see transcript')",
+      "seconds": 300.0226179629972
+    }
+  ],
+  "budget2048_cases": [
+    {
+      "case": "test-budget2048-atomic_report.py",
+      "entrypoint": "bin/marathon",
+      "model": "deepseek-v4.1-flash-1017-maya",
+      "native_budget_environment": 2048,
+      "passed": false,
+      "error": "TimeoutError('Marathon did not complete the expected action; see transcript')",
+      "seconds": 300.0004763659963
+    }
+  ],
+  "budget_selection": {
+    "quality_gate_file": "gauntlet-cap4096/result.json",
+    "original_cap": 32768,
+    "selected_cap": 4096,
+    "adopted": true,
+    "cap2048_adopted": false,
+    "all_three_passed": false,
+    "unresolved_atomic_completion_timeout_seconds": 600,
+    "short_deadline_failures": "Both 4096 and 2048 exceeded the original 300-second atomic-report deadline; extended run is separate evidence."
+  },
+  "budget_final": {
+    "passed": true,
+    "selected_cap": 4096,
+    "cap2048_adopted": false,
+    "atomic_extended": {
+      "entrypoint": "bin/marathon",
+      "model": "deepseek-v4.1-flash-1017-maya",
+      "native_budget_environment": 2048,
+      "passed": false,
+      "error": "TimeoutError('Marathon did not complete the expected action; see transcript')",
+      "seconds": 600.0022797640122
+    },
+    "caveat": "Atomic completion failed at both 300 and 600 seconds; selected configuration passed gauntlet and ledger. Runtime/context gates do not certify all agent tasks.",
+    "passed_scope": "Selected runtime/context gates, not the full agent task suite"
+  },
+  "cancellation": {
+    "passed": true,
+    "cancel_drain_seconds": 25.04712181101786,
+    "followup_answer": "391",
+    "engine_pid_unchanged": true,
+    "first_event": "event: response.created"
+  },
+  "frontend_context": {
+    "context_windows": [
+      262144
+    ],
+    "transport_error_matches": [],
+    "source": "fresh synthetic bin/marathon rollout and terminal"
+  },
+  "live_verified": {
+    "context": {
+      "native": 262144,
+      "max_positions": 262144
+    },
+    "thinking_budget": 4096,
+    "worker_warm": true,
+    "passed": true
+  },
+  "selected_gauntlet": {
+    "entrypoint": "bin/marathon",
+    "model": "deepseek-v4.1-flash-1017-maya",
+    "native_budget_environment": 2048,
+    "passed": true,
+    "checks": {
+      "preserved:tests/test_miniboard.py": true,
+      "independent_contract": true
+    },
+    "grade": {
+      "passed": true,
+      "exit_code": 0,
+      "output": "........\n----------------------------------------------------------------------\nRan 8 tests in 0.094s\n\nOK\n"
+    },
+    "answer": "Implemented the fix in `miniboard/core.py`:\n\n- `slugify` now normalizes punctuation/spaces, handles empty titles, and deduplicates with `-2`, `-3`, etc.\n- `parse_cards` validates estimates with card context and trims tag/dependency lists.\n- `schedule_cards` validates capacity/card sizes, topologically orders dependencies, and detects unknown or cyclic dependencies.\n- `render_report` emits the expected Markdown format with 1-based sprint numbers, owners, tags, and dependency notes.\n\n`python3 -m unittest discover -s tests -v` passes all 8 tests.",
+    "error": null,
+    "seconds": 500.5592616070062
+  },
+  "selected_runtime_config": {
+    "exe": "/home/deforest/AI/backends/project-maya-v1.1.56/build/maya-ds4",
+    "args": [
+      "--pack",
+      "/home/deforest/models/DeepSeek-V4.1-Flash-1017-IQ3_S/UD-IQ3_S/maya-ds4",
+      "--max-context",
+      "262144",
+      "--tp",
+      "4",
+      "--vision",
+      "off",
+      "--reserve-mib",
+      "1536",
+      "--parallel",
+      "1",
+      "--cpu-threads",
+      "24",
+      "--dspark",
+      "none",
+      "--suffix-draft",
+      "3",
+      "--threads",
+      "on",
+      "--verbose",
+      "--prefill-chunk",
+      "16384",
+      "--expert-profile",
+      "none"
+    ],
+    "cwd": "/home/deforest/AI/backends/project-maya-v1.1.56",
+    "tokenizer": "/home/deforest/models/DeepSeek-V4.1-Flash-1017-IQ3_S/UD-IQ3_S/maya-ds4/tokenizer",
+    "model_name": "deepseek-v4.1-flash-1017-iq3-s",
+    "gpu": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "sampling": {
+      "temperature": 1.0,
+      "top_p": 1.0
+    },
+    "reasoning_effort": "high",
+    "lib_dirs": [
+      "/usr/local/cuda-12.4/lib64",
+      "/usr/local/cuda-12.4/targets/x86_64-linux/lib"
+    ],
+    "port": 19241,
+    "host": "127.0.0.1",
+    "log": "/var/tmp/maya-speed-20261108/slotkeep262/engine.log",
+    "installer": {
+      "family": "deepseek",
+      "models_dir": "/home/deforest/AI/backends/Maya-data/models",
+      "quant": "DeepSeek-V4.1-Flash-1017",
+      "ds4_quant": "gguf-iq3_s",
+      "model_dir": "/home/deforest/models/DeepSeek-V4.1-Flash-1017-IQ3_S/UD-IQ3_S",
+      "written": "2026-11-08 19:03",
+      "thinking_budget_set": true
+    },
+    "model_management": false,
+    "idle_unload_s": 0,
+    "env": {
+      "MAYA_DS4_PROMPT_SKIP": "0",
+      "DS4_YOCO": "0",
+      "DS4_RAM_MARGIN_GB": "24",
+      "MAYA_UPDATE_CHECK": "0",
+      "DS4_COPY_DIRECT": "1",
+      "MAYA_DS4_LOAD_DROP_CACHE": "0",
+      "DS4_COPY_DROP_CACHE": "0",
+      "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+      "MAYA_DS4_TP_CHECK": "1",
+      "DS4_FLOW_TP": "1",
+      "MAYA_DS4_FLOW_DOWN_PART": "1",
+      "MAYA_DS4_TP_BORROW": "1",
+      "DS4_FLOW_COPY_DMA": "1",
+      "MAYA_DS4_SLOT_KEEP": "1",
+      "MAYA_DS4_SLOT_DIR": "/var/tmp/maya-speed-20261108/slots",
+      "MAYA_DS4_SLOT_CAP": "4",
+      "MAYA_DS4_SLOT_RAM_GB": "1",
+      "MAYA_DS4_SLOT_GB": "2",
+      "MAYA_DS4_SLOT_DAYS": "1"
+    },
+    "thinking_budget": 4096
+  },
+  "atomic4096_timeout_oracle": {
+    "oracle": {
+      "passed": true,
+      "exit_code": 0,
+      "output": ""
+    },
+    "protected_files_unchanged": true,
+    "completion_timeout": true
+  },
+  "runtime_only_timeout_oracle": {
+    "passed": true,
+    "exit_code": 0,
+    "output": "........\n----------------------------------------------------------------------\nRan 8 tests in 0.093s\n\nOK\n",
+    "original_tests_preserved": true
+  },
+  "atomic_extended_completion": {
+    "entrypoint": "bin/marathon",
+    "model": "deepseek-v4.1-flash-1017-maya",
+    "native_budget_environment": 2048,
+    "passed": false,
+    "error": "TimeoutError('Marathon did not complete the expected action; see transcript')",
+    "seconds": 600.0022797640122
+  },
+  "overall_agent_suite_passed": false,
+  "unresolved_issues": [
+    "Atomic-report agent completion exceeded both 300 and 600 seconds despite independently correct generated code. No claim of universally smooth task completion."
+  ],
+  "atomic_extended_oracle": {
+    "oracle": {
+      "passed": true,
+      "exit_code": 0,
+      "output": ""
+    },
+    "protected_files_unchanged": true,
+    "completion_timeout": true
+  },
+  "deployed_runtime_config": {
+    "exe": "/home/deforest/AI/backends/project-maya-v1.1.56/build/maya-ds4",
+    "args": [
+      "--pack",
+      "/home/deforest/models/DeepSeek-V4.1-Flash-1017-IQ3_S/UD-IQ3_S/maya-ds4",
+      "--max-context",
+      "262144",
+      "--tp",
+      "4",
+      "--vision",
+      "off",
+      "--reserve-mib",
+      "1536",
+      "--parallel",
+      "1",
+      "--cpu-threads",
+      "24",
+      "--dspark",
+      "none",
+      "--suffix-draft",
+      "3",
+      "--threads",
+      "on",
+      "--verbose",
+      "--prefill-chunk",
+      "16384",
+      "--expert-profile",
+      "none"
+    ],
+    "cwd": "/home/deforest/AI/backends/project-maya-v1.1.56",
+    "tokenizer": "/home/deforest/models/DeepSeek-V4.1-Flash-1017-IQ3_S/UD-IQ3_S/maya-ds4/tokenizer",
+    "model_name": "deepseek-v4.1-flash-1017-iq3-s",
+    "gpu": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "sampling": {
+      "temperature": 1.0,
+      "top_p": 1.0
+    },
+    "reasoning_effort": "high",
+    "lib_dirs": [
+      "/usr/local/cuda-12.4/lib64",
+      "/usr/local/cuda-12.4/targets/x86_64-linux/lib"
+    ],
+    "port": 19241,
+    "host": "127.0.0.1",
+    "log": "/home/deforest/AI/backends/project-maya-v1.1.56/deepseek-iq3s-speed-server.log",
+    "installer": {
+      "family": "deepseek",
+      "models_dir": "/home/deforest/AI/backends/Maya-data/models",
+      "quant": "DeepSeek-V4.1-Flash-1017",
+      "ds4_quant": "gguf-iq3_s",
+      "model_dir": "/home/deforest/models/DeepSeek-V4.1-Flash-1017-IQ3_S/UD-IQ3_S",
+      "written": "2026-11-08 19:03",
+      "thinking_budget_set": true
+    },
+    "model_management": false,
+    "idle_unload_s": 0,
+    "env": {
+      "MAYA_DS4_PROMPT_SKIP": "0",
+      "DS4_YOCO": "0",
+      "DS4_RAM_MARGIN_GB": "24",
+      "MAYA_UPDATE_CHECK": "0",
+      "DS4_COPY_DIRECT": "1",
+      "MAYA_DS4_LOAD_DROP_CACHE": "0",
+      "DS4_COPY_DROP_CACHE": "0",
+      "MAYA_DS4_TP_GGUF_UNEVEN": "1",
+      "MAYA_DS4_TP_CHECK": "1",
+      "DS4_FLOW_TP": "1",
+      "MAYA_DS4_FLOW_DOWN_PART": "1",
+      "MAYA_DS4_TP_BORROW": "1",
+      "DS4_FLOW_COPY_DMA": "1",
+      "MAYA_DS4_SLOT_KEEP": "1",
+      "MAYA_DS4_SLOT_DIR": "/home/deforest/.cache/maya-deepseek/slots-speed-20261108",
+      "MAYA_DS4_SLOT_CAP": "4",
+      "MAYA_DS4_SLOT_RAM_GB": "1",
+      "MAYA_DS4_SLOT_GB": "2",
+      "MAYA_DS4_SLOT_DAYS": "1"
+    },
+    "thinking_budget": 4096
+  }
+}

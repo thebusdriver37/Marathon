@@ -1,0 +1,427 @@
+{
+  "model": "DeepSeek V4.1 Flash 1017 UD-IQ3_S",
+  "catalog_id": "deepseek-v4.1-flash-1017-maya",
+  "backend": "Project Maya v1.1.56 via configured llama-swap endpoint",
+  "reasoning_effort": "high",
+  "context": 65536,
+  "source_revision": "3b94796b14e78a1149383fccd6b66bdae4b4c917",
+  "scope": "Installed Marathon terminal frontend, current repository router, configured model endpoint, fresh synthetic projects and conversation homes, restrictive filesystem/network sandbox. Existing private conversations and user data excluded.",
+  "cases": [
+    {
+      "batch": "high",
+      "case": "patch",
+      "passed": true,
+      "seconds": 56.489,
+      "checks": {
+        "preserved:notes.txt": true,
+        "patch_used": true,
+        "independent_contract": true
+      },
+      "error": null,
+      "tool_calls": 4,
+      "first_output_ms": [
+        26029
+      ],
+      "tool_argument_rejections": 1,
+      "usage": {
+        "input_tokens": 50898,
+        "cached_input_tokens": 40681,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 807,
+        "reasoning_output_tokens": 194,
+        "total_tokens": 51705
+      }
+    },
+    {
+      "batch": "high",
+      "case": "retry",
+      "passed": true,
+      "seconds": 182.174,
+      "checks": {
+        "preserved:test_retry.py": true,
+        "independent_contract": true
+      },
+      "error": null,
+      "tool_calls": 10,
+      "first_output_ms": [
+        20800
+      ],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 128136,
+        "cached_input_tokens": 120144,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 4708,
+        "reasoning_output_tokens": 1482,
+        "total_tokens": 132844
+      }
+    },
+    {
+      "batch": "high",
+      "case": "recovery",
+      "passed": true,
+      "seconds": 71.017,
+      "checks": {
+        "preserved:project.json": true,
+        "preserved:run-tests": true,
+        "preserved:test_words.py": true,
+        "independent_contract": true
+      },
+      "error": null,
+      "tool_calls": 7,
+      "first_output_ms": [
+        16131
+      ],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 65579,
+        "cached_input_tokens": 57608,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 1186,
+        "reasoning_output_tokens": 310,
+        "total_tokens": 66765
+      }
+    },
+    {
+      "batch": "high",
+      "case": "audit_only",
+      "passed": true,
+      "seconds": 53.289,
+      "checks": {
+        "preserved:discount.py": true,
+        "preserved:README.md": true,
+        "answer:AUDIT_COMPLETE": true,
+        "answer:800": true,
+        "no_extra_files": true,
+        "independent_contract": true
+      },
+      "error": null,
+      "tool_calls": 5,
+      "first_output_ms": [
+        18295
+      ],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 30635,
+        "cached_input_tokens": 23673,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 1041,
+        "reasoning_output_tokens": 513,
+        "total_tokens": 31676
+      }
+    },
+    {
+      "batch": "high",
+      "case": "ttl_cache",
+      "passed": true,
+      "seconds": 164.793,
+      "checks": {
+        "preserved:SPEC.md": true,
+        "preserved:test_cache.py": true,
+        "independent_contract": true
+      },
+      "error": null,
+      "tool_calls": 4,
+      "first_output_ms": [
+        17819
+      ],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 58216,
+        "cached_input_tokens": 48842,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 4093,
+        "reasoning_output_tokens": 1981,
+        "total_tokens": 62309
+      }
+    },
+    {
+      "batch": "high",
+      "case": "ledger",
+      "passed": false,
+      "seconds": 300.014,
+      "checks": {},
+      "error": "TimeoutError('Marathon did not complete the expected action; see transcript')",
+      "tool_calls": 5,
+      "first_output_ms": [],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 64280,
+        "cached_input_tokens": 52925,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 7131,
+        "reasoning_output_tokens": 3212,
+        "total_tokens": 71411
+      }
+    },
+    {
+      "batch": "high",
+      "case": "atomic_report",
+      "passed": false,
+      "seconds": 300.032,
+      "checks": {},
+      "error": "TimeoutError('Marathon did not complete the expected action; see transcript')",
+      "tool_calls": 7,
+      "first_output_ms": [],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 57920,
+        "cached_input_tokens": 50187,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 5275,
+        "reasoning_output_tokens": 4781,
+        "total_tokens": 63195
+      }
+    },
+    {
+      "batch": "high",
+      "case": "lifecycle",
+      "passed": true,
+      "seconds": 54.131,
+      "checks": {
+        "ready": true,
+        "memory": true,
+        "compact": true,
+        "resume": true
+      },
+      "error": null,
+      "tool_calls": 0,
+      "first_output_ms": [
+        12919,
+        878,
+        null,
+        13478,
+        3364
+      ],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 46052,
+        "cached_input_tokens": 26166,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 231,
+        "reasoning_output_tokens": 64,
+        "total_tokens": 46283
+      }
+    },
+    {
+      "batch": "gauntlet",
+      "case": "gauntlet",
+      "passed": false,
+      "seconds": 414.257,
+      "checks": {},
+      "error": "Stopped test frontend after reproduced integration failure",
+      "tool_calls": 5,
+      "first_output_ms": [],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 32495,
+        "cached_input_tokens": 23657,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 977,
+        "reasoning_output_tokens": 383,
+        "total_tokens": 33472
+      }
+    },
+    {
+      "batch": "gauntlet",
+      "case": "interruption",
+      "passed": true,
+      "seconds": 37.448,
+      "checks": {
+        "background_cancelled": true,
+        "old_work_not_restarted": true,
+        "followup": true
+      },
+      "error": null,
+      "tool_calls": 1,
+      "first_output_ms": [
+        16042,
+        13785
+      ],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 29612,
+        "cached_input_tokens": 16377,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 107,
+        "reasoning_output_tokens": 3,
+        "total_tokens": 29719
+      }
+    },
+    {
+      "batch": "fixed",
+      "case": "gauntlet",
+      "passed": false,
+      "seconds": 452.484,
+      "checks": {},
+      "error": "Stopped test frontend after reproduced integration failure",
+      "tool_calls": 8,
+      "first_output_ms": [],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 69555,
+        "cached_input_tokens": 49713,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 6546,
+        "reasoning_output_tokens": 4189,
+        "total_tokens": 76101
+      }
+    },
+    {
+      "batch": "final",
+      "case": "gauntlet",
+      "passed": true,
+      "seconds": 526.79,
+      "checks": {
+        "preserved:tests/test_miniboard.py": true,
+        "independent_contract": true
+      },
+      "error": null,
+      "tool_calls": 10,
+      "first_output_ms": [
+        32907
+      ],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 149438,
+        "cached_input_tokens": 128513,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 14186,
+        "reasoning_output_tokens": 9636,
+        "total_tokens": 163624
+      }
+    },
+    {
+      "batch": "patch-order",
+      "case": "patch_order",
+      "passed": true,
+      "seconds": 42.51,
+      "checks": {
+        "patch_used": true,
+        "independent_contract": true
+      },
+      "error": null,
+      "tool_calls": 4,
+      "first_output_ms": [
+        16419
+      ],
+      "tool_argument_rejections": 0,
+      "usage": {
+        "input_tokens": 50781,
+        "cached_input_tokens": 43904,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 660,
+        "reasoning_output_tokens": 137,
+        "total_tokens": 51441
+      }
+    }
+  ],
+  "passed": 9,
+  "total": 13,
+  "unit_tests": {
+    "run": 189,
+    "skipped": 1,
+    "result": "OK"
+  },
+  "evidence_directory": "/var/tmp/marathon-deepseek-e2e-20261108",
+  "limitations": [
+    "Finite single-run synthetic coverage, not a guarantee of zero defects.",
+    "Initial medium-reasoning harness attempts rejected before inference; excluded from scored high-reasoning runs.",
+    "Tasks ran through the installed frontend and isolated router; normal launcher/dashboard selection and cold worker start/unload were not exercised.",
+    "No production model/runtime tuning applied; current router source has integration fixes. Existing running sessions require restart to load them."
+  ],
+  "next": "Optimize against retained correctness and lifecycle cases. Prioritize excess reasoning/tool overhead and fresh-session prefill latency; maintain recovery and safe patch behavior. Restart existing Marathon sessions to load router fixes.",
+  "fixes": [
+    "Recognize response.incomplete/max_output_tokens and use existing bounded recovery, preserving usage.",
+    "Discard executable calls from incomplete responses for streaming and JSON paths.",
+    "Classify Maya strict generated-function schema failures for bounded tool-protocol recovery.",
+    "Require paced generation deltas before publishing a client-observed decode-speed estimate.",
+    "Document top-to-bottom non-overlapping replacement order in apply_patch tool description."
+  ],
+  "post_timeout_grades": {
+    "ledger": {
+      "passed": true,
+      "exit_code": 0,
+      "output": ""
+    },
+    "atomic_report": {
+      "passed": false,
+      "exit_code": 1,
+      "output": "Traceback (most recent call last):\n  File \"<string>\", line 9, in <module>\nAssertionError: {'applied': 0, 'balances': {}}\n\nChecker did not reach all assertions"
+    }
+  },
+  "live_terminal_probe": {
+    "terminal_status": "incomplete",
+    "incomplete_details": {
+      "reason": "max_output_tokens"
+    },
+    "usage": {
+      "input_tokens": 40,
+      "output_tokens": 8,
+      "total_tokens": 48,
+      "input_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "output_tokens_details": {
+        "reasoning_tokens": 4
+      }
+    },
+    "recognized_for_recovery": true,
+    "timing_estimate": {
+      "decode_ms": 297.7728499972727
+    }
+  },
+  "final_source_hashes": {
+    "scripts/routers/codex_local_router.py": "c87278cdb866a881f02832cde4e93a481e161284005a9827f7a5d0686f9ae6ca",
+    "tests/test_router_transport.py": "f5e3ffd4c602caaa86f216108bbba73fc24555f7b8712dfe5f7bc446e14a0b1b",
+    "tests/test_router_accounting.py": "b55dc34849b4c839f4c8186c6e9a24979c5d9ecbfd4cdd1b9f6e516c5d55e551"
+  },
+  "observed_issues": [
+    "One empty shell justification rejected then self-corrected.",
+    "Ledger timed out at 300 seconds despite independently correct code; generated verification had incorrect balance arithmetic.",
+    "Atomic report timed out at 300 seconds without implementation.",
+    "Initial gauntlet retried a normal response.incomplete as a disconnect.",
+    "First corrected gauntlet exposed a generated patch-order failure and a Maya strict schema error misclassified as a disconnect."
+  ],
+  "patch_order_validation": {
+    "single_patch": true,
+    "top_to_bottom": true,
+    "independent_values_passed": true
+  },
+  "final_gauntlet_validation": {
+    "seconds": 526.79,
+    "included_tests_passed": 8,
+    "test_file_preserved": true,
+    "reconnect_warnings": 0,
+    "tool_schema_errors": 0,
+    "patch_rejections": 0,
+    "recovery_events": 0,
+    "decode_speed": "not reported for buffered bursts; no implausible speed displayed"
+  },
+  "initial_fresh_task_first_output_ms": {
+    "values": [
+      26029,
+      20800,
+      16131,
+      18295,
+      17819
+    ],
+    "median": 18295
+  },
+  "remaining_limits": [
+    "Ledger reached the 300-second deadline while debugging an incorrect self-written test; independently graded implementation was correct.",
+    "Atomic report reached the 300-second deadline without implementing its required behavior.",
+    "One small task self-corrected an empty shell-justification argument rejection.",
+    "The final larger task passed but took 526.79 seconds. No claim of universal reliability or speed readiness."
+  ],
+  "reproduction": {
+    "directory": "/var/tmp/marathon-deepseek-e2e-20261108",
+    "initial": "run-high.py",
+    "gauntlet_final": "run-final.py",
+    "patch_order": "run-patch-order.py",
+    "terminal_probe": "probe-fixed.py",
+    "summary": "summarize.py",
+    "note": "Scripts use existing reliability fixtures/checkers and installed Marathon frontend with isolated router and sandbox; reruns require new output directory names."
+  }
+}

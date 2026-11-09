@@ -49,7 +49,7 @@ def events_from_bytes(wire):
 
 
 @asynccontextmanager
-async def serving(backend, *, alias=None):
+async def serving(backend, *, alias=None, reasoning_transport="chat_template"):
     upstream = web.Application()
     upstream.router.add_post("/v1/responses", backend)
     upstream.router.add_post("/v1/chat/completions", backend)
@@ -60,6 +60,7 @@ async def serving(backend, *, alias=None):
         async with TestServer(upstream) as upstream_server, ClientSession() as http:
             profile = replace(fixture_profile(), supports_slots=False,
                               alias=alias or fixture_profile().alias, external=bool(alias),
+                              reasoning_transport=reasoning_transport,
                               target=str(upstream_server.make_url("")))
             with mock.patch.object(router, "_available_profiles", return_value={profile.slug: profile}), \
                     mock.patch.dict(os.environ, {"MARATHON_LAZY_POOL_BACKEND": "",
@@ -115,6 +116,136 @@ async def websocket_turn(http, server, tools):
 
 
 class RouterTransportRegressions(unittest.IsolatedAsyncioTestCase):
+    async def test_incomplete_stream_recovers_without_releasing_truncated_tools(self):
+        for transport in ("http", "websocket", "json"):
+            for partial in (answer(), call("exec_command", "partial", {"cmd": "bad"})):
+                with self.subTest(transport=transport, partial=partial["type"]):
+                    requests = []
+                    async def backend(request):
+                        data = await request.json()
+                        requests.append(data)
+                        incomplete = len(requests) == 1
+                        item = partial if incomplete else answer()
+                        result = {"id": f"backend_{len(requests)}", "output": [item],
+                                  "status": "incomplete" if incomplete else "completed",
+                                  "usage": {"output_tokens": 8}}
+                        if incomplete:
+                            result["incomplete_details"] = {"reason": "max_output_tokens"}
+                        if not data.get("stream"):
+                            return web.json_response(result)
+                        events = [{"type": "response.output_item." + kind, "item": item}
+                                  for kind in ("added", "done")]
+                        events.append({"type": "response.incomplete" if incomplete else "response.completed",
+                                       "response": result})
+                        return web.Response(text="".join(f"data: {json.dumps(e)}\n\n" for e in events),
+                                            content_type="text/event-stream")
+                    offered = [{"type": "function", "name": "exec_command", "parameters": {
+                        "type": "object", "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"]}}]
+                    async with serving(backend, alias="maya-test") as (state, http, server):
+                        if transport == "websocket":
+                            events = await websocket_turn(http, server, offered)
+                        elif transport == "json":
+                            async with http.post(server.make_url('/v1/responses'), json={
+                                "input": [{"role": "user", "content": "Verify."}], "tools": offered}) as response:
+                                self.assertEqual(response.status, 200)
+                                events = [{"type": "response.completed", "response": await response.json()}]
+                        else:
+                            async with http.post(server.make_url('/v1/responses'), json={
+                                "input": [{"role": "user", "content": "Verify."}], "stream": True, "tools": offered}) as response:
+                                self.assertEqual(response.status, 200)
+                                events = events_from_bytes(await response.read())
+                        self.assertEqual(events[-1]["type"], "response.completed", events)
+                        self.assertEqual(len(requests), 2)
+                        self.assertFalse(any(e.get("item", {}).get("call_id") == "partial" for e in events))
+                        self.assertNotIn("partial", json.dumps(events[-1]))
+                        self.assertEqual(events[-1]["response"]["usage"]["output_tokens"], 16)
+
+    async def test_incomplete_stream_is_bounded_and_unknown_reasons_fail(self):
+        for reason in ("max_output_tokens", "other_reason"):
+            with self.subTest(reason=reason):
+                requests = []
+                async def backend(request):
+                    requests.append(await request.json())
+                    result = {"status": "incomplete", "incomplete_details": {"reason": reason},
+                              "output": [answer()], "usage": {"output_tokens": 8}}
+                    event = {"type": "response.incomplete", "response": result}
+                    return web.Response(text=f"data: {json.dumps(event)}\n\n",
+                                        content_type="text/event-stream")
+                async with serving(backend, alias="maya-test") as (state, http, server):
+                    events = await websocket_turn(http, server, [])
+                    self.assertEqual(events[-1]["type"], "response.failed")
+                    self.assertNotIn("stream ended", json.dumps(events[-1]))
+                    self.assertEqual(len(requests), 2 if reason == "max_output_tokens" else 1)
+
+    async def test_streamed_schema_failure_uses_tool_recovery(self):
+        requests = []
+        offered = [{"type": "function", "name": "exec_command", "parameters": {
+            "type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}}]
+        async def backend(request):
+            data = await request.json()
+            requests.append(data)
+            if len(requests) == 1:
+                item = call("exec_command", "must-not-execute", {"cmd": "bad"})
+                events = [{"type": "response.output_item.done", "item": item},
+                          {"type": "response.failed", "response": {"error": {
+                              "message": "strict function apply_patch failed schema validation at []"}}}]
+            else:
+                item = call("exec_command", "corrected", {"cmd": "true"})
+                events = [{"type": "response.output_item.done", "item": item},
+                          {"type": "response.completed", "response": {
+                              "output": [item], "usage": {"output_tokens": 10}}}]
+            return web.Response(text="".join(f"data: {json.dumps(e)}\n\n" for e in events),
+                                content_type="text/event-stream")
+        async with serving(backend, alias="maya-test") as (state, http, server):
+            events = await websocket_turn(http, server, offered)
+            self.assertEqual(events[-1]["type"], "response.completed", events)
+            self.assertEqual(len(requests), 2)
+            self.assertEqual(requests[1]["tool_choice"], "required")
+            self.assertNotIn("must-not-execute", json.dumps(events))
+            self.assertIn("corrected", json.dumps(events))
+
+    async def test_strict_backend_tool_continuations_ignore_launcher_native_budget(self):
+        for transport in ("http", "sse", "websocket"):
+            for managed in (False, True):
+                with self.subTest(transport=transport, managed=managed):
+                    requests = []
+                    def select(data, count):
+                        self.assertNotIn("thinking_budget_tokens", data)
+                        self.assertNotIn("chat_template_kwargs", data)
+                        return ([call("web_fetch", "web", {"url": "https://example.org"})]
+                                if managed and count == 1 else [answer()])
+                    payload = {
+                        "input": ([{"role": "user", "content": "Research."}] if managed else [
+                            call("exec_command", "prior", {"cmd": "true"}),
+                            {"type": "function_call_output", "call_id": "prior", "output": "OK"}]),
+                        "tools": ([{"type": "web_search"}] if managed else [
+                            {"type": "function", "name": "exec_command"}]),
+                        "thinking_budget_tokens": 2048,
+                        "chat_template_kwargs": {"enable_thinking": True},
+                        "stream": transport == "sse",
+                    }
+                    with mock.patch.dict(os.environ, {"MARATHON_MODEL_TOOL_THINKING_BUDGET_TOKENS": "2048"}):
+                        async with serving(scripted_backend(select, requests), alias="maya-test",
+                                           reasoning_transport="responses") as (state, http, server):
+                            if transport == "websocket":
+                                async with http.ws_connect(server.make_url('/v1/responses')) as ws:
+                                    await ws.send_json(dict(payload, type="response.create"))
+                                    while True:
+                                        event = await asyncio.wait_for(ws.receive_json(), 5)
+                                        if event["type"] in {"response.completed", "response.failed"}:
+                                            break
+                                    self.assertEqual(event["type"], "response.completed", event)
+                            else:
+                                async with http.post(server.make_url('/v1/responses'), json=payload) as response:
+                                    self.assertEqual(response.status, 200)
+                                    if transport == "sse":
+                                        events = events_from_bytes(await response.read())
+                                        self.assertEqual(events[-1]["type"], "response.completed", events)
+                                    else:
+                                        self.assertEqual((await response.json())["output"][-1]["content"], answer()["content"])
+                            self.assertEqual(len(requests), 2 if managed else 1)
+
     async def test_external_alias_and_catalog_id_share_response_lineage(self):
         alias = "spark/Qwen3.8-Flash-Next-LR7"
         for transport in ("http", "websocket"):

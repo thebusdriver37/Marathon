@@ -292,7 +292,10 @@ def _backend_tool_protocol_error_reason(status: int, body: str) -> str | None:
         "failed to parse function arguments as json",
         "invalid tool call arguments",
     )
-    if any(marker in normalized for marker in markers):
+    strict_schema_error = re.search(
+        r"strict function [a-z0-9_.-]+ failed schema validation", normalized
+    )
+    if any(marker in normalized for marker in markers) or strict_schema_error:
         return "the backend received malformed or truncated tool-call arguments"
     return None
 
@@ -1166,9 +1169,12 @@ def _max_output_tokens(profile: "ModelProfile") -> int:
 def _tool_thinking_budget_for_turn(
     request: dict[str, Any],
     delta_input: list[dict[str, Any]],
+    profile: ModelProfile,
 ) -> int | None:
     """Return a native backend thinking cap only for post-tool continuations."""
 
+    if profile.reasoning_transport != "chat_template":
+        return None
     configured = os.environ.get("MARATHON_MODEL_TOOL_THINKING_BUDGET_TOKENS")
     if configured is None or not _env_bool("MARATHON_ADAPTIVE_THINKING_BUDGET", True):
         return None
@@ -1196,6 +1202,9 @@ def _response_stalled_at_output_limit(
     items: list[dict[str, Any]],
     output_limit: int,
 ) -> bool:
+    details = response.get("incomplete_details")
+    if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
+        return True
     usage = response.get("usage")
     output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
     if not isinstance(output_tokens, int) or output_tokens < output_limit:
@@ -1832,6 +1841,8 @@ def _apply_patch_function_tool() -> dict[str, Any]:
         "description": (
             "Edit files with structured operations. For replace, old_text must "
             "exactly match existing file text and new_text is its replacement. "
+            "For multiple replacements in one file, use non-overlapping old_text "
+            "from the current file and list operations in top-to-bottom file order. "
             "Use several small replace operations for unrelated edits. Marathon "
             "will compile these operations into Codex's native patch format; do "
             "not write a raw diff or patch envelope."
@@ -2289,7 +2300,14 @@ def _restore_local_reasoning_item(item: dict[str, Any]) -> dict[str, Any] | None
 def _apply_reasoning_effort(
     data: dict[str, Any], profile: ModelProfile | None, *, request_kind: str | None = None
 ) -> None:
-    if profile is None or not profile.supported_reasoning_levels:
+    if profile is None:
+        return
+    if profile.reasoning_transport == "responses":
+        # Runtime defaults can originate from the launcher's local model even
+        # after the frontend selects an external strict Responses backend.
+        data.pop("chat_template_kwargs", None)
+        data.pop("thinking_budget_tokens", None)
+    if not profile.supported_reasoning_levels:
         return
     supported = {
         effort for effort, _description in profile.supported_reasoning_levels
@@ -3633,6 +3651,8 @@ class RouterState:
         pending_apply_patch_added: dict[str, dict[str, Any]] = {}
         tool_argument_limit = _tool_argument_max_chars()
         first_generation_at: float | None = None
+        last_generation_at: float | None = None
+        paced_generation = False
         generation_events = 0
         stream_completed_at: float | None = None
         pending_tool_events: list[dict[str, Any]] = []
@@ -3757,8 +3777,11 @@ class RouterState:
                 } and event.get("delta"):
                     if first_generation_at is None:
                         first_generation_at = received_at
+                    if last_generation_at is not None and received_at - last_generation_at >= 0.005:
+                        paced_generation = True
+                    last_generation_at = received_at
                     generation_events += 1
-                if event_type == "response.completed":
+                if event_type in {"response.completed", "response.incomplete"}:
                     stream_completed_at = received_at
                 if not isinstance(event_type, str):
                     continue
@@ -3906,8 +3929,14 @@ class RouterState:
                 if item_id and item_id in suppressed_item_ids:
                     continue
 
-                if event_type == "response.completed":
+                if event_type in {"response.completed", "response.incomplete"}:
                     response_payload = event.get("response")
+                    if event_type == "response.incomplete" and isinstance(response_payload, dict):
+                        details = response_payload.get("incomplete_details") or {}
+                        reason = details.get("reason") if isinstance(details, dict) else None
+                        if reason != "max_output_tokens":
+                            raise RuntimeError(f"backend response incomplete: {reason or 'unknown reason'}")
+                        response_payload = dict(response_payload, status="incomplete")
                     message_phase = _completed_message_phase(output_items)
                     if isinstance(response_payload, dict):
                         prospective_items = list(output_items)
@@ -3936,6 +3965,9 @@ class RouterState:
                         error = response_payload.get("error")
                         if isinstance(error, dict) and isinstance(error.get("message"), str):
                             message = error["message"]
+                    protocol_error = _backend_tool_protocol_error_reason(400, message)
+                    if protocol_error:
+                        raise ToolProtocolError(protocol_error)
                     raise RuntimeError(message)
 
                 if event_type in CODEX_STREAM_EVENT_TYPES:
@@ -3945,12 +3977,25 @@ class RouterState:
             raise RuntimeError("backend stream ended before response.completed")
 
         backend_response = completed_response
+        if backend_response.get("status") == "incomplete":
+            # A truncated structured call is never executable, even if its JSON
+            # happens to parse. Let the existing bounded recovery handle the cap.
+            pending_tool_events.clear()
+            output_items = [item for item in output_items if not _starts_followup_work(item)]
+            backend_response["output"] = [
+                item for item in backend_response.get("output", [])
+                if isinstance(item, dict) and not _starts_followup_work(item)
+            ]
         if (
             profile.external
             and not isinstance(backend_response.get("timings"), dict)
             and first_generation_at is not None
             and stream_completed_at is not None
             and generation_events > 1
+            # Buffered SSE bursts measure JSON delivery, not model decoding.
+            # Require observable pacing between generation deltas, not merely
+            # a delay before the terminal event, before publishing an estimate.
+            and paced_generation
             and stream_completed_at - first_generation_at >= 0.001
         ):
             backend_response["marathon_stream_timing"] = {
@@ -5811,6 +5856,13 @@ class RouterState:
                     }, level="warning")
                     response = await self._request_with_image_limit(profile, request, sink)
                 accounting.add(response)
+                if response.get("status") == "incomplete":
+                    # Non-streaming replies need the same execution barrier as
+                    # SSE: truncated calls must not enter recovered lineage.
+                    response["output"] = [
+                        item for item in response.get("output", [])
+                        if isinstance(item, dict) and not _starts_followup_work(item)
+                    ]
                 finalization_hit_output_limit = _response_stalled_at_output_limit(
                     response,
                     [
@@ -6130,7 +6182,7 @@ class RouterState:
             appended_items = copy.deepcopy(iter_items) + copy.deepcopy(tool_outputs)
             request["input"] = list(request.get("input") or []) + appended_items
             request_suffix.extend(copy.deepcopy(appended_items))
-            thinking_budget = _tool_thinking_budget_for_turn(request, tool_outputs)
+            thinking_budget = _tool_thinking_budget_for_turn(request, tool_outputs, profile)
             if thinking_budget is not None:
                 request["thinking_budget_tokens"] = thinking_budget
             iterations += 1
@@ -6366,7 +6418,7 @@ class RouterState:
         if isinstance(requested_output_limit, int) and requested_output_limit > 0:
             output_limit = min(output_limit, requested_output_limit)
         forward_request["max_output_tokens"] = output_limit
-        thinking_budget = _tool_thinking_budget_for_turn(forward_request, delta_input)
+        thinking_budget = _tool_thinking_budget_for_turn(forward_request, delta_input, profile)
         if thinking_budget is not None:
             forward_request["thinking_budget_tokens"] = thinking_budget
 

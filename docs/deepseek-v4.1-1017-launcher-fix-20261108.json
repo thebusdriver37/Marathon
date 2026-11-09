@@ -1,0 +1,37 @@
+{
+  "issue": "Normal launcher inherited a native local-model tool thinking budget and forwarded thinking_budget_tokens to strict Maya Responses after tool calls.",
+  "prior_test_gap": "Earlier installed-frontend tests used an isolated manually started router, omitting the launch-profile environment.",
+  "fix": "Scope native tool thinking budgets to chat_template backends in both frontend and managed-tool continuations; strip native reasoning extensions for strict responses profiles.",
+  "validation": {
+    "entrypoint": "bin/marathon",
+    "model": "deepseek-v4.1-flash-1017-maya",
+    "native_budget_environment": 2048,
+    "passed": true,
+    "checks": {
+      "preserved:notes.txt": true,
+      "patch_used": true,
+      "independent_contract": true
+    },
+    "grade": {
+      "passed": true,
+      "exit_code": 0,
+      "output": ""
+    },
+    "answer": "Updated `settings.json` via `apply_patch`:\n\n- `retry.attempts`: `5`\n- `retry.delay_ms`: `375`\n- `servers`: `[\"east\", \"west\", \"central\"]`\n\nJSON validation passed. `label` and `notes.txt` remain unchanged. No commit was created.",
+    "error": null,
+    "followup": "ATTEMPTS_5",
+    "seconds": 82.4714786449913
+  },
+  "launcher_command_resolves_to": "/home/deforest/Documents/DEV/Marathon/bin/marathon",
+  "continuations_checked": 11,
+  "native_budget_sent": false,
+  "reconnects": 0,
+  "router_tests": {
+    "run": 184,
+    "passed": 183,
+    "skipped": 1
+  },
+  "evidence": "/var/tmp/marathon-maya-budget-20261108/launcher",
+  "source_sha256": "e1a1c5a86e6f6c8e46c33a3efc1a9e0eb20b22f07c101f533e3ca94b71ef7385",
+  "deployment": "New launches load source; close and relaunch existing Marathon processes before resuming."
+}
