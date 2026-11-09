@@ -1,0 +1,60 @@
+{
+  "date": "2026-11-03",
+  "mode": "Metadata/size inventory only; no additional files moved or deleted",
+  "high_priority_candidates": [
+    {
+      "path": "/home/deforest/.cache/uv",
+      "allocated_bytes": 56976400384,
+      "single_link_bytes": 14825066496,
+      "multi_link_bytes": 42151333888,
+      "note": "Only13.8GiB single-link; clearing53.1GiB visible cache does not automatically reclaim linked blocks. Verify no installs in flight before supported cache cleanup."
+    },
+    {
+      "path": "/home/deforest/.cache/pip",
+      "approx_GiB": 3.6,
+      "note": "Downloaded package cache; generally re-downloadable."
+    },
+    {
+      "path": "/home/deforest/.cache/vllm/torch_compile_cache",
+      "approx_GiB": 5,
+      "note": "Rebuildable compiled kernels; verify active model users before cleanup."
+    },
+    {
+      "category": "Docker build cache",
+      "reported_total_GB": 25.34,
+      "reported_private_reclaimable_GB": 17.77,
+      "note": "Shared image layers excluded from conservative savings; Docker-managed cleanup, not ordinary Trash."
+    }
+  ],
+  "needs_review": [
+    {
+      "category": "Marathon .marathon build/checkouts",
+      "GiB": 4.845951080322266,
+      "count": 24,
+      "note": "Preserve local edits/source evidence; check open files and runtime references before moving."
+    },
+    {
+      "category": "Docker images",
+      "reported_reclaimable_GB": 83.39,
+      "note": "Unused by containers is not unused by on-demand broker. Preserve pinned production/rollback images; do not blanket-prune."
+    },
+    {
+      "path": "/home/deforest/AI/models/huggingface/Qwen3.8-27B",
+      "approx_GiB": 52,
+      "note": "Full-precision weights, distinct from deployed GGUF; shared application dependencies not checked."
+    },
+    {
+      "path": "/home/deforest/AI/models/huggingface/Qwen3.8-27B-FP8",
+      "approx_GiB": 29,
+      "note": "Model dependency/rollback review required."
+    }
+  ],
+  "preserve_without_further_review": [
+    "Private Marathon home/profile/cache contents",
+    "7GiB diagnostics pending paper-trail classification",
+    "Docker volumes and application databases",
+    "Active deployed model files"
+  ],
+  "prior_trash_bundle_GiB": 73.25563430786133,
+  "do_not_sum_blindly": "Caches/models/images may share blocks/layers; figures are candidate sizes, not additive guaranteed savings."
+}

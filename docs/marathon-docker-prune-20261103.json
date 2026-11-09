@@ -1,0 +1,26 @@
+{
+  "date": "2026-11-03",
+  "authorization": "User explicitly approved pruning unused build cache",
+  "commands": [
+    "docker buildx prune --builder default --all --force",
+    "docker buildx prune --builder mybuilder --all --force"
+  ],
+  "reported_cache_removed_GB": {
+    "default": 25.34,
+    "mybuilder": 9.496
+  },
+  "note": "Reported cache totals include layers shared with retained images; filesystem gain is the practical reclamation measure, subject to concurrent disk activity.",
+  "observed_disk_available_increase_bytes": 29806604288,
+  "unchanged": {
+    "images": true,
+    "containers": true,
+    "running_containers": true,
+    "volumes": true
+  },
+  "remaining_cache_records": {
+    "default": 0,
+    "mybuilder": 0
+  },
+  "evidence_directory": "/home/deforest/marathon-audit/cleanup-20261103/docker-prune",
+  "prior_trash_bundle": "Untouched;73.26GiB still in Trash until emptied"
+}

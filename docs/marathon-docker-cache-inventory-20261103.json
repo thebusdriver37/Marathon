@@ -1,0 +1,69 @@
+{
+  "default": {
+    "records": 305,
+    "categories": {
+      "Copied source/build contexts": {
+        "records": 104,
+        "approx_GB": 6.357485997999999,
+        "unshared_GB": 5.516411412999999
+      },
+      "LLM/CUDA builds": {
+        "records": 75,
+        "approx_GB": 4.27790502,
+        "unshared_GB": 3.4627499999999998
+      },
+      "Web application builds": {
+        "records": 19,
+        "approx_GB": 4.402,
+        "unshared_GB": 4.402
+      },
+      "Other intermediate steps": {
+        "records": 15,
+        "approx_GB": 0.0,
+        "unshared_GB": 0.0
+      },
+      "Base image layers": {
+        "records": 75,
+        "approx_GB": 2.124447811,
+        "unshared_GB": 2.1235999999999997
+      },
+      "Python installs": {
+        "records": 7,
+        "approx_GB": 1.0741000000000003,
+        "unshared_GB": 1.0741000000000003
+      },
+      "OS/toolchain packages": {
+        "records": 10,
+        "approx_GB": 7.1016,
+        "unshared_GB": 1.1881
+      }
+    },
+    "approx_total_GB": 25.337538829,
+    "approx_unshared_GB": 17.766961413
+  },
+  "mybuilder": {
+    "records": 23,
+    "categories": {
+      "LLM/CUDA builds": {
+        "records": 18,
+        "approx_GB": 9.25425776,
+        "unshared_GB": 9.25425776
+      },
+      "Base image layers": {
+        "records": 5,
+        "approx_GB": 0.24139663,
+        "unshared_GB": 0.24139663
+      }
+    },
+    "approx_total_GB": 9.49565439,
+    "approx_unshared_GB": 9.49565439
+  },
+  "image_group_counts": {
+    "synthetic AHE images": 13,
+    "Marathon/llama runtime images (production and experiments mixed)": 34,
+    "other applications/base images": 43,
+    "benchmark task images": 89
+  },
+  "scope": "Metadata-only classification by build descriptions, approximate decimal GB; no pruning performed",
+  "cleanup_boundary": "Build cache is disposable acceleration data; prune requires direct deletion (not Trash). Preserve all images, containers, volumes, current broker-pinned runtimes, repo documentation and result records. Review old benchmark/runtime images separately."
+}

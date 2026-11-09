@@ -1,0 +1,121 @@
+{
+  "date": "2026-11-02",
+  "scope": "Public-source research and bounded HTTP range inspection of public stock weights. No private conversations, private audit reports, local model files, GPU inference, or model/service changes.",
+  "public_checkpoint_inspection": {
+    "repo": "Qwen/Qwen3.8-27B",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "tensor_count": 1199,
+    "parameters_in_files": 27781427952,
+    "index_bytes": 55562855904.0,
+    "sampled_tensor_count": 224,
+    "sampled_weight_bytes": 1319936,
+    "nonfinite_count": 0,
+    "scope": "All shard headers; only language-layer input/post-attention norms and GDN A_log/dt_bias values. No MLP/attention matrix values or activations inspected. No inference or edits.",
+    "text_layers": 64,
+    "hidden_width": 5120,
+    "mlp_width": 17408,
+    "full_attention_layers": 16,
+    "linear_attention_layers": 48,
+    "mlp_down_proj_shape": [
+      5120,
+      17408
+    ],
+    "mlp_neurons_across_text_layers": 1114112,
+    "hypothetical_two_layers_64_columns_entries": 655360,
+    "hypothetical_two_layers_64_columns_pct": 0.002358986014442142,
+    "causal_target_identified": false
+  },
+  "official_benchmarks": {
+    "source": "https://huggingface.co/Qwen/Qwen3.8-27B",
+    "reported_by": "Qwen",
+    "scores": {
+      "Terminal-Bench 2.1 (Terminus)": 73.0,
+      "SWE-bench Pro (Qwen refined benchmark, Claude Code harness)": 61.7,
+      "LiveCodeBench v6": 90.3,
+      "IFBench": 79.5,
+      "GPQA Diamond": 89.2,
+      "HLE": 30.8
+    },
+    "limitations": "Publisher results. Harness, precision, sampling, output caps, task revision, and scoring differ from local Marathon evaluations."
+  },
+  "external_benchmarks": {
+    "source": "https://epoch.ai/models/qwen-3-8-27b",
+    "reported_by": "Epoch AI model scorecard",
+    "scores_pct_rounded": {
+      "ProofBench": 16,
+      "CritPt v1": 5,
+      "SciCode": 47,
+      "ARC-AGI-2": 42
+    },
+    "limitations": "Different tasks measure different capabilities. These are not failure diagnoses or evidence for a specific circuit. CritPt v1 has documented benchmark-quality concerns."
+  },
+  "behavior_evidence": [
+    {
+      "source": "https://huggingface.co/Qwen/Qwen3.8-27B",
+      "finding": "Official instructions discuss presence penalty as a repetition mitigation with possible performance costs; lower effort can increase retries in agentic work. Neither establishes a loop prevalence for the local checkpoint."
+    },
+    {
+      "source": "https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-27b",
+      "finding": "Publisher BF16 five-seed results: TB2.1 69.21 to 72.13; LiveCodeBench v6 76.76 to 81.71; IFBench 73.53 to 72.07; AIME2026 98.67 to 96.00. Uses RL and on-policy distillation, not a sparse hand edit. Results demonstrate tradeoffs and are not assumed to describe the deployed Swift version."
+    },
+    {
+      "source": "https://huggingface.co/bottlecapai/ThinkingCap-Qwen3.8-27B",
+      "finding": "Publisher reports 37.2% mean per-benchmark reasoning-token reduction; macro accuracy 86.6 to 85.8. Looping 0.06% to 0.05% and truncation 0.51% to 0.34%, equal-weight across benchmarks under its protocol with large generation caps. These rates do not estimate Marathon loop prevalence."
+    },
+    {
+      "source": "https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4",
+      "finding": "Publisher BF16 vs mixed NVFP4/FP8: GPQA88.92/88.01, IFBench80.07/78.93. Calibration and mixed precision matter; not a controlled measurement of IQ4_XS."
+    }
+  ],
+  "related_intervention_research": [
+    {
+      "source": "https://arxiv.org/html/2605.05980v1",
+      "name": "TACT",
+      "tested_model": "Qwen3.5-27B, not Qwen3.8-27B",
+      "reported_results": "SWE-bench Verified 67.0 to 73.3; TB2.0 30.3 to 36.0; CLAW-Eval pass@3 55.9 to 61.5. Authors report an average +5.8 percentage points across these metrics.",
+      "method": "Contrastive residual-stream axes for overthinking and overacting, selected layers and conditional activation intervention.",
+      "limitations": "Dynamic activation steering is not equivalent to a sparse static weight patch; no independent replication done here. Do not transfer layer indices or axes unchanged."
+    },
+    {
+      "source": "https://arxiv.org/html/2601.19847v1",
+      "name": "AdaRAS",
+      "tested_model": "Main results on Qwen3-1.7B, not Qwen3.8-27B",
+      "method": "Correct/incorrect trace contrasts select sparse MLP neuron activations for adaptive intervention.",
+      "limitations": "Supports neuron-localization experiments, not a known list of beneficial 27B neuron edits."
+    },
+    {
+      "source": "https://arxiv.org/html/2505.22411v1",
+      "name": "Manifold Steering",
+      "tested_model": "DeepSeek-R1 distilled models",
+      "method": "Activation intervention along an overthinking direction projected onto a low-dimensional subspace.",
+      "limitations": "Stronger intervention can reduce accuracy. Not demonstrated here on Qwen3.8-27B."
+    }
+  ],
+  "original_weight_space_result": {
+    "article": "https://rikiyat.github.io/blog/weight-space-programming/",
+    "final_log": "https://github.com/RikiyaT/lm_understand-logs/blob/main/exp8_math/runs/p50c/final_answer.md",
+    "manifest": "https://github.com/RikiyaT/lm_understand-logs/blob/main/exp8_math/runs/p50c/edit/manifest.json",
+    "model": "Qwen3.5-0.8B",
+    "edit": "64 MLP down-projection columns in each of layers 15 and 19; 131072 addressed entries, 130188 BF16 bitwise changes.",
+    "diagnosis": "Final log reports 576 of 579 practice rescues were originally truncated. Reports dose-response, isolated-layer and norm-matched random controls.",
+    "interpretation": "Strong evidence for rescuing a specific failure under that protocol; not proof that editing an arbitrary 0.016% of another model improves reasoning."
+  },
+  "candidate_experiment": {
+    "priority": "Use public/synthetic matched productive-vs-unproductive reasoning and action traces, with exact model revision and serving settings fixed.",
+    "local_status_context": "STATUS.md reports deployed Swift merge, no reasoning loops in prior public-task audit, and 58/58 successful short explicit-rule tasks obeying the rule. Long-task generalization remains open. This research did not open underlying traces.",
+    "first_localization": "Collect residual states and MLP activations at selected decision points across all 64 layers. Rank discriminative directions/neurons on development data; test causality with reversible interventions on separate validation tasks.",
+    "weight_candidate": "Only after causal validation, test a small selected-column MLP down_proj edit in a separate checkpoint. No specific layer or neuron is currently established as a target.",
+    "controls": [
+      "unmodified model",
+      "norm-matched random edits",
+      "multiple strengths",
+      "single-layer ablations",
+      "matched successful examples",
+      "separate held-out tasks",
+      "BF16 and final IQ4_XS comparison",
+      "matched sampling and token budgets"
+    ],
+    "success": "Improved held-out correctness, not just shorter outputs; report completion, reasoning length, failure rates and regressions separately.",
+    "stop": "Do not proceed to permanent edits if no reproducible failure or no causal benefit is found."
+  }
+}

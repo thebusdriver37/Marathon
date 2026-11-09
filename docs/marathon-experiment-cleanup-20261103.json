@@ -1,0 +1,40 @@
+{
+  "date": "2026-11-03",
+  "status": "Research stopped at user request; disposable artifacts moved to desktop Trash, not permanently deleted",
+  "files_moved": 17975,
+  "allocated_bytes_moved": 78657638400,
+  "GiB_moved": 73.26,
+  "space_reclaimed_by_move_bytes": 0,
+  "categories": {
+    "unused scratch stock-model quantization": {
+      "files": 1,
+      "allocated_bytes": 15420461056
+    },
+    "experimental inference snapshots": {
+      "files": 213,
+      "allocated_bytes": 62191972352
+    },
+    "raw activation dumps": {
+      "files": 17408,
+      "allocated_bytes": 608174080
+    },
+    "compiled build outputs": {
+      "files": 353,
+      "allocated_bytes": 437030912
+    }
+  },
+  "trash_bundle": "/home/deforest/.local/share/Trash/files/marathon-experiment-cleanup-20261103",
+  "full_manifest": "/home/deforest/marathon-audit/cleanup-20261103/MANIFEST.json",
+  "retained": [
+    "All reports/documentation, JSON/JSONL results, logs, synthetic transcripts, scripts and fixtures remain in original locations",
+    "Production weights and runtime configuration",
+    "Repository changes and unrelated workloads"
+  ],
+  "restore": "Restore the named bundle from Trash, then use bundle_relative_path/original_path in the full manifest to move files back. Do not overwrite newer files.",
+  "results_to_preserve": [
+    "/home/deforest/marathon-audit/native-lab/run3/SUMMARY.json",
+    "/home/deforest/marathon-audit/episode-lab/TRANSFER-SUMMARY.json",
+    "/home/deforest/marathon-audit/context-lab/SUMMARY.json"
+  ],
+  "limitations": "Re-running discarded experiments may require rebuilding runtime objects, re-creating activation dumps and downloading/requantizing the scratch stock model. No permanent weight improvement was validated."
+}
