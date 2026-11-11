@@ -1,0 +1,14 @@
+# Validated Studio example; merge into the machine-local catalog to activate.
+[[external_models]]
+id = "macstudio-deepseek"
+model = "DeepSeek-V4.1-Flash-1017-MLX-Serve-iQ-MLX-3.0bpw-v1.1"
+display_name = "DeepSeek V4.1 Flash 1017 (Mac Studio)"
+description = "Mac Studio MLX 3.0bpw v1.1, 256K context, concurrency 1"
+base_url = "http://127.0.0.1:11235/v1"
+context = 262144
+auto_compact_token_limit = 229376
+truncation_limit = 221184
+supports_parallel_tool_calls = false
+input_modalities = ["text"]
+reasoning_transport = "responses"
+# Sampling and reasoning effort remain unset to preserve shipped defaults.
