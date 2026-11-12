@@ -28,7 +28,9 @@ Marathon's existing external Responses route handles this service.
 
 Context is 262144, compaction threshold 229376, and truncation limit 221184.
 Sampling and reasoning effort remain unset, preserving server defaults.
-Parallel tool calls are disabled; server concurrency remains 1. Text-only is
+Parallel tool calls are enabled, the Marathon default since 2026-11-12; a direct
+probe returned three independent `read_file` calls in one response. Server
+concurrency remains 1. Text-only is
 conservative pending vision validation. No server tuning, restart, GPU worker
 change, or power-setting change was performed.
 

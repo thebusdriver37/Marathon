@@ -671,7 +671,7 @@ context = 32768
 
         self.assertEqual(model["context_window"], 262_144)
         self.assertEqual(model["max_context_window"], 262_144)
-        self.assertFalse(model["supports_parallel_tool_calls"])
+        self.assertTrue(model["supports_parallel_tool_calls"])
         self.assertEqual(model["auto_compact_token_limit"], 235_929)
         self.assertEqual(model["effective_context_window_percent"], 100)
         self.assertEqual(openai_model["context_length"], 262_144)
@@ -687,6 +687,27 @@ context = 32768
             model = state.model_catalog()["models"][0]
 
         self.assertTrue(model["supports_parallel_tool_calls"])
+        self.assertIn(router_module.MARATHON_PARALLEL_TOOL_INSTRUCTIONS, model["base_instructions"])
+
+    def test_catalog_omits_parallel_guidance_without_capability(self) -> None:
+        profile = replace(fixture_profile(), supports_parallel_tool_calls=False)
+        state = object.__new__(router_module.RouterState)
+        state.available_profiles = {profile.slug: profile}
+        state._refresh_profiles = lambda: state.available_profiles
+
+        with mock.patch.object(router_module, "_base_instructions", return_value="prompt"):
+            model = state.model_catalog()["models"][0]
+
+        self.assertEqual(model["base_instructions"], "prompt")
+
+    def test_request_parallel_tool_calls_follow_profile_capability(self) -> None:
+        tools = [{"type": "function", "name": "read_file", "parameters": {"type": "object"}}]
+        for supported in (False, True):
+            with self.subTest(supported=supported):
+                profile = replace(fixture_profile(), supports_parallel_tool_calls=supported)
+                request = {"tools": copy.deepcopy(tools), "parallel_tool_calls": True, "input": []}
+                normalized = router_module.normalize_responses_request(request, profile)
+                self.assertIs(normalized["parallel_tool_calls"], supported)
 
     def test_catalog_enables_codex_skill_and_plugin_guidance(self) -> None:
         profile = fixture_profile()

@@ -511,7 +511,7 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("dsv4-mtp", mtp_128k_profile.extra_args)
         self.assertEqual(mtp_128k_profile.confidence, "verified")
         self.assertIsNone(long_profile.tool_thinking_budget)
-        self.assertFalse(long_profile.parallel_tool_calls)
+        self.assertTrue(long_profile.parallel_tool_calls)
 
     def test_profile_backend_selection_is_generic(self) -> None:
         model = fixture_model("deepseek-v4-flash")

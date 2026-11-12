@@ -110,7 +110,7 @@ class Profile:
     confidence: str
     frontends: tuple[str, ...]
     tool_thinking_budget: int | None = None
-    parallel_tool_calls: bool = False
+    parallel_tool_calls: bool = True
     backend: str | None = None
     temperature: float | None = None
     gpus: tuple[int, ...] = ()
@@ -169,7 +169,7 @@ class ExternalModel:
     truncation_limit: int
     api_key_env: str | None = None
     api_key_file: str | None = None
-    supports_parallel_tool_calls: bool = False
+    supports_parallel_tool_calls: bool = True
     temperature: float | None = None
     input_modalities: tuple[str, ...] = ("text",)
     reasoning_levels: tuple[ReasoningLevel, ...] = ()
@@ -413,7 +413,7 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
                 api_key_env=api_key_env or None,
                 api_key_file=api_key_file,
                 supports_parallel_tool_calls=bool(
-                    raw.get("supports_parallel_tool_calls", False)
+                    raw.get("supports_parallel_tool_calls", True)
                 ),
                 temperature=(
                     float(temperature_raw)
@@ -638,7 +638,7 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                     if "tool_thinking_budget" in item
                     else None
                 ),
-                parallel_tool_calls=bool(item.get("parallel_tool_calls", False)),
+                parallel_tool_calls=bool(item.get("parallel_tool_calls", True)),
                 backend=(str(item["backend"]) if item.get("backend") else None),
                 temperature=(
                     float(item["temperature"])

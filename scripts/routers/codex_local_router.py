@@ -171,6 +171,12 @@ MARATHON_RUNTIME_INSTRUCTIONS = (
     "compatibility. Follow it with its named instruction authority, not as an ordinary user "
     "request."
 )
+# Added to base instructions only for profiles that support parallel tool calls.
+MARATHON_PARALLEL_TOOL_INSTRUCTIONS = (
+    "Parallelize independent tool calls: when several reads, searches, or inspections "
+    "do not depend on each other's results, emit them together in one response instead "
+    "of one call per turn. Keep dependent steps, edits, and approvals sequential."
+)
 MARATHON_LOCAL_REASONING_MARKER = "marathon-local-reasoning-v1"
 MARATHON_LOCAL_REASONING_CAPSULE_PREFIX = "marathon-local-reasoning-v2:"
 MAX_LOCAL_REASONING_CAPSULE_BYTES = 8 * 1024 * 1024
@@ -320,7 +326,7 @@ class ModelProfile:
     context_window: int
     auto_compact_token_limit: int
     truncation_limit: int
-    supports_parallel_tool_calls: bool = False
+    supports_parallel_tool_calls: bool = True
     supports_slots: bool = True
     temperature: float | None = None
     default_reasoning_level: str | None = None
@@ -948,6 +954,21 @@ def _base_instructions() -> str:
     )
 
 
+def _profile_base_instructions(base: str, profile: "ModelProfile") -> str:
+    if not profile.supports_parallel_tool_calls:
+        return base
+    return "\n\n".join(part for part in (base, MARATHON_PARALLEL_TOOL_INSTRUCTIONS) if part)
+
+
+def _enforce_parallel_tool_calls(
+    data: dict[str, Any], profile: "ModelProfile | None"
+) -> None:
+    """Codex always requests parallel calls; only validated profiles may keep them."""
+    if profile is not None and not profile.supports_parallel_tool_calls:
+        if data.get("parallel_tool_calls"):
+            data["parallel_tool_calls"] = False
+
+
 def _target_override(env_var: str, default: str) -> str:
     return os.getenv(env_var) or default
 
@@ -1493,7 +1514,7 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         auto_compact_token_limit=auto_compact_limit,
         truncation_limit=truncation_limit,
         supports_parallel_tool_calls=_env_bool(
-            "MARATHON_MODEL_PARALLEL_TOOL_CALLS", False
+            "MARATHON_MODEL_PARALLEL_TOOL_CALLS", True
         ),
         supports_slots=_env_bool("MARATHON_BACKEND_SLOT_API", True),
         temperature=temperature,
@@ -2362,6 +2383,7 @@ def normalize_responses_request(
     instruction_base = original_instructions if isinstance(original_instructions, str) else ""
     data["_marathon_instruction_base_hash"] = _sha256_text(instruction_base)
     _apply_reasoning_effort(data, profile, request_kind=request_kind)
+    _enforce_parallel_tool_calls(data, profile)
     tools = data.get("tools")
     web_search_requested = request_has_web_search_tool(tools) if isinstance(tools, list) else False
     if isinstance(tools, list):
@@ -3154,7 +3176,7 @@ class RouterState:
                     "additional_speed_tiers": [],
                     "availability_nux": None,
                     "upgrade": None,
-                    "base_instructions": instructions,
+                    "base_instructions": _profile_base_instructions(instructions, profile),
                     "model_messages": None,
                     "include_skills_usage_instructions": True,
                     "include_plugin_usage_instructions": True,
@@ -7255,6 +7277,8 @@ async def _handle_http_proxy(request: web.Request) -> web.StreamResponse:
         data["model"] = profile.alias
         if profile.temperature is not None:
             data["temperature"] = profile.temperature
+        if path == "/v1/chat/completions":
+            _enforce_parallel_tool_calls(data, profile)
         body = json.dumps(data, separators=(",", ":")).encode()
 
     if state.http_client is None:

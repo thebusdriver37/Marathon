@@ -32,4 +32,4 @@ class StudioCatalogTests(unittest.TestCase):
         self.assertEqual(model['context_window'], 262144)
         self.assertEqual(model['auto_compact_token_limit'], 229376)
         self.assertEqual(model['truncation_policy']['limit'], 221184)
-        self.assertFalse(model['supports_parallel_tool_calls'])
+        self.assertTrue(model['supports_parallel_tool_calls'])

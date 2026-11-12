@@ -325,7 +325,8 @@ Do not place the key itself in the catalog.
 To avoid exporting the key globally, set `api_key_file` to a private file containing either the bare key or the named `api_key_env=value` entry.
 The endpoint must expose `/v1/models` and the Responses API, including function tool calls for agentic coding.
 For strict Responses servers such as Project Maya, set `reasoning_transport = "responses"` alongside the configured reasoning levels. This sends `reasoning.effort` without adding llama.cpp-specific `chat_template_kwargs`; the default transport remains `chat_template` for existing deployments.
-The optional `auto_compact_token_limit`, `truncation_limit`, `supports_parallel_tool_calls`, and `input_modalities` fields override Marathon's conservative defaults when the deployment has been validated for them.
+The optional `auto_compact_token_limit`, `truncation_limit`, and `input_modalities` fields override Marathon's conservative defaults when the deployment has been validated for them.
+Parallel tool calls are on by default for every model, and the base instructions ask the model to batch independent tool calls. Set `supports_parallel_tool_calls = false` (external models) or `parallel_tool_calls = false` (local profiles) only for a model or server that mishandles several calls in one response; the router then forwards `parallel_tool_calls: false` and omits the batching instruction.
 Set `enabled = false` to retain an entry without showing it in the model menu.
 
 Marathon sessions remain in Marathon's isolated Codex session store and are tagged with the `marathon-local` provider.

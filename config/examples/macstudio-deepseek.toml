@@ -8,7 +8,7 @@ base_url = "http://127.0.0.1:11235/v1"
 context = 262144
 auto_compact_token_limit = 229376
 truncation_limit = 221184
-supports_parallel_tool_calls = false
+supports_parallel_tool_calls = true
 input_modalities = ["text"]
 reasoning_transport = "responses"
 # Sampling and reasoning effort remain unset to preserve shipped defaults.
