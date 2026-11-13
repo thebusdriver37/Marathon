@@ -175,6 +175,16 @@ class ExternalModel:
     reasoning_levels: tuple[ReasoningLevel, ...] = ()
     default_reasoning_level: str | None = None
     reasoning_transport: str = "chat_template"
+    # Forward developer/system messages with their own roles instead of
+    # rewriting them as tagged user messages. For servers whose templates
+    # place a leading system message in the model's real system block.
+    native_instruction_roles: bool = False
+    # Per-model output cap for each backend request; None keeps the router default.
+    max_output_tokens: int | None = None
+    # fnmatch patterns of Codex tool names this backend should not be offered.
+    disabled_tools: tuple[str, ...] = ()
+    # Replaces the upstream Codex prompt in this model's base instructions.
+    instructions_file: str | None = None
 
 
 def _reasoning_configuration(
@@ -396,6 +406,47 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
         reasoning_transport = raw.get("reasoning_transport", "chat_template")
         if reasoning_transport not in ("chat_template", "responses"):
             raise ValueError(f"external model {model_id} has invalid reasoning_transport")
+        native_instruction_roles = raw.get("native_instruction_roles", False)
+        if not isinstance(native_instruction_roles, bool):
+            raise ValueError(
+                f"external model {model_id} native_instruction_roles must be a boolean"
+            )
+        if native_instruction_roles and reasoning_transport != "responses":
+            raise ValueError(
+                f"external model {model_id} native_instruction_roles requires "
+                "reasoning_transport = \"responses\""
+            )
+        max_output_raw = raw.get("max_output_tokens")
+        if max_output_raw is not None and (
+            isinstance(max_output_raw, bool)
+            or not isinstance(max_output_raw, int)
+            or max_output_raw < 256
+        ):
+            raise ValueError(
+                f"external model {model_id} max_output_tokens must be an integer >= 256"
+            )
+        disabled_tools_raw = raw.get("disabled_tools", [])
+        if not isinstance(disabled_tools_raw, list) or any(
+            not isinstance(item, str) or not item.strip() for item in disabled_tools_raw
+        ):
+            raise ValueError(
+                f"external model {model_id} disabled_tools must be a list of tool name patterns"
+            )
+        instructions_raw = raw.get("instructions_file")
+        instructions_file = None
+        if instructions_raw is not None:
+            if not isinstance(instructions_raw, str) or not instructions_raw.strip():
+                raise ValueError(
+                    f"external model {model_id} instructions_file must be a path"
+                )
+            candidate = Path(instructions_raw.strip()).expanduser()
+            if not candidate.is_absolute():
+                candidate = ROOT_DIR / candidate
+            if not candidate.is_file():
+                raise ValueError(
+                    f"external model {model_id} instructions_file not found: {candidate}"
+                )
+            instructions_file = str(candidate)
         temperature_raw = raw.get("temperature")
         result.append(
             ExternalModel(
@@ -424,6 +475,10 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
                 reasoning_levels=reasoning_levels,
                 default_reasoning_level=default_reasoning_level,
                 reasoning_transport=reasoning_transport,
+                native_instruction_roles=native_instruction_roles,
+                max_output_tokens=max_output_raw,
+                disabled_tools=tuple(item.strip() for item in disabled_tools_raw),
+                instructions_file=instructions_file,
             )
         )
     return tuple(result)

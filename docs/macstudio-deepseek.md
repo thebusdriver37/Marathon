@@ -27,7 +27,34 @@ tracked templates. No model bundle or GPU worker registration is needed:
 Marathon's existing external Responses route handles this service.
 
 Context is 262144, compaction threshold 229376, and truncation limit 221184.
-Sampling and reasoning effort remain unset, preserving server defaults.
+
+## Thinking and DeepSeek tuning (2026-11-13)
+
+mlx-serve renders DeepSeek V4.1 in non-thinking chat mode unless the request
+carries `reasoning.effort`; with the original unset settings every Marathon
+request arrived as `thinking=false`. The entry now sets `temperature = 1.0` and
+reasoning levels `none`, `high` (default) and `xhigh`. The server's template maps
+low/medium/high to effort hints 50/62/75 and xhigh/max to 100; low, medium and
+high measured about the same depth, xhigh about twice as deep.
+
+Opt-in keys used only by this entry:
+- `native_instruction_roles = true` keeps developer/system messages in their
+  roles, so the instructions land in DeepSeek's real system block instead of a
+  tagged user turn (the default conversion other models rely on).
+- `max_output_tokens = 32768`: thinking counts toward the cap; 8192 truncated
+  max-effort turns. Cut-off recovery retries now send effort `none` on Responses
+  backends that declare it, matching the chat-template path.
+- `disabled_tools` hides `multi_agent_v1__*` and `view_image` (about half the
+  tool schema text per request on a text-only, single-server model).
+- `instructions_file = "config/prompts/deepseek-v4-agent.md"` replaces the
+  21K-character upstream Codex prompt with a 4K DeepSeek prompt; Marathon's
+  runtime rules are still appended.
+
+Single A/B pass at `high` through the real router and frontend (calc
+interpreter with hidden tests, multi-module pipeline bug, bug reports, coding
+gauntlet): every setup passed every task. The full package was faster on calc
+(9.0 vs 12.5 min) and bugs (75 vs 98 s) and slower on the gauntlet (153 vs
+115 s). One run each, so treat speed differences as indicative only.
 Parallel tool calls are enabled, the Marathon default since 2026-11-12; a direct
 probe returned three independent `read_file` calls in one response. Server
 concurrency remains 1. Text-only is

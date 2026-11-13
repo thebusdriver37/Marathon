@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import base64
 import copy
+import fnmatch
 import hashlib
 import json
 import os
@@ -334,6 +335,10 @@ class ModelProfile:
     input_modalities: tuple[str, ...] = ("text",)
     external: bool = False
     reasoning_transport: str = "chat_template"
+    native_instruction_roles: bool = False
+    max_output_tokens: int | None = None
+    disabled_tools: tuple[str, ...] = ()
+    instructions_file: str | None = None
     api_key_env: str | None = None
     api_key_file: str | None = None
 
@@ -955,9 +960,22 @@ def _base_instructions() -> str:
 
 
 def _profile_base_instructions(base: str, profile: "ModelProfile") -> str:
+    if profile.instructions_file:
+        # Replace only the upstream Codex prompt; Marathon's runtime rules stay.
+        custom = Path(profile.instructions_file).read_text(encoding="utf-8").rstrip()
+        base = "\n\n".join(part for part in (custom, MARATHON_RUNTIME_INSTRUCTIONS) if part)
     if not profile.supports_parallel_tool_calls:
         return base
     return "\n\n".join(part for part in (base, MARATHON_PARALLEL_TOOL_INSTRUCTIONS) if part)
+
+
+def _tool_disabled_for_profile(tool: Any, profile: "ModelProfile | None") -> bool:
+    if profile is None or not profile.disabled_tools or not isinstance(tool, dict):
+        return False
+    name = tool.get("name") or tool.get("type")
+    return isinstance(name, str) and any(
+        fnmatch.fnmatchcase(name, pattern) for pattern in profile.disabled_tools
+    )
 
 
 def _enforce_parallel_tool_calls(
@@ -1180,6 +1198,9 @@ def _active_ws_request_scope(request: dict[str, Any]) -> str | None:
 
 
 def _max_output_tokens(profile: "ModelProfile") -> int:
+    if profile.max_output_tokens is not None:
+        # A per-model catalog cap is more specific than the global default.
+        return max(256, min(profile.max_output_tokens, profile.context_window))
     dynamic_default = max(
         2_048,
         min(DEFAULT_MAX_OUTPUT_TOKENS, profile.context_window // 8),
@@ -1243,6 +1264,22 @@ def _response_has_actionable_output(items: list[dict[str, Any]]) -> bool:
         ):
             return True
     return False
+
+
+def _disable_responses_reasoning_for_recovery(
+    request: dict[str, Any], profile: "ModelProfile"
+) -> None:
+    """Mirror the chat-template recovery: a forced action should not restart thinking.
+
+    Only for Responses backends that declare an explicit `none` effort, so a
+    server that rejects it never receives one.
+    """
+    if profile.reasoning_transport != "responses":
+        return
+    if "none" not in {effort for effort, _ in profile.supported_reasoning_levels}:
+        return
+    reasoning = request.get("reasoning")
+    request["reasoning"] = {**(reasoning if isinstance(reasoning, dict) else {}), "effort": "none"}
 
 
 def _stalled_recovery_message() -> dict[str, Any]:
@@ -1560,6 +1597,10 @@ def _external_model_profiles() -> dict[str, ModelProfile]:
             input_modalities=configured.input_modalities,
             external=True,
             reasoning_transport=configured.reasoning_transport,
+            native_instruction_roles=configured.native_instruction_roles,
+            max_output_tokens=configured.max_output_tokens,
+            disabled_tools=configured.disabled_tools,
+            instructions_file=configured.instructions_file,
             api_key_env=configured.api_key_env,
             api_key_file=configured.api_key_file,
         )
@@ -2391,6 +2432,7 @@ def normalize_responses_request(
             converted
             for tool in tools
             if (converted := _backend_tool_for_llama(tool)) is not None
+            and not _tool_disabled_for_profile(tool, profile)
         ]
     if web_search_requested:
         existing = data.get("tools")
@@ -2506,6 +2548,16 @@ def normalize_responses_request(
             continue
 
         role = item.get("role")
+        if (
+            item.get("type") == "message"
+            and role in {"developer", "system"}
+            and profile is not None
+            and profile.native_instruction_roles
+        ):
+            # The backend template owns instruction placement (e.g. DeepSeek
+            # V4.1 puts a leading system turn in its real system block).
+            normalized_input.append(item)
+            continue
         if item.get("type") == "message" and role in {"developer", "system"}:
             chronological = _chronological_instruction_message(item)
             if chronological is not None:
@@ -5958,6 +6010,7 @@ class RouterState:
                 request["tool_choice"] = "required"
                 recovery_tool_choice = True
                 request["max_output_tokens"] = min(attempt_output_limit, 4_096)
+                _disable_responses_reasoning_for_recovery(request, profile)
                 persist_progress()
                 continue
             last_response = response
@@ -6052,6 +6105,8 @@ class RouterState:
                     request["tool_choice"] = copy.deepcopy(forward_request["tool_choice"])
                 else:
                     request.pop("tool_choice", None)
+                if profile.reasoning_transport == "responses" and "reasoning" in forward_request:
+                    request["reasoning"] = copy.deepcopy(forward_request["reasoning"])
                 recovery_tool_choice = False
 
             needs_stalled_recovery = (
@@ -6101,6 +6156,7 @@ class RouterState:
                     template_kwargs.pop("reasoning_effort", None)
                     template_kwargs["enable_thinking"] = False
                     request["chat_template_kwargs"] = template_kwargs
+                _disable_responses_reasoning_for_recovery(request, profile)
                 if tools_available:
                     request["tool_choice"] = "required"
                     recovery_tool_choice = True

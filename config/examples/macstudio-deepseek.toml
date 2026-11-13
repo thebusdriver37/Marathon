@@ -11,4 +11,21 @@ truncation_limit = 221184
 supports_parallel_tool_calls = true
 input_modalities = ["text"]
 reasoning_transport = "responses"
-# Sampling and reasoning effort remain unset to preserve shipped defaults.
+# mlx-serve renders DeepSeek's thinking only when a reasoning effort is sent;
+# without one every request ran in non-thinking chat mode (found 2026-11-12).
+# Its template maps low/medium/high to effort hints 50/62/75 and xhigh/max to 100.
+temperature = 1.0
+default_reasoning_level = "high"
+reasoning_levels = [
+  { effort = "none", description = "No thinking; fastest direct replies." },
+  { effort = "high", description = "Standard DeepSeek thinking for coding work." },
+  { effort = "xhigh", description = "DeepSeek max thinking, about 2x longer, for hard problems." },
+]
+# Keep Codex instructions in DeepSeek's system block instead of a user turn.
+native_instruction_roles = true
+# DeepSeek thinks inside the output budget; 8192 truncated max-effort turns.
+max_output_tokens = 32768
+# Text-only, single-server: hide the multi-agent controls and image viewer.
+disabled_tools = ["multi_agent_v1__*", "view_image"]
+# Compact agent prompt tuned for DeepSeek V4 (Marathon runtime rules still appended).
+instructions_file = "config/prompts/deepseek-v4-agent.md"
