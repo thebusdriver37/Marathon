@@ -1,0 +1,446 @@
+{
+  "date": "2026-11-13",
+  "scope": "Read-only source/history audit of Marathon runtime integration, pinned patch stack and identified local backend source trees. No private conversations, model contents, snapshots or runtime logs read. No builds, GPU work, model tests or runtime replacement.",
+  "recommendation": "Stage a separate clean v1.0.0 candidate and benchmark before migration. Do not git-pull/rebase the tuned runtime in place or replay all 14 patches blindly.",
+  "upstream": {
+    "release": "v1.0.0",
+    "published_at": "2026-11-13T10:20:19Z",
+    "release_url": "https://github.com/ggml-org/llama.cpp/releases/tag/v1.0.0",
+    "tag_commit": "b1b770d90d94cad9e9ea5b993bdbc383a522fb28",
+    "master_at_fetch": "b79696f1f556cb30b0c184838115007d929baca8",
+    "commits_after_tag": 11,
+    "note": "Resolved tag commit is authoritative for comparisons; release metadata target_commitish differs from the tag."
+  },
+  "pins": [
+    {
+      "variant": "upstream",
+      "commit": "9ee9fc04c136ef2ae729bfc60d18961b23c13ddf",
+      "date": "2026-08-19",
+      "upstream_commits_to_v1": 1835,
+      "local_source": "~/AI/backends/llama.cpp-current",
+      "tracked_status": "clean; detached; shallow"
+    },
+    {
+      "variant": "qwen38",
+      "commit": "9723942adc518b43c4b95dc4dce6906903eb5e09",
+      "date": "2026-08-30",
+      "upstream_commits_to_v1": 1648,
+      "patch_count": 14,
+      "note": "Catalog path ~/AI/backends/llama.cpp-qwen38 not found locally. Historical tuned working tree exists under .marathon/llama.cpp-checkpoint-opt-source. This audit does not establish which binary is currently serving."
+    }
+  ],
+  "validation": {
+    "baseline": "All 14 patches applied sequentially to the exact pinned Qwen base in a disposable worktree.",
+    "v1_independent": "1/14 patches apply independently to pristine v1.0.0; no patch reverse-applies completely. Later patches depend on earlier ones, so these are applicability checks, not 13 independent semantic defects.",
+    "v1_sequential": "Patch 001 applies; patch 002 fails; stopped there.",
+    "patch_checks": [
+      {
+        "patch": "001-iq4-xs-crossover.patch",
+        "applies": true,
+        "reverse_applies": false,
+        "errors": [],
+        "assessment": "Not upstream as this sm86 IQ4_XS threshold; applies cleanly. Rebenchmark against new few-row MMQ before retaining."
+      },
+      {
+        "patch": "002-sm86-speculative-decode.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: ggml/src/ggml-cuda/fattn-mma-f16.cuh:527",
+          "error: ggml/src/ggml-cuda/fattn-mma-f16.cuh: patch does not apply",
+          "error: patch failed: ggml/src/ggml-cuda/mmvq.cu:294",
+          "error: ggml/src/ggml-cuda/mmvq.cu: patch does not apply",
+          "error: patch failed: ggml/src/ggml-cuda/top-k.cu:10",
+          "error: ggml/src/ggml-cuda/top-k.cu: patch does not apply"
+        ],
+        "assessment": "Conflicts in attention, MMVQ and top-k. Upstream rewrote these paths; local Q8 fused-load behavior is not proven equivalent. Benchmark and selectively port only surviving gains."
+      },
+      {
+        "patch": "003-dflash-kv-injection.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: common/speculative.cpp:910",
+          "error: common/speculative.cpp: patch does not apply",
+          "error: patch failed: src/llama-context.cpp:117",
+          "error: src/llama-context.cpp: patch does not apply",
+          "error: patch failed: src/llama-context.h:114",
+          "error: src/llama-context.h: patch does not apply",
+          "error: patch failed: src/llama-ext.h:95",
+          "error: src/llama-ext.h: patch does not apply",
+          "error: patch failed: src/llama-graph.h:874",
+          "error: src/llama-graph.h: patch does not apply",
+          "error: patch failed: src/models/dflash.cpp:257",
+          "error: src/models/dflash.cpp: patch does not apply"
+        ],
+        "assessment": "Functional overlap: upstream #27310 fuses DFlash encoder/injection; #31506 adds device copies. Local small/large batch split differs. Prefer upstream baseline; benchmark small-batch behavior."
+      },
+      {
+        "patch": "004-q8-v-swizzle.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: ggml/src/ggml-cuda/fattn-mma-f16.cuh:360",
+          "error: ggml/src/ggml-cuda/fattn-mma-f16.cuh: patch does not apply"
+        ],
+        "assessment": "Partial overlap: upstream #25635 and #28536 provide K/V shared-memory swizzling. This does not prove equivalence to local fused Q8 loading."
+      },
+      {
+        "patch": "005-q8-v-decode-attention.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: ggml/src/ggml-cuda/fattn-mma-f16.cuh:586",
+          "error: ggml/src/ggml-cuda/fattn-mma-f16.cuh: patch does not apply"
+        ],
+        "assessment": "Local fused Q8 V attention implementation not established as upstream. Requires targeted performance/correctness comparison."
+      },
+      {
+        "patch": "006-media-without-speculation.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: tools/server/server-context.cpp:468",
+          "error: tools/server/server-context.cpp: patch does not apply"
+        ],
+        "assessment": "Old blanket media speculation disable is modified by later local patches. Upstream DFlash handles embedding batches with pinned-image exclusions. Do not port this patch alone."
+      },
+      {
+        "patch": "007-speculative-slot-state.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: tools/server/server-context.cpp:38",
+          "error: tools/server/server-context.cpp: patch does not apply"
+        ],
+        "assessment": "Functional overlap: upstream #30574 embeds draft and speculative state in slot files. Our .draft/.spec sidecar format differs."
+      },
+      {
+        "patch": "008-cache-preference.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: ggml/src/ggml-cuda/mmq.cuh:1407",
+          "error: ggml/src/ggml-cuda/mmq.cuh: patch does not apply"
+        ],
+        "assessment": "Local cudaFuncSetCacheConfig tuning is absent in the inspected upstream MMQ source. Kernel changes invalidate assumed performance benefit; rebenchmark."
+      },
+      {
+        "patch": "009-scheduler-reuse.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: src/llama-context.cpp:599",
+          "error: src/llama-context.cpp: patch does not apply"
+        ],
+        "assessment": "Functional replacement: upstream #32009 reuses compatible schedulers and #32089 reuses graph results. LLAMA_REUSE_SCHEDULER env hook is absent and unnecessary for the upstream implementation."
+      },
+      {
+        "patch": "010-slot-rewind-checkpoints.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: tools/server/CMakeLists.txt:31",
+          "error: tools/server/CMakeLists.txt: patch does not apply",
+          "error: patch failed: tools/server/server-context.cpp:16",
+          "error: tools/server/server-context.cpp: patch does not apply"
+        ],
+        "assessment": "Functional overlap: upstream #26004 persists context checkpoints inside the slot file. Our .checkpoints sidecar is not the upstream format."
+      },
+      {
+        "patch": "011-media-single-column-verification.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: common/speculative.cpp:167",
+          "error: common/speculative.cpp: patch does not apply",
+          "error: patch failed: common/speculative.h:79",
+          "error: common/speculative.h: patch does not apply",
+          "error: patch failed: ggml/include/ggml.h:2453",
+          "error: ggml/include/ggml.h: patch does not apply",
+          "error: patch failed: ggml/src/ggml-cuda/fattn-common.cuh:1087",
+          "error: ggml/src/ggml-cuda/fattn-common.cuh: patch does not apply",
+          "error: patch failed: ggml/src/ggml-cuda/ggml-cuda.cu:1818",
+          "error: ggml/src/ggml-cuda/ggml-cuda.cu: patch does not apply",
+          "error: patch failed: ggml/src/ggml.c:5506",
+          "error: ggml/src/ggml.c: patch does not apply",
+          "error: patch failed: src/llama-context.cpp:7",
+          "error: src/llama-context.cpp: patch does not apply",
+          "error: patch failed: src/llama-context.h:115",
+          "error: src/llama-context.h: patch does not apply",
+          "error: patch failed: src/llama-cparams.h:36",
+          "error: src/llama-cparams.h: patch does not apply",
+          "error: patch failed: src/llama-ext.h:99",
+          "error: src/llama-ext.h: patch does not apply",
+          "error: patch failed: src/llama-graph.h:875",
+          "error: src/llama-graph.h: patch does not apply",
+          "error: patch failed: src/llama-kv-cache.cpp:1248",
+          "error: src/llama-kv-cache.cpp: patch does not apply",
+          "error: patch failed: src/llama-kv-cache.h:167",
+          "error: src/llama-kv-cache.h: patch does not apply",
+          "error: patch failed: src/models/qwen35.cpp:226",
+          "error: src/models/qwen35.cpp: patch does not apply",
+          "error: patch failed: tools/server/server-context.cpp:655",
+          "error: tools/server/server-context.cpp: patch does not apply"
+        ],
+        "assessment": "Custom single-column verification APIs and implementation are absent. Upstream has different multimodal speculation handling; numerical/media correctness remains an explicit migration gate."
+      },
+      {
+        "patch": "012-media-attention-reuse.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: ggml/src/ggml-cuda/fattn-common.cuh:972",
+          "error: ggml/src/ggml-cuda/fattn-common.cuh: patch does not apply",
+          "error: patch failed: ggml/src/ggml-cuda/fattn-vec.cuh:540",
+          "error: ggml/src/ggml-cuda/fattn-vec.cuh: patch does not apply"
+        ],
+        "assessment": "Custom media attention reduction/kernel reuse changes conflict. Equivalent numerical behavior and benefit not established."
+      },
+      {
+        "patch": "013-batched-media-default.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: tools/server/server-context.cpp:682",
+          "error: tools/server/server-context.cpp: patch does not apply"
+        ],
+        "assessment": "Depends on local single-column controls from 011. Cannot port in isolation; retest batched multimodal verification."
+      },
+      {
+        "patch": "014-checkpoint-buffer-reuse.patch",
+        "applies": false,
+        "reverse_applies": false,
+        "errors": [
+          "error: patch failed: tools/server/server-task.h:567",
+          "error: tools/server/server-task.h: patch does not apply",
+          "error: patch failed: tools/server/server-context.cpp:2499",
+          "error: tools/server/server-context.cpp: patch does not apply"
+        ],
+        "assessment": "Upstream #30137 uses reference-counted checkpoints to avoid deep copies. This overlaps allocation-reduction goals, but is not the same free-buffer pool. Measure save/rewind latency and host memory."
+      }
+    ],
+    "sequential_checks": [
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "001-iq4-xs-crossover.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "002-sm86-speculative-decode.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "003-dflash-kv-injection.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "004-q8-v-swizzle.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "005-q8-v-decode-attention.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "006-media-without-speculation.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "007-speculative-slot-state.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "008-cache-preference.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "009-scheduler-reuse.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "010-slot-rewind-checkpoints.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "011-media-single-column-verification.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "012-media-attention-reuse.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "013-batched-media-default.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-baseline-20261113",
+        "patch": "014-checkpoint-buffer-reuse.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-audit-20261113",
+        "patch": "001-iq4-xs-crossover.patch",
+        "applied": true,
+        "errors": []
+      },
+      {
+        "tree": "/tmp/marathon-llama-audit-20261113",
+        "patch": "002-sm86-speculative-decode.patch",
+        "applied": false,
+        "errors": [
+          "error: patch failed: ggml/src/ggml-cuda/fattn-mma-f16.cuh:527",
+          "error: ggml/src/ggml-cuda/fattn-mma-f16.cuh: patch does not apply",
+          "error: patch failed: ggml/src/ggml-cuda/top-k.cu:10",
+          "error: ggml/src/ggml-cuda/top-k.cu: patch does not apply"
+        ]
+      }
+    ]
+  },
+  "unpackaged_source_changes": {
+    "tree": ".marathon/llama.cpp-checkpoint-opt-source",
+    "head": "ca461b488",
+    "tracked_modified_files": 25,
+    "comparison": "Reconstructed 14-patch base differs from this working tree in five touched files. Substantive differences are compact/exact8 Q8 attention in fattn-vec.cuh and optional draft/debug telemetry in server-context.cpp/server-task.cpp/server-task.h. common/speculative.cpp differences are whitespace/cast spelling. This comparison covers patch-touched files, not every possible untracked artifact.",
+    "action": "Preserve the existing tree; explicitly include the extra kernel in future benchmark/port inventory."
+  },
+  "integration_findings": [
+    "scripts/apply_llamacpp_patches.sh rejects a qwen38 base different from config/llamacpp-qwen38.ref. Changing the pin alone then encounters the patch conflicts.",
+    "Marathon talks to llama-server over HTTP. Public C API removals primarily affect the fork/build, not a directly linked Python client. Speculation APIs moved/changed, including llama_set_embd_state_src -> llama_set_ctx_state_src.",
+    "Sequence-state version changed 3 -> 4; session version 10 -> 11. Treat old binary slot caches as incompatible. Do not attempt to reuse sidecars across the migration.",
+    "Upstream persists checkpoints and draft state as appendices in one slot file; Marathon currently also tracks .draft/.spec/.checkpoints sidecars. New caches and save/restore/accounting regression tests are required.",
+    "marathon_app/runtime.py _backend_cache_id includes command, environment and binary path/size/mtime. This should separate a new binary from prior caches; validate rather than bypass the guard.",
+    "Catalog Qwen long-option names were found in upstream common/arg.cpp, including reasoning-preserve, backend-sampling, checkpoint-min-step and load-mode. This static name check does not validate argument values or endpoint behavior.",
+    "The generic run_llama_server.sh fallback still prefers historical third_party/.marathon paths; setup/build use ~/AI/backends. Use explicit candidate binary paths during comparisons."
+  ],
+  "deepseek": {
+    "sources": [
+      {
+        "path": "~/AI/backends/llama.cpp-deepseek-v4",
+        "head": "781e978f3",
+        "date": "2026-05-14",
+        "branch": "feat/v4-port-cuda"
+      },
+      {
+        "path": "~/AI/backends/llama.cpp-deepseek-v4-graphs",
+        "head": "76ab025fe",
+        "date": "2026-05-14",
+        "branch": "detached"
+      },
+      {
+        "path": "~/AI/backends/llama.cpp-ds4-longctx",
+        "head": "c9a40073",
+        "date": "2026-07-20",
+        "branch": "fix/dsv4-sparse-stream-k-scheduling"
+      }
+    ],
+    "findings": "Upstream includes DeepSeek4/4.1 and draft-mtp, but not the catalog dsv4-mtp spec type or DSV4_CONSTANT_SHAPE/IDX_SKIP/MOE_TILE/SPARSE_FA/MTP_SPEC hooks. Therefore existing DeepSeek profiles are not drop-in replacements. Exact fork ancestry/merge conflict enumeration and GGUF compatibility were not tested; these need a separate migration track."
+  },
+  "relevant_upstream_changes": [
+    {
+      "pr": 27310,
+      "description": "Fused DFlash encoder and KV injection",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/27310"
+    },
+    {
+      "pr": 31506,
+      "description": "DFlash device feature copies",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/31506"
+    },
+    {
+      "pr": 32009,
+      "description": "Scheduler reuse",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/32009"
+    },
+    {
+      "pr": 32089,
+      "description": "Graph result reuse",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/32089"
+    },
+    {
+      "pr": 30574,
+      "description": "Saved draft state",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/30574"
+    },
+    {
+      "pr": 26004,
+      "description": "Saved context checkpoints",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/26004"
+    },
+    {
+      "pr": 30137,
+      "description": "Reference-counted checkpoints",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/30137"
+    },
+    {
+      "pr": 25635,
+      "description": "Flash attention K/V swizzling",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/25635"
+    },
+    {
+      "pr": 28536,
+      "description": "Flash attention swizzle follow-up",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/28536"
+    },
+    {
+      "pr": 31533,
+      "description": "Few-row MMQ for batch sizes 2-24",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/31533"
+    },
+    {
+      "pr": 30517,
+      "description": "Faster low-bit MMVQ",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/30517"
+    },
+    {
+      "pr": 29353,
+      "description": "Chunked GDN CUDA/HIP kernel",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/29353"
+    },
+    {
+      "pr": 30804,
+      "description": "Chunked CUDA graphs",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/30804"
+    },
+    {
+      "pr": 30565,
+      "description": "Public API pruning",
+      "url": "https://github.com/ggml-org/llama.cpp/pull/30565"
+    }
+  ],
+  "next_steps": [
+    "Build a separately named stock v1.0.0 candidate pinned to the exact audited SHA; retain current binaries and source unchanged. Follow manage-local-gpu before any GPU work.",
+    "Use synthetic/public prompts only. Compare old tuned binary vs stock v1 with identical model, KV types, GPU placement and sampling: prefill, decode, short/long context, draft acceptance and time per accepted token.",
+    "Exercise text, image/media, tool calling, streaming, cancellation, cold/warm prefix reuse, slot save/restore, divergent-prefix recurrent rewind and host/VRAM usage.",
+    "Benchmark remaining IQ4_XS crossover, Q8 fused attention, cache preference and unpackaged compact/exact8 kernel individually. Retire overlaps only after measured correctness/performance parity.",
+    "Update runtime profile and cache identity with fresh caches only after tests pass. Keep DeepSeek migration separate."
+  ],
+  "changes_made": "Audit artifact and STATUS/archive documentation only. No version pins, patches, runtime config, binaries or existing fork working trees modified. Temporary public-source audit checkout retained under /tmp/marathon-llama-audit-20261113 with baseline worktree /tmp/marathon-llama-baseline-20261113."
+}

@@ -1,0 +1,56 @@
+{
+  "status": "selected for promoted Marathon SM86 runtime; scoped qualification and limitations recorded in docs/llamacpp-v1-qualification-20261113.json",
+  "upstream_tag": "v1.0.0",
+  "upstream_commit": "b1b770d90d94cad9e9ea5b993bdbc383a522fb28",
+  "retained_kernel_source": "7c54dd9d28a3ebf4cb116a07354d22b9edaab943",
+  "cuda_architectures": [
+    86
+  ],
+  "opt_in_environment": {
+    "GGML_CUDA_IQ4XS_MARLIN": "1",
+    "GGML_CUDA_MARATHON_Q4_INT8": "1",
+    "GGML_CUDA_MARATHON_GDN_TPC": "16",
+    "LLAMA_REUSE_CHECKPOINT_BUFFERS": "1",
+    "GGML_CUDA_MARATHON_Q4_MAX_QUERIES": "256",
+    "GGML_CUDA_MARATHON_Q4_MIN_CONTEXT": "16384"
+  },
+  "native_cli": [
+    "--spec-draft-n-ubatch",
+    "64"
+  ],
+  "clear_environment": [
+    "LD_PRELOAD"
+  ],
+  "snapshot_policy": "Use a fresh cache namespace; preserve the old namespace for rollback. Never mount old snapshots as compatible v1 state.",
+  "patches": [
+    {
+      "file": "001-media-speculation-guard.patch",
+      "sha256": "5e3e19c375e68bb5f1c63cd8ab8350d95c79b9849a02318a03f976cbc13fe4f8"
+    },
+    {
+      "file": "002-iq4-xs-verify-kernel.patch",
+      "sha256": "c7b14986f1e89992d5c84d6ccca9e5a486d9fe38f9b7fa38ba352ea966baea77"
+    },
+    {
+      "file": "003-sm86-q4-attention.patch",
+      "sha256": "51147372b1d66509c1db9561a1bd0fbab872048384d329547e9b3b35366fddca"
+    },
+    {
+      "file": "004-sm86-gdn-geometry.patch",
+      "sha256": "1c67c2f41869d2b8e9eef83d5829e05c3f183009a1f48eee18f3c099c4c6e025"
+    },
+    {
+      "file": "005-kernel-regression-cases.patch",
+      "sha256": "55f1c044c14467a4da76898bdab02c1ab1088582ff4f31cfa316a2734966675f"
+    },
+    {
+      "file": "006-wider-q4-batches.patch",
+      "sha256": "ca2a8eb8c70012d0dc511a5cce1063b9984b6b68916554b84232a7cf04ff4cef"
+    },
+    {
+      "file": "007-checkpoint-buffer-reuse.patch",
+      "sha256": "cadc09974283d8b80bdc78fbfce57a873b0278a02d21e94e84c504acdc417746"
+    }
+  ],
+  "fork_commit": "d101da10afb01b70a3ed53054733a400f9091594"
+}
