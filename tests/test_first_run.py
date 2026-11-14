@@ -61,7 +61,7 @@ class FirstRunTests(unittest.TestCase):
         script = (ROOT / "scripts/ops/doctor.sh").read_text()
         inventory = script.split('backend_inventory="$', 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
         family = next(f for f in catalog.families() if f.id == "qwen3.8-27b")
-        model = catalog.Model("test", "Test model", Path("/models/Qwen3.8-27B-Uncensored-IQ4_XS.gguf"), 1, family, "IQ4_XS")
+        model = catalog.Model("test", "Test model", Path("/models/Qwen3.8-27B-Marathon-IQ4_XS.gguf"), 1, family, "IQ4_XS")
         for remembered, expected in [({}, "upstream"), ({"model": "test", "profile": "qwen38-iq4-xs-196k"}, "qwen38")]:
             output = io.StringIO()
             with (

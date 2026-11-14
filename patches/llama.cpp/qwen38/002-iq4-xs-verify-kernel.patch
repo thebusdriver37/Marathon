@@ -1,0 +1,591 @@
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index fed14ddfc..67731c8e1 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2487,6 +2487,9 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
+         return;
+     }
++    if (ggml_cuda_mul_mat_iq4xs_marlin(ctx, src0, src1, dst)) {
++        return;
++    }
+     // from a per-type number of src1 columns up to 24, few-row MMQ is faster than MMVQ and MMQ
+     const bool use_mmq_few = ggml_cuda_should_use_mmq_few(src0, src1, cc);
+     if (!use_mmq_few && ggml_cuda_should_use_mmvq(src0->type, cc, ne11)) {
+diff --git a/ggml/src/ggml-cuda/mmvq.cuh b/ggml/src/ggml-cuda/mmvq.cuh
+index 5605bf7a4..01dd8003c 100644
+--- a/ggml/src/ggml-cuda/mmvq.cuh
++++ b/ggml/src/ggml-cuda/mmvq.cuh
+@@ -16,3 +16,5 @@ void ggml_cuda_op_mul_mat_vec_q(
+     const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, const char * src0_dd_i, const float * src1_ddf_i,
+     const char * src1_ddq_i, float * dst_dd_i, const int64_t row_low, const int64_t row_high, const int64_t src1_ncols,
+     const int64_t src1_padded_row_size, cudaStream_t stream);
++
++bool ggml_cuda_mul_mat_iq4xs_marlin(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/iq4xs-skinny.cu b/ggml/src/ggml-cuda/iq4xs-skinny.cu
+new file mode 100644
+index 000000000..962b9d6ac
+--- /dev/null
++++ b/ggml/src/ggml-cuda/iq4xs-skinny.cu
+@@ -0,0 +1,561 @@
++// IQ4_XS x F32 for 2..8 columns (speculative-decoding verify batches): persistent, cp.async-pipelined int8 tensor core kernel.
++//
++// Design (see also mmvq.cu for the earlier v1/v2 experiments):
++//  * The weights keep their original IQ4_XS layout (no repacking). A "unit" is TM = 16*RT rows x KU superblocks (KU*256 values);
++//    each row's piece of a unit is one contiguous KU*136 byte segment, which is staged into shared memory with 16 byte cp.async
++//    copies (fully coalesced, row pitch chosen so the fragment reads from shared memory are bank conflict free).
++//  * Activations are quantized by a small separate kernel into q8_1-like blocks (int8 + float scale per 32 values) stored in
++//    mma B-fragment order: one 288 byte block per 32-value sub-block = 8 columns x 4 lanes x {b0,b1} (256 B) + 8 float scales.
++//    The staged activations are read with one LDS.64 per mma and reused by every row tile of the warp.
++//  * One mma.m16n8k32.s8 = 16 rows x 8 columns x one 32-value sub-block. The nibble layout of IQ4_XS (qs byte j holds values
++//    j and j+16 of the sub-block) maps directly onto the A fragment; nibbles are expanded with the iq4nl table via prmt. The K
++//    slots of the mma are permuted (the activation quantizer writes the matching order), which saves the reordering prmts.
++//    d*(ls-32) of every (row, sub-block) is decoded once per unit by the warp that consumes it (lane = row) and shared through
++//    warp-private shared memory, so the mma path only needs int->float, one multiply by the activation scale and one FMA.
++//  * Grid: S x G persistent blocks (one per SM). Block (s, g) owns K strip s (a contiguous range of C K-chunks of KU superblocks,
++//    KU = 4 so every row segment is 544 B and 32 B aligned) and the row tiles of group g. Its activation strip stays resident in
++//    shared memory; weights stream through a 2-4 stage cp.async pipeline with one __syncthreads per unit. S is chosen on the
++//    host: S == 1 whenever the activations fit in shared memory (K <= ~5k), otherwise the smallest S with a good SM balance.
++//    The S blocks of a group read adjacent strips of the same rows at the same time, which keeps the DRAM access pattern dense;
++//    that matters a lot for sustained bandwidth under a power cap (see the microbenchmarks in the report).
++//  * Reduction (S > 1): blocks write their per-tile partial sums and the last of the S blocks of a group to arrive reduces all
++//    tiles of the group in a fixed order (no block waits, so no co-residency requirement). Deterministic, no float
++//    atomics, no separate fixup launch. The arrival counters are zeroed by the quantize kernel that always precedes this kernel.
++#include "common.cuh"
++#include "mmvq.cuh"
++#include "quantize.cuh"
++#include "vecdotq.cuh"
++#include "cp-async.cuh"
++
++#include <cstdint>
++#include <algorithm>
++
++#if defined(AMPERE_MMA_AVAILABLE)
++#define IQ4XS_SKINNY_DEVICE 1
++#endif
++
++#ifndef IQ4XS_PRELOAD
++#define IQ4XS_PRELOAD 128
++#endif
++
++namespace {
++
++constexpr int IQ4XS_YB = 288; // bytes of activations per 32-value sub-block: 256 qs (fragment order) + 8 floats
++
++static __device__ __forceinline__ void mma_s8_16832(int (&c)[4], const int (&a)[4], const uint2 b) {
++#if defined(IQ4XS_SKINNY_DEVICE)
++    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
++        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b.x), "r"(b.y));
++#else
++    GGML_UNUSED_VARS(c, a, b);
++#endif
++}
++
++static __device__ __forceinline__ void cp_commit() {
++#if defined(IQ4XS_SKINNY_DEVICE)
++    asm volatile("cp.async.commit_group;");
++#endif
++}
++template <int n>
++static __device__ __forceinline__ void cp_wait() {
++#if defined(IQ4XS_SKINNY_DEVICE)
++    asm volatile("cp.async.wait_group %0;" : : "n"(n));
++#endif
++}
++
++// Expands the 8 nibbles of q4 through the iq4nl table. Result {lo, hi}: lo = values of nibbles 0..3, hi = nibbles 4..7, in plain
++// nibble order (byte0 = low nibble of qs byte 0, byte1 = high nibble of qs byte 0, byte2 = low nibble of qs byte 1, ...).
++// The mma K slots do not have to be in natural order as long as the activations use the same permutation, which the activation
++// quantizer provides; this saves the two byte_perm instructions of get_int_from_table_16.
++static __device__ __forceinline__ uint32_t prmt32(const uint32_t a, const uint32_t b, const uint32_t sel) {
++    uint32_t d;
++    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(d) : "r"(a), "r"(b), "r"(sel));
++    return d;
++}
++
++// Inline PTX prmt (selector nibbles must be < 8, which they are) avoids the selector masking the __byte_perm intrinsic adds.
++static __device__ __forceinline__ int2 iq4_expand(const int q4, const uint32_t (&t)[4], const uint32_t sel_const) {
++    const uint32_t q  = uint32_t(q4);
++    const uint32_t m  = q & 0x77777777u;
++    const uint32_t mh = m >> 16;
++    uint32_t sel;
++    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(sel) : "r"(q >> 1), "r"(0x44444444u), "r"(sel_const));  // (a & b) | c
++    const uint32_t l0 = prmt32(t[0], t[1], m);
++    const uint32_t h0 = prmt32(t[2], t[3], m);
++    const uint32_t l1 = prmt32(t[0], t[1], mh);
++    const uint32_t h1 = prmt32(t[2], t[3], mh);
++    return make_int2(prmt32(l0, h0, sel), prmt32(l1, h1, sel >> 16));
++}
++
++// ---------------------------------------------------------------------------------------------------------------------
++// Activation quantizer: grid = nj (= K/32) blocks of 256 threads; warp n handles column n, one 32-value sub-block per block.
++static __global__ void iq4xs_quant_frag(const float * __restrict__ x, char * __restrict__ y, unsigned int * __restrict__ counters,
++        const int64_t s11, const int ncols, const int nzero) {
++    const int j    = blockIdx.x;
++    const int n    = threadIdx.x >> 5;
++    const int lane = threadIdx.x & 31;
++    for (int i = blockIdx.x*blockDim.x + threadIdx.x; i < nzero; i += gridDim.x*blockDim.x) {
++        counters[i] = 0;
++    }
++    const float v = n < ncols ? x[n*s11 + int64_t(j)*32 + lane] : 0.0f;
++    float amax = fabsf(v);
++#pragma unroll
++    for (int o = 16; o > 0; o >>= 1) {
++        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, o));
++    }
++    const float d  = amax/127.0f;
++    const float id = amax > 0.0f ? 127.0f/amax : 0.0f;
++    const int q  = __float2int_rn(v*id);
++    char * yj = y + int64_t(j)*IQ4XS_YB;
++    // Fragment order with the K permutation matching iq4_expand: thread (col n, c) register hh holds bytes
++    // [y(4c+2hh), y(16+4c+2hh), y(4c+2hh+1), y(16+4c+2hh+1)]
++    {
++        const int h  = lane >> 4;        // low / high nibble half of the sub-block
++        const int c  = (lane & 15) >> 2;
++        const int m  = lane & 3;
++        const int hh = m >> 1;
++        yj[(n*4 + c)*8 + hh*4 + 2*(m & 1) + h] = (char) q;
++    }
++    if (lane == 0) {
++        *(float *) (yj + 256 + n*4) = d;
++    }
++}
++
++template <int RT, int KU, int WK, int STAGES>
++struct iq4xs_cfg {
++    static constexpr int TM     = 16*RT;
++    static constexpr int NT     = 32*WK;
++    static constexpr int ROWB   = KU*136;
++    static constexpr int PITCH  = ROWB + ((KU % 4 == 0) ? 16 : 0);
++    static constexpr int ROWCH  = ROWB/16;
++    static constexpr int WCH    = TM*ROWCH;
++    static constexpr int UY     = KU*8*IQ4XS_YB;  // activation bytes per K chunk
++    static constexpr int SB     = TM*PITCH;       // weight stage bytes
++    static constexpr int SPW    = 8*KU/WK;        // sub-blocks per warp per unit
++    static constexpr int REDB   = WK*RT*4*33*4;
++    static constexpr int DLB    = WK*SPW*128;     // per-warp decoded sub-block scales: [ib][g][4 rows] floats
++    static_assert(KU % 2 == 0, "KU must be even (16 byte aligned rows)");
++    static_assert(RT == 2 && SPW <= 8, "scale decode assumes 32 rows per tile and one superblock per warp");
++    static_assert(WK > 1 && (8*KU) % WK == 0 && (SPW <= 8 ? 8 % SPW == 0 : SPW % 8 == 0), "bad warp split");
++    static size_t smem_bytes(const int cmax) { return size_t(cmax)*UY + REDB + DLB + size_t(STAGES)*SB; }
++};
++
++template <int RT, int KU, int WK, int STAGES>
++static __global__ void __launch_bounds__(iq4xs_cfg<RT, KU, WK, STAGES>::NT, 1) iq4xs_marlin(
++        const char * __restrict__ W, const char * __restrict__ Y, float * __restrict__ dst,
++        float * __restrict__ partial, unsigned int * __restrict__ counters,
++        const int nrows, const int nsb, const int64_t stride_row, const int stride_col_dst, const int ncols,
++        const int S, const int G, const int cmax, const int dbg) {
++#if defined(IQ4XS_SKINNY_DEVICE)
++    using C = iq4xs_cfg<RT, KU, WK, STAGES>;
++    constexpr int TM = C::TM, NT = C::NT, PITCH = C::PITCH, ROWB = C::ROWB, ROWCH = C::ROWCH;
++    constexpr int SPW = C::SPW, SB = C::SB;
++    constexpr int NOUT = (TM*8 + NT - 1)/NT;
++    const int KCN    = nsb/KU;
++    const int ntiles = (nrows + TM - 1)/TM;
++
++    extern __shared__ __align__(16) char smem[];
++    char  * ysl    = smem;
++    float * red    = (float *) (smem + size_t(cmax)*C::UY);
++    float * dlsm_all = (float *) (smem + size_t(cmax)*C::UY + C::REDB);
++    char  * stages = smem + size_t(cmax)*C::UY + C::REDB + C::DLB;
++    __shared__ int last_flag;
++
++    const int tid  = threadIdx.x;
++    const int lane = tid & 31;
++    const int wk   = tid >> 5;
++    const int g    = lane >> 2;
++    const int c    = lane & 3;
++
++    // The iq4nl table goes through shared memory so that ptxas sees it as per-thread register data; as uniform/constant data it
++    // re-materializes the constants with a MOV in front of every PRMT.
++    __shared__ uint32_t tabs[4];
++    if (tid < 4) {
++        tabs[tid] = ((const uint32_t *) kvalues_iq4nl)[tid];
++    }
++    __syncthreads();
++    uint32_t tab[4];
++#pragma unroll
++    for (int k = 0; k < 4; ++k) {
++        tab[k] = tabs[k + (tid & (dbg >> 16))];  // (dbg >> 16) == 0 at run time: the index is not provably uniform
++    }
++    uint32_t selc = 0x32103210u;
++    asm volatile("" : "+r"(selc));
++
++    const int bs   = blockIdx.x % S;   // K strip
++    const int bg   = blockIdx.x / S;   // row group
++    const int u_lo = (bs*KCN)/S;
++    const int Cn   = ((bs + 1)*KCN)/S - u_lo;
++    const int t_lo = (bg*ntiles)/G;
++    const int n    = (((bg + 1)*ntiles)/G - t_lo)*Cn;
++
++    // Loop-invariant per-thread copy slots. Weight chunk slot k: smem offset sdst[k], global offset goff[k] (32 bit, advanced by
++    // ROWB per K chunk and recomputed when the issue pointer moves to the next row tile).
++    constexpr int NWCH = (C::WCH + NT - 1)/NT;
++    uint32_t sdst[NWCH];
++    uint32_t goff[NWCH];
++    int      grow[NWCH];
++    uint32_t chb[NWCH];
++    bool     wval[NWCH];
++#pragma unroll
++    for (int k = 0; k < NWCH; ++k) {
++        const int i  = tid + k*NT;
++        const int r  = i / ROWCH;
++        const int ch = i - r*ROWCH;
++        wval[k]  = i < C::WCH;
++        sdst[k]  = r*PITCH + ch*16;
++        grow[k]  = r;
++        chb[k]   = ch*16;
++        goff[k]  = 0;
++    }
++    const uint32_t smem_stages = ggml_cuda_cvta_generic_to_shared(stages);
++    int it = t_lo;   // issue pointer: tile
++    int ic = 0;      // issue pointer: K chunk within the strip
++    auto set_tile = [&]() {
++#pragma unroll
++        for (int k = 0; k < NWCH; ++k) {
++            const int gr = min(it*TM + grow[k], nrows - 1);
++            goff[k] = uint32_t(gr)*uint32_t(stride_row) + chb[k] + (u_lo + ic)*ROWB;
++        }
++    };
++    set_tile();
++    auto issue = [&](const int stage) {
++        const uint32_t st = smem_stages + stage*SB;
++#pragma unroll
++        for (int k = 0; k < NWCH; ++k) {
++            if (wval[k] && dbg != 6) {
++                cp_async_cg_16<IQ4XS_PRELOAD>(st + sdst[k], W + goff[k]);
++            }
++        }
++        if (++ic == Cn) {
++            ic = 0;
++            ++it;
++            set_tile();
++        } else {
++#pragma unroll
++            for (int k = 0; k < NWCH; ++k) goff[k] += ROWB;
++        }
++    };
++
++    // activation strip (resident for the whole kernel)
++    {
++        const uint32_t ys32 = ggml_cuda_cvta_generic_to_shared(ysl);
++        const char * yg = Y + int64_t(u_lo)*C::UY;
++        for (int i = tid; i < Cn*C::UY/16; i += NT) {
++            cp_async_cg_16<0>(ys32 + i*16, yg + i*16);
++        }
++        cp_commit();
++    }
++#pragma unroll
++    for (int s = 0; s < STAGES - 1; ++s) {
++        if (s < n) {
++            issue(s);
++        }
++        cp_commit();
++    }
++
++    float sum[RT][4];
++#pragma unroll
++    for (int r = 0; r < RT; ++r) {
++#pragma unroll
++        for (int l = 0; l < 4; ++l) sum[r][l] = 0.0f;
++    }
++    int ct = t_lo;
++    int cc = 0;
++
++    for (int i0 = 0; i0 < n; i0 += STAGES) {
++#pragma unroll
++    for (int si = 0; si < STAGES; ++si) {
++        const int i = i0 + si;
++        if (i >= n) {
++            break;
++        }
++        cp_wait<STAGES - 2>();
++        __syncthreads();
++        if (i + STAGES - 1 < n) {
++            issue((si + STAGES - 1) % STAGES);
++        }
++        cp_commit();
++
++        const int t = ct;
++        const int kc = cc;
++        if (++cc == Cn) { cc = 0; ++ct; }
++
++        const char * wsm = stages + si*SB;
++        const char * ysm = ysl + size_t(kc)*C::UY;
++
++        if (!(dbg >= 2 && dbg <= 5)) {
++        constexpr int IBN = SPW;
++        const int jj0 = wk*SPW;
++        const int sbl = jj0 >> 3;
++        const int ib0 = jj0 & 7;
++        float * dlsm = dlsm_all + wk*(SPW*32);
++        {
++            // Decode d*(ls-32) of this warp's SPW sub-blocks for all 32 rows (lane = row) once per unit, shared through the
++            // warp's private shared memory; keeps the 6-bit scale extraction and the int->float conversion off the mma path.
++            const uint2 hd = *(const uint2 *) (wsm + lane*PITCH + sbl*136);
++            const float d  = __half2float(__ushort_as_half((unsigned short) (hd.x & 0xFFFF)));
++            const uint32_t sl = hd.y >> (4*ib0);
++            const uint32_t sh = (hd.x >> 16) >> (2*ib0);
++            const int rh = lane >> 3;      // (tile, half) of this row: row = 16*tile + 8*half + (lane & 7)
++#pragma unroll
++            for (int ii = 0; ii < IBN; ++ii) {
++                const int ls = int(((sl >> (4*ii)) & 0xF) | (((sh >> (2*ii)) & 3) << 4)) - 32;
++                dlsm[(ii*8 + (lane & 7))*4 + rh] = d*float(ls);
++            }
++            __syncwarp();
++        }
++#pragma unroll
++        for (int ii = 0; ii < IBN; ++ii) {
++            const int ib = ib0 + ii;
++            const int jj = sbl*8 + ib; // sub-block index within the unit
++            const uint2  bfrag = *(const uint2 *) (ysm + jj*IQ4XS_YB + lane*8);
++            const float2 e     = *(const float2 *) (ysm + jj*IQ4XS_YB + 256 + c*8);
++            const float4 dl4   = *(const float4 *) (dlsm + (ii*8 + g)*4);
++            const float dlv[RT][2] = {{dl4.x, dl4.y}, {dl4.z, dl4.w}};
++#pragma unroll
++            for (int r = 0; r < RT; ++r) {
++                const int row = r*16 + g;
++                const int q0 = *(const int *) (wsm + row*PITCH + sbl*136 + 8 + 16*ib + 4*c);
++                const int q1 = *(const int *) (wsm + (row + 8)*PITCH + sbl*136 + 8 + 16*ib + 4*c);
++                const int2 v0 = iq4_expand(q0, tab, selc);
++                const int2 v1 = iq4_expand(q1, tab, selc);
++                const int a[4] = {v0.x, v1.x, v0.y, v1.y};
++                int acc[4] = {0, 0, 0, 0};
++                mma_s8_16832(acc, a, bfrag);
++                const float s00 = dlv[r][0]*e.x, s01 = dlv[r][0]*e.y, s10 = dlv[r][1]*e.x, s11 = dlv[r][1]*e.y;
++                sum[r][0] = fmaf(float(acc[0]), s00, sum[r][0]);
++                sum[r][1] = fmaf(float(acc[1]), s01, sum[r][1]);
++                sum[r][2] = fmaf(float(acc[2]), s10, sum[r][2]);
++                sum[r][3] = fmaf(float(acc[3]), s11, sum[r][3]);
++            }
++        }
++        }
++
++        if (kc == Cn - 1 && dbg != 4 && dbg != 5) {
++            // ---- end of tile t for this strip: reduce over warps ----
++#pragma unroll
++            for (int r = 0; r < RT; ++r) {
++#pragma unroll
++                for (int l = 0; l < 4; ++l) {
++                    red[((wk*RT + r)*4 + l)*33 + lane] = sum[r][l];
++                }
++            }
++            __syncthreads();
++            float v[NOUT];
++#pragma unroll
++            for (int k = 0; k < NOUT; ++k) {
++                const int e = tid + k*NT;
++                v[k] = 0.0f;
++                if (e < TM*8) {
++                    const int r   = e % TM;
++                    const int col = e / TM;
++                    const int rt  = r >> 4;
++                    const int rr  = r & 15;
++                    const int reg = (rr >> 3)*2 + (col & 1);
++                    const int ln  = (rr & 7)*4 + (col >> 1);
++                    float sx = 0.0f;
++#pragma unroll
++                    for (int w = 0; w < WK; ++w) {
++                        sx += red[((w*RT + rt)*4 + reg)*33 + ln];
++                    }
++                    v[k] = sx;
++                }
++            }
++            if (S == 1) {
++#pragma unroll
++                for (int k = 0; k < NOUT; ++k) {
++                    const int e = tid + k*NT;
++                    if (e < TM*8) {
++                        const int r = e % TM, col = e / TM;
++                        const int row = t*TM + r;
++                        if (row < nrows && col < ncols) {
++                            dst[int64_t(col)*stride_col_dst + row] = v[k];
++                        }
++                    }
++                }
++            } else {
++                float * Pout = partial + (int64_t(t)*S + bs)*(TM*8);
++#pragma unroll
++                for (int k = 0; k < NOUT; ++k) {
++                    const int e = tid + k*NT;
++                    if (e < TM*8) {
++                        Pout[e] = v[k];
++                    }
++                }
++            }
++#pragma unroll
++            for (int r = 0; r < RT; ++r) {
++#pragma unroll
++                for (int l = 0; l < 4; ++l) sum[r][l] = 0.0f;
++            }
++            // no trailing barrier: the next epilogue writes `red` only after the next loop-top barrier, which every thread
++            // reaches only after finishing its reads of `red` above
++        }
++    }
++    }
++    cp_wait<0>();
++    if (S > 1 && dbg != 4 && dbg != 5 && dbg != 7) {
++        // Group reduction. The S blocks of a row group wait for each other here (all S*G <= #SMs blocks are co-resident: one block
++        // per SM, nothing else is queued in front of them in the stream) and then each reduces every S-th tile of the group, in a
++        // fixed summation order (deterministic). This is much faster than letting only the last arriving block do all the tiles.
++        // No block ever waits: each block publishes its partial sums, and the last of the S blocks of the group to arrive
++        // reduces every tile of the group in a fixed order (deterministic). This removes the co-residency requirement of the
++        // earlier spin-wait version (which could hang if other work held SMs) at the cost of a slightly longer tail.
++        __shared__ int is_last;
++        __threadfence();
++        __syncthreads();
++        if (tid == 0) {
++            is_last = atomicAdd(&counters[bg], 1u) == unsigned(S - 1);
++        }
++        __syncthreads();
++        if (!is_last) {
++            return;
++        }
++        __threadfence();
++        const int ntl = n/Cn;
++        constexpr int QPT = TM*8/4; // float4 columns per tile
++        const int nmine = ntl;
++#pragma unroll 2
++        for (int cidx = tid; cidx < nmine*QPT; cidx += NT) {
++            const int tl = cidx/QPT;
++            const int q  = cidx % QPT;
++            const int tt = t_lo + tl;
++            const float4 * pp = (const float4 *) (partial + int64_t(tt)*S*(TM*8)) + q;
++            float4 sx = make_float4(0.f, 0.f, 0.f, 0.f);
++#pragma unroll 8
++            for (int ss = 0; ss < S; ++ss) {
++                const float4 pv = __ldcg(pp + ss*(TM*8/4));
++                sx.x += pv.x; sx.y += pv.y; sx.z += pv.z; sx.w += pv.w;
++            }
++            const int e0  = q*4;
++            const int col = e0 / TM;
++            const int r0  = e0 - col*TM;
++            const int row = tt*TM + r0;
++            if (col < ncols) {
++                float * dp = dst + int64_t(col)*stride_col_dst + row;
++                if (row + 0 < nrows) dp[0] = sx.x;
++                if (row + 1 < nrows) dp[1] = sx.y;
++                if (row + 2 < nrows) dp[2] = sx.z;
++                if (row + 3 < nrows) dp[3] = sx.w;
++            }
++        }
++    }
++#else
++    GGML_UNUSED_VARS(W, Y, dst, partial, counters, nrows, nsb, stride_row, stride_col_dst, ncols, S, G, cmax, dbg);
++    NO_DEVICE_CODE;
++#endif // IQ4XS_SKINNY_DEVICE
++}
++
++// Chooses the number of K strips S: the activation strip of every block stays resident in shared memory (cmax chunks), so S is
++// limited by the shared memory budget; among the feasible values the one with the best load balance over the SMs wins
++// (ties go to the smaller S: fewer partial sums to reduce).
++template <int RT, int KU, int WK>
++static int pick_strips(const int KCN, const int ntiles, const int P, const int s_env) {
++    using C2 = iq4xs_cfg<RT, KU, WK, 2>;
++    if (s_env > 0) {
++        return std::max(1, std::min(s_env, KCN));
++    }
++    int best_s = -1;
++    double best_eff = -1.0;
++    for (int S = 1; S <= KCN; ++S) {
++        const int cmax = (KCN + S - 1)/S;
++        if (C2::smem_bytes(cmax) > 98*1024) {
++            continue;
++        }
++        const int G = std::max(1, std::min(ntiles, P/S));
++        const int maxwork = ((ntiles + G - 1)/G)*cmax;
++        const double eff = double(ntiles)*KCN/(double(P)*maxwork);
++        if (eff > best_eff*1.05) {  // K splitting costs partial traffic and a reduction tail: needs a clear balance gain
++            best_eff = eff;
++            best_s   = S;
++        }
++    }
++    return best_s > 0 ? best_s : KCN;
++}
++
++template <int RT, int KU, int WK, int STAGES>
++static bool launch_marlin(const char * W, const char * Yq, float * dst, ggml_cuda_pool & pool, unsigned int * counters,
++        const int nrows, const int nsb, const int64_t stride_row, const int stride_col_dst, const int ncols,
++        const int nsm, const int bps_env, const int s_env, const int dbg, cudaStream_t stream) {
++    using C = iq4xs_cfg<RT, KU, WK, STAGES>;
++    const int KCN    = nsb/KU;
++    const int ntiles = (nrows + C::TM - 1)/C::TM;
++    const int P      = nsm*std::max(1, bps_env);
++    const int S = std::max(1, std::min(pick_strips<RT, KU, WK>(KCN, ntiles, P, s_env), std::min(KCN, P)));
++    const int G = std::max(1, std::min(ntiles, P/S));
++    const int cmax = (KCN + S - 1)/S;
++    const size_t smem = C::smem_bytes(cmax);
++    if (smem > 98*1024) {
++        return false;
++    }
++    static bool attr_set[GGML_CUDA_MAX_DEVICES] = {};
++    const int dev = ggml_cuda_get_device();
++    if (!attr_set[dev]) {
++        CUDA_CHECK(cudaFuncSetAttribute(iq4xs_marlin<RT, KU, WK, STAGES>, cudaFuncAttributeMaxDynamicSharedMemorySize, 98*1024));
++        attr_set[dev] = true;
++    }
++    ggml_cuda_pool_alloc<float> partial(pool, S > 1 ? size_t(ntiles)*S*C::TM*8 : 1);
++    iq4xs_marlin<RT, KU, WK, STAGES><<<S*G, C::NT, smem, stream>>>(W, Yq, dst, partial.get(), counters,
++        nrows, nsb, stride_row, stride_col_dst, ncols, S, G, cmax, dbg);
++    CUDA_CHECK(cudaGetLastError());
++    return true;
++}
++
++} // namespace
++
++bool ggml_cuda_mul_mat_iq4xs_marlin(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
++    static const bool enabled = [] {
++        const char * value = getenv("GGML_CUDA_IQ4XS_MARLIN");
++        return value && atoi(value) == 1;
++    }();
++    if (!enabled || src0->type != GGML_TYPE_IQ4_XS || src1->type != GGML_TYPE_F32 ||
++            dst->type != GGML_TYPE_F32 || ggml_cuda_info().devices[ctx.device].cc != 860) {
++        return false;
++    }
++    if (src1->ne[1] < 2 || src1->ne[1] > 8 || src0->ne[2] != 1 || src0->ne[3] != 1 ||
++            src1->ne[2] != 1 || src1->ne[3] != 1 || src0->ne[0] % QK_K != 0 ||
++            !ggml_is_contiguous(src0) || src1->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float) ||
++            ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE) {
++        return false;
++    }
++
++    static const int cfg_env = [] { const char * e = getenv("GGML_CUDA_IQ4XS_MARLIN_CFG"); return e ? atoi(e) : 0; }();
++    static const int dbg = [] { const char * e = getenv("GGML_CUDA_IQ4XS_MARLIN_DBG"); return e ? atoi(e) : 0; }();
++    static const int bps_env = [] { const char * e = getenv("GGML_CUDA_IQ4XS_MARLIN_BPS"); return e ? atoi(e) : 0; }();
++    static const int s_env = [] { const char * e = getenv("GGML_CUDA_IQ4XS_MARLIN_S"); return e ? atoi(e) : 0; }();
++    const int64_t ncols = src1->ne[1];
++    const int nrows = src0->ne[1];
++    const int nsb   = src0->ne[0]/QK_K;
++    if ((int64_t) nrows*src0->nb[1] >= (int64_t(1) << 31) || nsb % 4 != 0 || ((uintptr_t) src0->data & 15) != 0 ||
++            src0->nb[1] != (size_t) nsb*sizeof(block_iq4_xs) || src1->ne[0] != src0->ne[0] || (src1->ne[0] % 32) != 0) {
++        return false;
++    }
++    cudaStream_t stream = ctx.stream();
++    const int64_t ne10 = src1->ne[0];
++    const int nj = ne10/32;
++    const int64_t s11 = src1->nb[1]/sizeof(float);
++    const int nsm = ggml_cuda_info().devices[ctx.device].nsm;
++
++    const int cfg = cfg_env == 0 ? 1 : cfg_env;
++    const int TMc = 32;
++    const int ntiles = (nrows + TMc - 1)/TMc;
++    ggml_cuda_pool_alloc<char> yq(ctx.pool(), size_t(nj)*IQ4XS_YB);
++    ggml_cuda_pool_alloc<unsigned int> counters(ctx.pool(), ntiles);
++    iq4xs_quant_frag<<<nj, 256, 0, stream>>>((const float *) src1->data, yq.get(), counters.get(), s11, (int) ncols, ntiles);
++    CUDA_CHECK(cudaGetLastError());
++    if (dbg == 1) { return true; }
++    const int stride_col_dst = dst->nb[1]/sizeof(float);
++    const char * W = (const char *) src0->data;
++    bool ok = false;
++#define IQ4XS_LAUNCH(RT_, WK_, ST_) launch_marlin<RT_, 4, WK_, ST_>(W, yq.get(), (float *) dst->data, ctx.pool(), counters.get(), nrows, nsb, src0->nb[1], stride_col_dst, ncols, nsm, bps_env, s_env, dbg, stream)
++    switch (cfg) {
++        case 5:  ok = IQ4XS_LAUNCH(2, 16, 3); break;
++        case 2:  ok = IQ4XS_LAUNCH(2, 16, 4); if (!ok) { ok = IQ4XS_LAUNCH(2, 16, 3); } break;
++        default: ok = IQ4XS_LAUNCH(2, 8, 4);  if (!ok) { ok = IQ4XS_LAUNCH(2, 8, 3); } break;
++    }
++    if (!ok) { ok = IQ4XS_LAUNCH(2, 8, 2); }
++    GGML_ASSERT(ok);
++    return true;
++}

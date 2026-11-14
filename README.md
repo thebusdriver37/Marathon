@@ -39,13 +39,13 @@ The general Automatic profile fits context and GPU placement to available memory
 
 On an eligible, mostly free RTX 3090 or 3090 Ti, setup offers the recommended bundle:
 
-- Qwen 3.8 27B Uncensored IQ4_XS and the [Marathon-tuned DFlash2 drafter](https://huggingface.co/Busdriver/Qwen3.8-27B-DFlash2-Marathon-GGUF).
-- 196K requested context, Q8 target KV cache, and CPU-backed vision.
-- The custom runtime patches and portable profile included in this repository.
+- [Qwen3.8 27B Marathon IQ4_XS](https://huggingface.co/Busdriver/Qwen3.8-27B-Marathon-GGUF) (Swift 1.5 + Heretic ARA merge, uncensored) and the [Marathon C3 DFlash2 drafter](https://huggingface.co/Busdriver/Qwen3.8-27B-DFlash2-Marathon-GGUF).
+- 262K context, q4_0 KV cache, n-gram plus DFlash2 drafting with 7-node tree verification, and CPU-backed vision.
+- The llama.cpp v1.0.0 runtime patches (SM86 kernels and tree verification) and portable profile included in this repository.
 
 The bundle pins and verifies its model downloads.
-Its tuned drafter improved decode throughput by 27.15% on matched structured agent and tool continuations, while generic coding probes improved by 0.99%.
-See the [full fine-tuning and evaluation record](docs/DRAFTER_FINETUNING_2026-09-14.md) for the workload boundaries and quality checks.
+On one RTX 3090 at 250 W, decode in held-out agent sessions runs at about 100-105 tok/s; tree verification adds about 5% tokens per round at no extra cost per round, and C3 plus the tree measured about 12% faster than the previous R32 drafter setup.
+See [docs/RUNTIME.md](docs/RUNTIME.md) for the runtime and the model cards for evaluation details and limits.
 When all bundle files and the matching vision projector are installed and a supported card has at least 23,500 MiB free, Marathon defaults to `qwen38-iq4-xs-196k`.
 Existing saved `auto` selections migrate to this profile on matching setups when next launched.
 Explicit profiles and machine-local catalog defaults are preserved, and choosing Automatic afterward remains supported.

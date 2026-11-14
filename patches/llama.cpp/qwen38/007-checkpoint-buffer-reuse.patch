@@ -1,0 +1,189 @@
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 36e48a0f2..f7d9592e0 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -440,3 +440,6 @@ if (TARGET gguf-model-data)
+     target_link_libraries(test-export-graph-ops PRIVATE gguf-model-data)
+     target_compile_definitions(test-export-graph-ops PRIVATE LLAMA_HF_FETCH)
+ endif()
++
++llama_build(test-server-checkpoint-pool.cpp)
++llama_test(test-server-checkpoint-pool)
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index dfe9e927f..7ad72fda7 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1,3 +1,4 @@
++#include "server-checkpoint-pool.h"
+ #include "server-context.h"
+ #include <atomic>
+ #include <thread>
+@@ -339,6 +340,11 @@ struct server_slot {
+     slot_state state = SLOT_STATE_IDLE;
+ 
+     server_prompt prompt;
++    server_checkpoint_buffer_pool checkpoint_buffers{[] {
++        const char * value = getenv("LLAMA_REUSE_CHECKPOINT_BUFFERS");
++        return value && atoi(value) == 1;
++    }()};
++
+ 
+     bool prompt_save(server_prompt_cache & prompt_cache) const {
+         if (prompt.tokens.size() == 0) {
+@@ -2743,6 +2749,7 @@ private:
+                 SLT_TRC(slot, "erasing context checkpoint too close to an earlier one (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+                         cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
+ 
++                slot.checkpoint_buffers.recycle(*it);
+                 it = slot.prompt.checkpoints.erase(it);
+                 continue;
+             }
+@@ -2758,6 +2765,7 @@ private:
+             SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
+                     cur.pos_min, cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
+ 
++            slot.checkpoint_buffers.recycle(slot.prompt.checkpoints.front());
+             slot.prompt.checkpoints.erase(slot.prompt.checkpoints.begin());
+         }
+ 
+@@ -2767,6 +2775,7 @@ private:
+             for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end(); ) {
+                 if ((*it)->n_tokens == n_tokens_new) {
+                     SLT_TRC(slot, "superseding context checkpoint at n_tokens = %" PRId64 "\n", (*it)->n_tokens);
++                    slot.checkpoint_buffers.recycle(*it);
+                     it = slot.prompt.checkpoints.erase(it);
+                 } else {
+                     ++it;
+@@ -2774,7 +2783,7 @@ private:
+             }
+         }
+ 
+-        auto ckpt = std::make_shared<common_prompt_checkpoint>();
++        auto ckpt = slot.checkpoint_buffers.acquire();
+         auto & cur = *ckpt;
+ 
+         cur.id_task = id_task;
+@@ -2785,8 +2794,12 @@ private:
+         cur.update_pos(slot.prompt.n_tokens() - n_tokens_cur, pos_min, pos_max);
+ 
+         cur.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
++        if (!ctx_dft) {
++            cur.data_dft.clear();
++        }
+         cur.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+         // stash the draft's speculative state with the checkpoint
++        cur.data_spec.clear();
+         common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
+ 
+         slot.prompt.checkpoints.push_back(std::move(ckpt));
+@@ -4331,6 +4344,7 @@ private:
+                                     const auto & cur = **it;
+                                     if (cur.pos_max > pos_next || cur.n_tokens > n_prefix) {
+                                         SLT_TRC(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.size() / 1024 / 1024);
++                                        slot.checkpoint_buffers.recycle(*it);
+                                         it = slot.prompt.checkpoints.erase(it);
+                                     } else {
+                                         ++it;
+diff --git a/tools/server/server-checkpoint-pool.h b/tools/server/server-checkpoint-pool.h
+new file mode 100644
+index 000000000..4ff787743
+--- /dev/null
++++ b/tools/server/server-checkpoint-pool.h
+@@ -0,0 +1,34 @@
++#pragma once
++#include "common.h"
++#include <memory>
++#include <vector>
++
++// Reuse only exclusively owned server-created checkpoint storage. Checkpoints
++// shared with a prompt-cache entry remain immutable. At most two spare buffers
++// are retained per slot, independently of the prompt cache and its clones.
++class server_checkpoint_buffer_pool {
++    bool enabled;
++    std::vector<std::shared_ptr<common_prompt_checkpoint>> buffers;
++public:
++    explicit server_checkpoint_buffer_pool(bool enabled = false) : enabled(enabled) {}
++
++    void recycle(const std::shared_ptr<const common_prompt_checkpoint> & checkpoint) {
++        if (enabled && checkpoint && checkpoint.use_count() == 1 && buffers.size() < 2) {
++            // Both server checkpoint factories allocate non-const objects;
++            // const ownership is used only to enforce reader immutability.
++            buffers.push_back(std::const_pointer_cast<common_prompt_checkpoint>(checkpoint));
++        }
++    }
++
++    std::shared_ptr<common_prompt_checkpoint> acquire() {
++        while (!buffers.empty()) {
++            auto checkpoint = std::move(buffers.back());
++            buffers.pop_back();
++            // Recheck in case a reader acquired ownership before retirement.
++            if (checkpoint.use_count() == 1) {
++                return checkpoint;
++            }
++        }
++        return std::make_shared<common_prompt_checkpoint>();
++    }
++};
+diff --git a/tests/test-server-checkpoint-pool.cpp b/tests/test-server-checkpoint-pool.cpp
+new file mode 100644
+index 000000000..f774ef160
+--- /dev/null
++++ b/tests/test-server-checkpoint-pool.cpp
+@@ -0,0 +1,57 @@
++#undef NDEBUG
++#include <cassert>
++#include "../tools/server/server-checkpoint-pool.h"
++
++int main() {
++    server_checkpoint_buffer_pool pool(true);
++    auto mutable_checkpoint = std::make_shared<common_prompt_checkpoint>();
++    mutable_checkpoint->data_tgt.resize(4096);
++    mutable_checkpoint->data_tgt[0] = 42;
++    auto * storage = mutable_checkpoint->data_tgt.data();
++    std::shared_ptr<const common_prompt_checkpoint> checkpoint = std::move(mutable_checkpoint);
++    auto clone = checkpoint;
++    pool.recycle(checkpoint);
++    checkpoint.reset();
++    auto fresh = pool.acquire();
++    fresh->data_tgt.resize(4096);
++    fresh->data_tgt[0] = 7;
++    assert(clone->data_tgt[0] == 42); // cached clone was never mutated
++    fresh.reset();
++
++    pool.recycle(clone); // now exclusively owned
++    clone.reset();
++    auto reused = pool.acquire();
++    assert(reused->data_tgt.data() == storage);
++    assert(reused->data_tgt[0] == 42);
++    checkpoint = std::move(reused);
++    pool.recycle(checkpoint);
++    clone = checkpoint; // a late reader prevents reuse at acquisition too
++    checkpoint.reset();
++    fresh = pool.acquire();
++    assert(fresh.get() != clone.get());
++    assert(clone->data_tgt[0] == 42);
++    clone.reset();
++    fresh.reset();
++
++    std::vector<std::weak_ptr<const common_prompt_checkpoint>> retired;
++    for (int i = 0; i < 3; ++i) {
++        checkpoint = std::make_shared<common_prompt_checkpoint>();
++        retired.push_back(checkpoint);
++        pool.recycle(checkpoint);
++        checkpoint.reset();
++    }
++    assert(!retired[0].expired() && !retired[1].expired());
++    assert(retired[2].expired()); // bounded to two spare buffers
++    fresh = pool.acquire();
++    reused = pool.acquire();
++    assert(fresh == retired[1].lock());
++    assert(reused == retired[0].lock());
++
++    server_checkpoint_buffer_pool disabled;
++    checkpoint = std::make_shared<common_prompt_checkpoint>();
++    std::weak_ptr<const common_prompt_checkpoint> weak = checkpoint;
++    disabled.recycle(checkpoint);
++    checkpoint.reset();
++    assert(weak.expired());
++    return 0;
++}

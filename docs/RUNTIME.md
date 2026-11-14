@@ -25,7 +25,7 @@ Maintainers can build its backend directly:
 ```
 
 That command requires a CUDA toolkit capable of compiling SM86.
-The original runtime was built with CUDA 12.8.
+The production runtime was built with CUDA 12.4 for SM86 (CUDA architecture 86, GGML_NATIVE=OFF).
 The optional build omits llama.cpp's browser UI and disables its build-time UI downloads; Marathon uses its own terminal frontend.
 It uses a separate backend directory and a patch-identity-specific worktree.
 Re-running patch setup checks the complete patch stack and preserves local edits instead of force-removing worktrees.
@@ -33,48 +33,43 @@ Old worktrees are retained for manual review, not automatically deleted.
 
 ## Deployed source provenance
 
-The base is upstream `9723942adc518b43c4b95dc4dce6906903eb5e09`.
-The first seven patches reproduce the deployed private branch through `ca461b488709b74fb7a59211fa4c75b8643e5601`:
+The base is upstream llama.cpp v1.0.0, `b1b770d90d94cad9e9ea5b993bdbc383a522fb28`.
+The eight patches reproduce, file for file, the source of the production Marathon worker image of 2026-11-14:
 
-1. IQ4_XS crossover tuning: `8d812be82`.
-2. SM86 speculative-decode optimizations: `8f02ccee1`.
-3. Fused DFlash KV injection: `e64dfa178`.
-4. Q8 attention V-tile swizzling: `bbede57ec`.
-5. Fused Q8 V decode attention: `d43b67033`.
-6. Disable speculation for media input: `f79bbc685`.
-7. Persist speculative slot state: `ca461b488`.
+1. `001-media-speculation-guard.patch`: no speculative drafting for requests with images on unsupported paths.
+2. `002-iq4-xs-verify-kernel.patch`: IQ4_XS matrix kernel for 2-8 row verify batches (Marlin-style, SM86).
+3. `003-sm86-q4-attention.patch`: integer q4_0 KV flash attention for long-context decode on SM86.
+4. `004-sm86-gdn-geometry.patch`: gated delta-net kernel geometry tuned for SM86.
+5. `005-kernel-regression-cases.patch`: `test-backend-ops` cases for the kernels above.
+6. `006-wider-q4-batches.patch`: the q4_0 attention path for wider query batches.
+7. `007-checkpoint-buffer-reuse.patch`: recycles exclusively owned recurrent-checkpoint buffers.
+8. `008-tree-verify.patch`: tree verification for the DFlash2 drafter.
 
-Three following patches preserve the deployed cache preference, opt-in scheduler reuse, and recurrent rewind-checkpoint serialization.
-The profile enables scheduler reuse through `LLAMA_REUSE_SCHEDULER=1`.
-Patch `014-checkpoint-buffer-reuse.patch` recycles the large recurrent-checkpoint byte buffers when short tool continuations replace or invalidate checkpoints.
-The saved bytes and model arithmetic are unchanged, while the deployed single-GPU worker reduced the measured short continuation preparation path from 329.6 ms to 137.9 ms across six paired runs.
-Rejected J32, asynchronous-copy, shared-store, and short-context attention experiments are not included.
+The kernels are opt-in by environment; the Qwen backend in `config/runtime_catalog.toml` sets the same values as the
+production image: `GGML_CUDA_IQ4XS_MARLIN=1`, `GGML_CUDA_MARATHON_Q4_INT8=1`, `GGML_CUDA_MARATHON_GDN_TPC=16`,
+`GGML_CUDA_MARATHON_Q4_MIN_CONTEXT=16384`, `GGML_CUDA_MARATHON_Q4_MAX_QUERIES=256`, `LLAMA_REUSE_CHECKPOINT_BUFFERS=1`.
+
+### Tree verification
+
+With `LLAMA_SPEC_TREE_NODES=7` and `LLAMA_SPEC_TREE_TEMP=2.0` the DFlash2 drafter's candidate lattice becomes a
+best-first tree of 7 guesses (scores divided by the temperature first, because the drafter is overconfident) instead of
+one chain of 7, verified in the same 8-row target batch, so a round costs the same. The target samples at the root and
+follows the child that drafted that token; the accepted path is kept in the KV cache and recurrent state, every other
+row is dropped. Sampling is unchanged. Unset or 0 keeps the chain. It is used only with one slot (`--parallel 1`);
+n-gram drafts still use the chain path.
+
+Measured on RTX 3090s at 250 W with the C3 drafter, on held-out sessions: +5.1% tokens per round on identical text,
+42.1 ms per round against 43.0 ms for the chain; restored slots continue identically to a cold prefill; no change in
+decode speed at 180K context. With greedy sampling the text can differ from the chain's after some tokens: the KV
+cells of a tree-built conversation sit in a different order, which changes floating-point summation order (mean
+absolute log-probability difference 0.003 against a cold prefill).
+
+Old snapshots: the drafter state is saved with each slot, so a Marathon pool that changes drafter or turns the tree on
+should use a new `cache_id`.
 
 For a llama-swap pool, Marathon starts the selected worker and local router concurrently, then opens Codex while the worker finishes loading.
 The router serializes the readiness check so an immediate first prompt waits for that same load safely.
 In two cold paired runs on the local pool, this moved the Codex Ready screen from an average 11.12 seconds after runtime start to 1.24 seconds and reduced the immediate first reply from 16.39 seconds to 14.50 seconds.
-
-Patch `011-media-single-column-verification.patch` introduced image-position repairs and an exact-arithmetic verification path for the single-GPU SM86, 27B IQ4_XS, Q8-KV configuration.
-The tested image was selected for the machine-local production pool on 2026-09-05, with a new cache identity and separate snapshot directory.
-Unsupported configurations retain the media speculation guard.
-The loader supplies missing temporal-position metadata for the legacy DFlash2 file in memory, without changing its weights or requiring another model download.
-Draft generation starts at the model's next position, not the number of prompt tokens; these diverge after images.
-The target processes every image embedding; only the drafter omits raw image rows and prefill history outside every draft layer's sliding window.
-Patch `013-batched-media-default.patch` supersedes the exact-arithmetic policy: text and images use normal batched verification and the configured draft window, six in the local profile.
-The tested padded-KV-boundary and cache-layout guards remain for both text and media.
-There is no user-facing slow/fast mode or runtime diagnostic control-file requirement.
-`speculative.n_max` can lower the per-request limit, including zero for a reference run, but cannot exceed the configured limit.
-Changing the drafter's position layout requires a new external backend `cache_id` and a coordinated router restart; do not reuse old draft snapshots under the old identity.
-
-The upstream [image-position report](https://github.com/ggml-org/llama.cpp/issues/27408) and [quantized CUDA batch-numerics report](https://github.com/ggml-org/llama.cpp/issues/27407) describe separate failure modes.
-The local metadata-only test accepted 12 of 861 draft tokens and decoded at about 25 tok/s.
-Correcting the draft start position restored about 67 tok/s, but changed the greedy output, so that configuration was initially rejected under an exact-output requirement.
-The current default does not require batched speculation to reproduce zero-draft wording bit for bit; cleanup regressions are compared against the known-working batched runtime instead.
-
-Patch `012-media-attention-reuse.patch` reuses K/V work across two verification queries while preserving the original single-query reduction partition.
-It passed bitwise attention checks, image and follow-up token checks, multiple images, 80K occupied context, and saved-slot recovery on the tested SM86 configuration.
-A reconstructed 17.5K-context screenshot conversation improved from about 40 to 44 tok/s, with unchanged tokens and draft acceptance; ordinary text and prefill were essentially unchanged.
-This is a partial attention improvement, not elimination of the media decode slowdown, and it has not been deployed to the local production pool.
 
 These are llama.cpp source changes, not a redistribution of model weights or personal caches.
 The upstream license remains with the fetched source.
