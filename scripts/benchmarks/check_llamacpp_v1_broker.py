@@ -16,6 +16,7 @@ import shlex
 import socket
 import subprocess
 import time
+import threading
 from types import SimpleNamespace
 import urllib.request
 import yaml
@@ -29,9 +30,16 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--max-queries', type=int, default=256)
     p.add_argument('--gpu', type=int, default=0)
+    p.add_argument('--session-probe', action='store_true', help='Run three fresh CLI conversations with streaming latency measurements')
+    p.add_argument('--baseline-v5', action='store_true', help='Use the old runtime CLI for a matched comparison')
+    p.add_argument('--cache-probe', action='store_true', help='Exercise lazy pool routing and default starter/snapshot caching in fresh isolated directories')
+    p.add_argument('--cases', nargs='+', choices=['conversation', 'cache', 'orders'])
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=False)
-    slots = a.output / 'slots'; slots.mkdir()
+    slots = a.output / 'slots'
+    if a.cache_probe:
+        slots /= 'qwen3.8-27b-uncensored'
+    slots.mkdir(parents=True)
     name = f'marathon-v1-broker-check-gpu{a.gpu}'
     model = f'marathon-qwen3.8-27b-uncensored-{a.gpu if a.gpu in (1, 2, 3) else 1}'
     base = 'http://127.0.0.1:19293'
@@ -88,7 +96,10 @@ def main():
         if v.endswith(':/cache'):
             cmd[i] = str(slots) + ':/cache'
     cmd[at:at] = ['--env', 'GGML_CUDA_MARATHON_Q4_MAX_QUERIES=' + str(a.max_queries)]
-    if '--spec-draft-n-ubatch' not in cmd:
+    if a.baseline_v5 and '--spec-draft-n-ubatch' in cmd:
+        i = cmd.index('--spec-draft-n-ubatch')
+        del cmd[i:i + 2]
+    elif not a.baseline_v5 and '--spec-draft-n-ubatch' not in cmd:
         cmd += ['--spec-draft-n-ubatch', '64']
     entry.update(cmd=shlex.join(cmd), cmdStop='docker stop --timeout 60 ' + name,
                  unlisted=False, ttl=15)
@@ -102,6 +113,19 @@ def main():
     log = (a.output / 'broker.log').open('w')
     broker = None
     agent = None
+    stop_logs = threading.Event()
+    log_thread = None
+
+    def follow_worker():
+        with (a.output / 'worker.log').open('w') as output:
+            while not stop_logs.wait(.1):
+                exists = subprocess.run(['docker', 'inspect', name], stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL).returncode == 0
+                if exists:
+                    follower = subprocess.Popen(['docker', 'logs', '-f', name], stdout=output, stderr=subprocess.STDOUT)
+                    stop_logs.wait()
+                    follower.terminate(); follower.wait(timeout=10)
+                    return
 
     def start():
         nonlocal broker
@@ -134,17 +158,49 @@ def main():
             return request(upstream + path, data)
 
         class ProbeAgent(module.ShortAgent):
+            def __init__(self, *args):
+                super().__init__(*args)
+                if a.session_probe:
+                    from probe_marathon_sessions import instrument_agent
+                    instrument_agent(self)
+
             def start(self):
-                super().start()
+                if a.cache_probe:
+                    from probe_marathon_sessions import start_with_caches
+                    start_with_caches(self, super().start, base, model, env_name, slots)
+                else:
+                    super().start()
                 check('router_discovery_is_lazy', not running() and free())
+
+            def prepare(self, case):
+                if case != 'conversation':
+                    return super().prepare(case)
+                folder = self.root / case; folder.mkdir()
+                project = folder / 'project'; project.mkdir()
+                for child in ('home', 'output'):
+                    (folder / child).mkdir()
+                return folder, project, [
+                    'Remember the synthetic project marker ORBIT-472. Briefly explain three practical steps for debugging a slow local CLI. No tools needed.',
+                    'What was the project marker? Include it exactly, then explain how to distinguish cold startup from slow generation in two sentences. No tools needed.',
+                ]
+
+            def grade(self, project, case, stage):
+                if case != 'conversation':
+                    return super().grade(project, case, stage)
+                events = [json.loads(line) for line in (project.parent / f'phase-{stage}.jsonl').read_text().splitlines() if line.startswith('{')]
+                text = ' '.join(e.get('item', {}).get('text', '') for e in events if e.get('type') == 'item.completed')
+                passed = bool(text) and (stage == 0 or 'ORBIT-472' in text)
+                return dict(checks=1, passed_checks=int(passed), failures=[] if passed else ['missing response or remembered marker'])
 
         root = a.output / 'app'; root.mkdir()
         study = SimpleNamespace(out=root, base=base, http=app_http)
         args = SimpleNamespace(gpu=a.gpu, label='v1-broker-check', context=262144,
             backend_model_id=model, api_key_env=env_name,
             model_path='/home/deforest/AI/models/gguf/swift15-heretic-ara-merge/Swift-1.5-Qwen3.8-27B-Heretic-ARA-Merge-IQ4_XS.gguf',
-            cases=['cache'], stages=2, phase_timeout=180)
+            cases=a.cases or (['conversation', 'cache', 'orders'] if a.session_probe else ['cache']), stages=2, phase_timeout=240)
         agent = ProbeAgent(study, args)
+        if a.session_probe:
+            log_thread = threading.Thread(target=follow_worker, daemon=True); log_thread.start()
         agent.run()
         for case in agent.results:
             for phase in case['phases']:
@@ -172,6 +228,9 @@ def main():
             except subprocess.TimeoutExpired:
                 broker.kill(); broker.wait()
         subprocess.run(['docker', 'stop', '--time', '60', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stop_logs.set()
+        if log_thread:
+            log_thread.join(timeout=15)
         os.environ.pop(env_name, None)
         log.close()
         for f in slots.iterdir():
