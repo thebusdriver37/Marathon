@@ -1,0 +1,64 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index 3109452fe..8ab8be268 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -991,6 +991,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+     common_batch batch_inject; // target features for KV cache injection
+ 
+     std::vector<float> features_buf; // [n_chunk, n_embd_enc] gathered target features
++    std::vector<float> gap_zeros;    // zero features for positions an image skipped
+ 
+     std::vector<common_sampler_ptr> smpls;
+ 
+@@ -1278,10 +1279,33 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+             // an M-RoPE image pins all its rows to one position, so a windowed draft
+             // cache cannot free cells for it - skip it, the draft can jump over the gap
+             const bool pos_pinned = batch_in.tokens[i_batch_beg[seq_id]].pos[0] == batch_in.tokens[i_batch_end[seq_id]].pos[0];
+-            if (has_embeddings && n_rows > 1 && pos_pinned) {
++            llama_pos pos_next = llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id) + 1;
++            if (has_embeddings && ((pos_pinned && n_rows > 1) || pos_at(0) < pos_next)) {
+                 continue;
+             }
+ 
++            // The image advanced the target's positions past rows the draft never got.
++            // The draft cache requires consecutive positions, so fill the gap with
++            // zero features; the target verifies every draft, so output is unchanged.
++            // ref: https://github.com/ggml-org/llama.cpp/issues/27408
++            if (pos_at(0) > pos_next) {
++                gap_zeros.assign((size_t) n_ubatch * n_embd_enc, 0.0f);
++                while (pos_next < pos_at(0)) {
++                    const int32_t n_fill = std::min<int32_t>(n_ubatch, pos_at(0) - pos_next);
++                    batch_inject.clear();
++                    for (int32_t i = 0; i < n_fill; ++i) {
++                        const llama_pos p          = pos_next + i;
++                        const llama_pos pos_arr[4] = { p, p, p, 0 };
++                        batch_inject.add_embd({ gap_zeros.data() + (size_t) i * n_embd_enc, 1, (size_t) n_embd_enc }, pos_arr, seq_id, false);
++                    }
++                    if (llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch_inject.get()) != 0) {
++                        LOG_ERR("%s: filling draft positions %d..%d failed\n", __func__, (int) pos_next, (int) pos_at(0) - 1);
++                        return false;
++                    }
++                    pos_next += n_fill;
++                }
++            }
++
+             for (int32_t offset = 0; offset < n_rows; offset += n_ubatch) {
+                 const int32_t n_chunk = std::min(n_ubatch, n_rows - offset);
+ 
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index ab66c9c35..52a272c9e 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -591,9 +591,9 @@ struct server_slot {
+     }
+ 
+     bool can_speculate() const {
+-        // M-RoPE media positions can leave gaps that a text draft cannot ingest.
+-        // Keep media on the target-only path, including subsequent turns.
+-        return spec && (!task || !task->tokens.has_media());
++        // DFlash fills the position gap an image leaves in the draft cache, so media
++        // conversations keep speculating (they were target-only before).
++        return !!spec;
+     }
+ 
+     // at temp 0 both p and q are point masses, so rejection is the same as sample-and-match

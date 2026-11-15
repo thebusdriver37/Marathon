@@ -34,7 +34,7 @@ Old worktrees are retained for manual review, not automatically deleted.
 ## Deployed source provenance
 
 The base is upstream llama.cpp v1.0.0, `b1b770d90d94cad9e9ea5b993bdbc383a522fb28`.
-The eight patches reproduce, file for file, the source of the production Marathon worker image of 2026-11-14:
+The nine patches reproduce, file for file, the source of the production Marathon worker image of 2026-11-15:
 
 1. `001-media-speculation-guard.patch`: no speculative drafting for requests with images on unsupported paths.
 2. `002-iq4-xs-verify-kernel.patch`: IQ4_XS matrix kernel for 2-8 row verify batches (Marlin-style, SM86).
@@ -44,6 +44,11 @@ The eight patches reproduce, file for file, the source of the production Maratho
 6. `006-wider-q4-batches.patch`: the q4_0 attention path for wider query batches.
 7. `007-checkpoint-buffer-reuse.patch`: recycles exclusively owned recurrent-checkpoint buffers.
 8. `008-tree-verify.patch`: tree verification for the DFlash2 drafter.
+9. `009-media-gap-fill.patch`: keeps drafting on after an image. An image moves the target's positions
+   ahead without giving the drafter rows, and the drafter's cache needs consecutive positions, so the gap is
+   filled with zero features ([llama.cpp#27408](https://github.com/ggml-org/llama.cpp/issues/27408)).
+   Patch 001 had instead turned drafting off for any request with an image in its history, which cut
+   decode from about 170 to 45 tok/s on the same request.
 
 The kernels are opt-in by environment; the Qwen backend in `config/runtime_catalog.toml` sets the same values as the
 production image: `GGML_CUDA_IQ4XS_MARLIN=1`, `GGML_CUDA_MARATHON_Q4_INT8=1`, `GGML_CUDA_MARATHON_GDN_TPC=16`,
