@@ -61,6 +61,20 @@ def pool_cache_layout(backend: Backend) -> tuple[Path, str]:
     return Path(folder), digest
 
 
+def pool_serves_images(backend: Backend) -> bool:
+    """Whether every selected worker loads a vision projector (`--mmproj`).
+
+    The broker YAML, not a model file Marathon happens to find on disk, decides
+    what the pool serves, so a stray copy of the weights cannot hide vision.
+    """
+    try:
+        models = yaml.safe_load(backend.identity_config.read_text())["models"]
+        return all(_option_values(shlex.split(models[worker]["cmd"]), "--mmproj")
+                   for worker in backend.pool_models)
+    except (AttributeError, OSError, UnicodeError, KeyError, TypeError, ValueError, yaml.YAMLError):
+        return False
+
+
 def _option_values(args: list[str], *names: str) -> list[str]:
     """Collect an option's values given as `--name value` or `--name=value`."""
     values = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg in names]

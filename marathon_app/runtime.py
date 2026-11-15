@@ -37,7 +37,7 @@ from .catalog import (
     settings,
 )
 from .instance import InstanceConfig, instance_path, normalize_instance_name, resolve_instance
-from .model_identity import pool_cache_layout
+from .model_identity import pool_cache_layout, pool_serves_images
 from .telemetry import EventWriter, create_run_writer, redact_text, runs_dir
 from .router_security import is_loopback, open_api_request
 from .pool import acquire_pool_worker, release_pool_worker
@@ -1148,7 +1148,11 @@ class Runtime:
                     "1" if self.profile.parallel_tool_calls else "0"
                 ),
                 "MARATHON_MODEL_INPUT_MODALITIES": (
-                    "text,image" if self.model.multimodal_projector else "text"
+                    "text,image"
+                    if (pool_serves_images(self._backend)
+                        if self._backend.identity_config is not None
+                        else self.model.multimodal_projector)
+                    else "text"
                 ),
                 "MARATHON_MODEL_REASONING_LEVELS": json.dumps(
                     [

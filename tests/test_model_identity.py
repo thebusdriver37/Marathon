@@ -11,7 +11,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from marathon_app.catalog import Backend
-from marathon_app.model_identity import pool_cache_layout, pool_identity
+from marathon_app.model_identity import pool_cache_layout, pool_identity, pool_serves_images
 from test_router_context import fixture_profile, router_module
 
 
@@ -88,6 +88,17 @@ class ModelIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.configure()  # no --slot-save-path at all
         with self.assertRaisesRegex(ValueError, "Cannot find where"):
             pool_cache_layout(self.backend)
+
+    def test_vision_follows_the_workers_not_files_beside_a_local_copy(self):
+        # Regression: a projector-less copy of the weights took over the pool's
+        # model name, so Marathon told Codex the vision-enabled pool was text-only.
+        worker = "server --model /models/a.gguf --mmproj /models/vision.gguf"
+        self.path.write_text(f"models:\n  one:\n    cmd: {worker}\n  two:\n    cmd: {worker}\n")
+        self.assertTrue(pool_serves_images(self.backend))
+        self.configure()  # workers without --mmproj
+        self.assertFalse(pool_serves_images(self.backend))
+        self.path.unlink()
+        self.assertFalse(pool_serves_images(self.backend))
 
     async def test_http_picker_refreshes_names_and_hides_only_duplicate_pool_alias(self):
         self.configure()
