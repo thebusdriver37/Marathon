@@ -1,0 +1,93 @@
+{
+  "date": "2026-11-15",
+  "status": "Research and proposed experiments only. No private conversations read, no collection enabled, no training or runtime changes.",
+  "baseline_report": "262k-decode-diagnostic-20261115.json",
+  "nonnegotiable_evaluation": "Server capacity 262144; evaluate with at least 200000 occupied tokens, preferably about 260000 plus generation headroom. Match target/draft revisions, sampling, tree, power, clocks, and quantization.",
+  "measured_basis": {
+    "near_full_context_target_verify_ms": 44,
+    "near_full_context_total_round_ms": 50.5,
+    "target_fraction_approx": 0.87,
+    "finding": "Acceptance varies strongly with workload while verification cost stays similar. These are synthetic results, not private-session measurements."
+  },
+  "ranked_ideas": [
+    {
+      "priority": 1,
+      "idea": "Diagnose acceptance failures and calibrate candidate/tree selection",
+      "method": "Record emitted tokens per round, round time, first rejection depth, candidate coverage and ranking errors. Sweep existing tree temperature and feasible node budgets on held-out long-context synthetic tasks before retraining. Current DFlash block caps the tree at seven draft nodes; setting a larger environment value alone cannot expand it.",
+      "success": "Higher emitted tokens per second without a quality/distribution regression; judge the deployed seven-node tree, not just training proxy metrics."
+    },
+    {
+      "priority": 2,
+      "idea": "Targeted continued training of the C3 drafter",
+      "method": "Use permitted low-acceptance segments plus adjacent synthetic tasks and representative easy replay examples. Capture teacher features from the actual frozen Marathon target with the relevant long prefix/state. Resume the unquantized C3 checkpoint or adapters if retained; do not use the Q4 GGUF as the preferred training master. Export and quantize once, then measure the deployed artifact.",
+      "success": "Held-out whole-session tests at 200K-262K show a repeatable end-to-end decode improvement, including difficult segments, with no regressions on the original workload mix."
+    },
+    {
+      "priority": 3,
+      "idea": "Profile and optimize target verification kernels",
+      "method": "Use Nsight on a free leased GPU to split attention/KV, quantized matrix operations, Gated DeltaNet, launch/synchronization costs. Built-in phase timing does not establish which target kernels dominate.",
+      "success": "Lower target verification milliseconds at near-full context with matched output/quality checks."
+    },
+    {
+      "priority": 4,
+      "idea": "Selected KV reads during verification, only if profiling supports it",
+      "method": "Treat as an approximate research branch. Preserve full-context retrieval tests and evaluate target-distribution/quality changes explicitly.",
+      "success": "Attention is sufficiently costly and measured retrieval/quality tradeoffs are acceptable."
+    }
+  ],
+  "proposed_data_loop": [
+    "Begin with content-free per-request/per-window telemetry and opaque identifiers, with authorized collection scope defined before deployment. Worker-global Prometheus totals alone do not identify exact failure segments.",
+    "Rank low-acceptance windows within comparable context lengths, output phases, sampling and hardware conditions. Exclude prefill, tools, cache restore, queued time and other slowdowns that drafter training cannot fix.",
+    "Inspect candidate coverage versus ranking/first-failure statistics. Prompt/output analysis can suggest task families, but the drafter itself need not become an analyst.",
+    "Create synthetic neighboring tasks covering the deficient structures. Label them using the frozen deployed target, including its emitted thinking/tool syntax when relevant; rejected draft tokens are not positive labels.",
+    "Replay with the original relevant long prefix or compatible saved state to obtain selected teacher hidden states. A short detached excerpt is not equivalent to a 262K-context sample. Keep captures bounded; long-prefix replay has compute cost.",
+    "Mix hard cases and representative cases; split by complete sessions/tasks before augmentation to avoid near-duplicate leakage. Resume a floating-point C3 checkpoint, train on a free GPU, then quantize once.",
+    "Evaluate the final Q4_K_M drafter on held-out 200K-262K contexts, actual sampling and seven-node tree. Include ordinary traffic and slow-tail tasks, not only the mined failures. Stage a rollback-capable candidate; do not auto-promote."
+  ],
+  "corrections_to_supplied_analysis": [
+    "The broad adaptation loop is established; exact C3/3090/262K gains remain unmeasured.",
+    "EAGLE-3 simulates multi-step drafting during training; it is not accurately summarized as harvesting accepted live tokens and iteratively retraining on slow replies. Online Speculative Decoding is the closer precedent.",
+    "Baseten reports 20% median acceptance improvement in its deployments, not a guaranteed throughput gain here. No defensible single-digit gain forecast exists for C3 yet.",
+    "LK loss is a research candidate, not automatically a drop-in optimum for this custom tree verifier. SpecForge supports CE/LK/TV objectives and D-PACE weighting, but serving-tree acceptance must decide.",
+    "Low throughput is not always poor acceptance. Optimize emitted tokens per wall-clock round, not aggregate accepted/proposed fraction across different tree shapes.",
+    "Adaptive draft training leaves the target frozen; distribution preservation depends on correct verification, not on any claim that every generated sample stays byte-identical.",
+    "Offline capture is simpler to isolate but not necessarily cheaper than live feature collection; at 262K, recomputing teacher prefixes can dominate."
+  ],
+  "illustrative_math_not_forecast": {
+    "round_ms": 50.5,
+    "four_emitted_tokens_tps": 79.2,
+    "five_emitted_tokens_tps": 99.0,
+    "seven_point_five_emitted_tokens_tps": 148.5,
+    "meaning": "4 to 5 emitted tokens per round yields 25% more throughput at unchanged cost. Moving 80 to 150 tok/s would require nearly doubling emitted length, so it is a much stronger claim."
+  },
+  "sources": [
+    {
+      "url": "https://arxiv.org/abs/2310.07177",
+      "supports": "Online Speculative Decoding adapts draft models to observed queries through distillation; direct precedent for the overall feedback loop."
+    },
+    {
+      "url": "https://www.baseten.co/blog/live-draft-model-training-for-speculative-decoding/",
+      "supports": "Production collection of live teacher hidden states for draft training; reported median acceptance improvement 20%. Does not validate this exact model, workload or hardware."
+    },
+    {
+      "url": "https://arxiv.org/abs/2503.07807",
+      "supports": "Domain-specific draft distillation and synthetic alignment data. In studied domains synthetic data achieved 80-93% of historical-query training performance; not a forecast for Marathon."
+    },
+    {
+      "url": "https://arxiv.org/html/2503.01840v3",
+      "supports": "EAGLE-3 training-time test simulates multistep drafting and addresses feature-input distribution mismatch; distinct from live failure mining."
+    },
+    {
+      "url": "https://nebius.com/blog/posts/lk-losses",
+      "supports": "Acceptance-oriented objectives; applicability to the custom tree must be evaluated."
+    },
+    {
+      "url": "https://sgl-project.github.io/SpecForge/basic_usage/training.html",
+      "supports": "DFlash2 selected hidden-state capture, selector versus candidate-coverage diagnostics, objective options; training proxy metrics are not serving acceptance."
+    },
+    {
+      "url": "https://huggingface.co/Busdriver/Qwen3.8-27B-DFlash2-Marathon-GGUF",
+      "supports": "C3 is already specialized using synthetic tasks; card reports re-quantization problems after training from an already-quantized draft."
+    }
+  ]
+}
