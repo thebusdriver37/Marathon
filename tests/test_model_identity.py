@@ -11,7 +11,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from marathon_app.catalog import Backend
-from marathon_app.model_identity import pool_identity
+from marathon_app.model_identity import pool_cache_layout, pool_identity
 from test_router_context import fixture_profile, router_module
 
 
@@ -67,6 +67,27 @@ class ModelIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Swift", pool_identity(single)[0])
         self.assertIn("mixed identities", pool_identity(self.backend)[0])
         self.assertIn("Swift", pool_identity(single)[0])
+
+    def test_cache_layout_follows_the_workers_mount_and_launch_command(self):
+        def configure(folder="/cache/swift/model", flag="", second_folder=None):
+            worker = (f"docker run --volume /weights:/models:ro --volume {folder}:/cache {flag}"
+                      " image --model /models/a.gguf --slot-save-path /cache")
+            other = worker.replace(folder, second_folder) if second_folder else worker
+            self.path.write_text(f"models:\n  one:\n    cmd: {worker}\n  two:\n    cmd: {other}\n")
+
+        configure()
+        folder, workers = pool_cache_layout(self.backend)
+        self.assertEqual(folder, Path("/cache/swift/model"))
+        configure(flag="--ctx-size 8192")
+        self.assertNotEqual(pool_cache_layout(self.backend)[1], workers)
+        for broken in ({"second_folder": "/cache/other"}, {"folder": "/cache/gpu-${gpu}"},
+                       {"folder": "relative/cache"}):
+            configure(**broken)
+            with self.assertRaisesRegex(ValueError, "one absolute slot snapshot folder"):
+                pool_cache_layout(self.backend)
+        self.configure()  # no --slot-save-path at all
+        with self.assertRaisesRegex(ValueError, "Cannot find where"):
+            pool_cache_layout(self.backend)
 
     async def test_http_picker_refreshes_names_and_hides_only_duplicate_pool_alias(self):
         self.configure()

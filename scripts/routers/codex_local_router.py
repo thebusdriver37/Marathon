@@ -558,6 +558,35 @@ def _stabilize_codex_prompt_cache_key(
     return False
 
 
+def _chat_prompt_body(
+    request: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Render-only chat body: messages plus the request's tools and template settings."""
+
+    body: dict[str, Any] = {"add_generation_prompt": False, "messages": messages}
+    tools = request.get("tools")
+    chat_tools = []
+    for tool in tools if isinstance(tools, list) else []:
+        if isinstance(tool, dict) and tool.get("type") == "function":
+            function = copy.deepcopy(tool)
+            function.pop("type")
+            function.setdefault("strict", True)
+            chat_tools.append({"type": "function", "function": function})
+    if chat_tools:
+        body["tools"] = chat_tools
+    for key in (
+        "chat_template_kwargs",
+        "enable_thinking",
+        "parallel_tool_calls",
+        "reasoning_format",
+        "tool_choice",
+    ):
+        if key in request:
+            body[key] = copy.deepcopy(request[key])
+    return body
+
+
 def _starter_scaffold_chat_body(
     request: dict[str, Any],
     user_content: str = STARTER_CACHE_SENTINEL,
@@ -579,34 +608,7 @@ def _starter_scaffold_chat_body(
     # the stable system-and-tools prefix. On a real request, llama.cpp's
     # cache_prompt prefix match discards this suffix at the first mismatch.
     messages.append({"role": "user", "content": user_content})
-    body: dict[str, Any] = {
-        "add_generation_prompt": False,
-        "messages": messages,
-    }
-
-    chat_tools: list[dict[str, Any]] = []
-    tools = request.get("tools")
-    if isinstance(tools, list):
-        for tool in tools:
-            if not isinstance(tool, dict) or tool.get("type") != "function":
-                continue
-            function = copy.deepcopy(tool)
-            function.pop("type", None)
-            function.setdefault("strict", True)
-            chat_tools.append({"type": "function", "function": function})
-    if chat_tools:
-        body["tools"] = chat_tools
-
-    for key in (
-        "chat_template_kwargs",
-        "enable_thinking",
-        "parallel_tool_calls",
-        "reasoning_format",
-        "tool_choice",
-    ):
-        if key in request:
-            body[key] = copy.deepcopy(request[key])
-    return body
+    return _chat_prompt_body(request, messages)
 
 
 def _starter_context_chat_body(
@@ -812,33 +814,7 @@ def _conversation_checkpoint_chat_body(
         )
 
     messages.append({"role": "user", "content": user_content})
-    body: dict[str, Any] = {
-        "add_generation_prompt": False,
-        "messages": messages,
-    }
-
-    chat_tools: list[dict[str, Any]] = []
-    tools = request.get("tools")
-    if isinstance(tools, list):
-        for tool in tools:
-            if not isinstance(tool, dict) or tool.get("type") != "function":
-                continue
-            function = copy.deepcopy(tool)
-            function.pop("type", None)
-            function.setdefault("strict", True)
-            chat_tools.append({"type": "function", "function": function})
-    if chat_tools:
-        body["tools"] = chat_tools
-
-    for key in (
-        "chat_template_kwargs",
-        "enable_thinking",
-        "parallel_tool_calls",
-        "reasoning_format",
-        "tool_choice",
-    ):
-        if key in request:
-            body[key] = copy.deepcopy(request[key])
+    body = _chat_prompt_body(request, messages)
     reasoning = request.get("reasoning")
     if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
         body["reasoning_effort"] = reasoning["effort"]
@@ -4312,75 +4288,37 @@ class RouterState:
             if not expandable_instructions and scaffold_body != _starter_scaffold_chat_body(request):
                 seed_result = await self.prepare_starter_cache(
                     profile, {**request, "input": []}, restore_only=True,
-                    expandable_instructions=expandable_instructions,
                 )
             erased = (None if seed_result and seed_result.get("status") == "restored"
                       else await self.erase_slot(profile))
-            rendered_prompts: list[str] = []
+            tokenized_prompts: list[list[int]] = []
             for body in (scaffold_body, alternate_scaffold_body):
                 rendered = await self._request_json(
-                    profile,
-                    "POST",
-                    "/apply-template",
-                    body,
-                    retry_connection_error=True,
+                    profile, "POST", "/apply-template", body, retry_connection_error=True,
                 )
                 prompt = rendered.get("prompt")
                 if not isinstance(prompt, str) or not prompt:
                     raise RuntimeError("llama.cpp returned an empty starter prompt")
-                rendered_prompts.append(prompt)
-
-            tokenized_prompts: list[list[int]] = []
-            for prompt in rendered_prompts:
                 tokenized = await self._request_json(
                     profile,
                     "POST",
                     "/tokenize",
-                    {
-                        "content": prompt,
-                        "add_special": True,
-                        "parse_special": True,
-                    },
+                    {"content": prompt, "add_special": True, "parse_special": True},
                     retry_connection_error=True,
                 )
                 tokenized_prompts.append(_token_ids(tokenized))
-            prompt_tokens = _starter_common_token_prefix(*tokenized_prompts)
             prefilled = await self._request_json(
                 profile,
                 "POST",
                 "/completion",
                 {
-                    "prompt": prompt_tokens,
+                    "prompt": _starter_common_token_prefix(*tokenized_prompts),
                     "n_predict": 0,
                     "id_slot": self.slot_id,
                     "cache_prompt": True,
                 },
                 retry_connection_error=True,
             )
-            saved = await self.save_slot(profile, filename)
-            if not self._snapshot_ready(snapshot_path):
-                raise RuntimeError("llama.cpp produced an empty starter snapshot")
-            async with self.slot_checkpoint_store.lock_io():
-                pruned = await asyncio.to_thread(
-                    self._prune_starter_cache_sync,
-                    profile,
-                    filename,
-                )
-            pruned["shared"] = await asyncio.to_thread(
-                self.slot_checkpoint_store.prune, snapshot_path,
-            )
-            return {
-                "mode": "build-starter-cache",
-                "status": "built",
-                "fingerprint": fingerprint,
-                "snapshot_filename": filename,
-                "restore_error": restore_error,
-                "erase_result": erased,
-                "seed_result": seed_result,
-                "prefill_timings": prefilled.get("timings"),
-                "save_result": saved,
-                "prune_result": pruned,
-            }
         except Exception as exc:
             try:
                 erased = await self.erase_slot(profile)
@@ -4395,6 +4333,35 @@ class RouterState:
                 "error": str(exc),
                 "erase_result": erased,
             }
+
+        # The slot now holds the starter prefix and serves this request either
+        # way. Saving it only spares the next cold start a rebuild, so a failed
+        # save is reported but never discards the prefill.
+        result: dict[str, Any] = {
+            "mode": "build-starter-cache",
+            "status": "built",
+            "fingerprint": fingerprint,
+            "snapshot_filename": filename,
+            "restore_error": restore_error,
+            "erase_result": erased,
+            "seed_result": seed_result,
+            "prefill_timings": prefilled.get("timings"),
+        }
+        try:
+            result["save_result"] = await self.save_slot(profile, filename)
+            if not self._snapshot_ready(snapshot_path):
+                raise RuntimeError(f"llama.cpp saved no starter snapshot at {snapshot_path}")
+            async with self.slot_checkpoint_store.lock_io():
+                pruned = await asyncio.to_thread(
+                    self._prune_starter_cache_sync, profile, filename,
+                )
+            pruned["shared"] = await asyncio.to_thread(
+                self.slot_checkpoint_store.prune, snapshot_path,
+            )
+            result["prune_result"] = pruned
+        except Exception as exc:
+            result["save_error"] = str(exc)
+        return result
 
     def schedule_spark_prewarm(self, profile: ModelProfile) -> dict[str, Any]:
         """Load a selected Spark model without holding up the frontend warmup."""
@@ -4518,6 +4485,7 @@ class RouterState:
                     self.cache_handoff_profile = (
                         profile.slug if profile.slug in getattr(self, "pool_slugs", ()) else None
                     )
+                error = result.get("error") or result.get("save_error")
                 self.telemetry.emit(
                     "router.starter_cache.prewarm_completed",
                     {
@@ -4525,8 +4493,10 @@ class RouterState:
                         "kind": prewarm_kind,
                         "status": result.get("status"),
                         "mode": result.get("mode"),
+                        "error": error,
                         "duration_ms": (time.perf_counter() - started) * 1000.0,
                     },
+                    level="warning" if error else "info",
                 )
         except asyncio.CancelledError:
             raise

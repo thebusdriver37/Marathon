@@ -37,6 +37,7 @@ from .catalog import (
     settings,
 )
 from .instance import InstanceConfig, instance_path, normalize_instance_name, resolve_instance
+from .model_identity import pool_cache_layout
 from .telemetry import EventWriter, create_run_writer, redact_text, runs_dir
 from .router_security import is_loopback, open_api_request
 from .pool import acquire_pool_worker, release_pool_worker
@@ -151,8 +152,13 @@ def _backend_cache_id(
     model: Model,
     backend: Backend,
     specs: list[BackendProcessSpec],
+    pool_workers: str | None = None,
 ) -> str:
-    """Fingerprint everything that can make a llama.cpp slot incompatible."""
+    """Fingerprint everything that can make a llama.cpp slot incompatible.
+
+    Marathon does not launch pool workers itself, so their broker commands
+    (``pool_workers``) stand in for the process specs.
+    """
 
     payload = {
         "schema": 1,
@@ -173,6 +179,8 @@ def _backend_cache_id(
             for spec in specs
         ],
     }
+    if pool_workers:
+        payload["backend"]["pool_workers"] = pool_workers
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
@@ -962,13 +970,25 @@ class Runtime:
         if self._backend.kind == "llama_swap_pool" and not lazy_pool:
             self._acquire_pool_model(self._backend)
         slot_api_enabled = _slot_api_enabled(self.model, self._backend)
-        router_slot_root = self._backend.slot_save_root or self.paths.slot_root
-        slot_path = router_slot_root / self.model.alias
+        pool_workers = None
+        if slot_api_enabled and self._backend.identity_config is not None:
+            # Pool workers write snapshots wherever the broker mounts them.
+            slot_path, pool_workers = pool_cache_layout(self._backend)
+            if slot_path.name != self.model.alias:
+                raise ValueError(
+                    f"Pool workers save slot snapshots to {slot_path}, but the router looks "
+                    f"in a folder named {self.model.alias}. Rename the broker's cache folder to match."
+                )
+            router_slot_root = slot_path.parent
+        else:
+            router_slot_root = self._backend.slot_save_root or self.paths.slot_root
+            slot_path = router_slot_root / self.model.alias
         backend_specs = self._backend_specs(self._backend, slot_path)
         backend_cache_id = _backend_cache_id(
             self.model,
             self._backend,
             backend_specs,
+            pool_workers,
         )
         backend_commands = [list(spec.command) for spec in backend_specs]
         primary_command = (

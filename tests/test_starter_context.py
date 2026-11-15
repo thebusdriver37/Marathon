@@ -140,6 +140,16 @@ class StarterContextPersistenceTests(unittest.IsolatedAsyncioTestCase):
         state.erase_slot.assert_awaited_once()
         state.restore_slot.assert_not_awaited()
 
+    async def test_unsaved_build_keeps_the_prefilled_slot_and_names_the_folder(self):
+        # Regression: the router once looked in a folder the workers never wrote,
+        # then erased every finished prefill, so each new chat prefilled twice.
+        state = self.state()
+        state.save_slot = mock.AsyncMock(return_value={"status": "saved"})
+        result = await state.prepare_starter_cache(self.profile, self.request)
+        self.assertEqual(result["status"], "built")
+        self.assertIn(str(self.root / self.profile.slug), result["save_error"])
+        state.erase_slot.assert_awaited_once()  # only the reset before prefill
+
 
 if __name__ == "__main__":
     unittest.main()

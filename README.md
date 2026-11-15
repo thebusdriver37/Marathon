@@ -62,6 +62,9 @@ GPUs occupied by other jobs and counts only that worker's own container memory
 as reusable. If availability cannot be verified, that worker is skipped.
 Pools without `identity_config` retain reservation-only selection. The check runs
 when acquiring a lease; it cannot prevent an unrelated job from starting later.
+With `identity_config`, slot snapshots also follow the broker YAML: Marathon reads
+the folder each worker mounts for `--slot-save-path` (so no `slot_save_root` is
+needed) and retires old snapshots whenever a worker's launch command changes.
 
 ## Local by default
 

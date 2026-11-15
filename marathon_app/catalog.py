@@ -946,12 +946,14 @@ def backend_for(model: Model, profile: Profile | None = None) -> Backend:
             )
         if not backend.model_alias:
             raise ValueError(f"backend '{backend.id}' requires model_alias")
+        # With identity_config, the snapshot folder comes from the broker config.
         if backend.supports_slots and (
-            backend.slot_save_root is None or not backend.cache_id
+            not backend.cache_id
+            or (backend.slot_save_root is None and backend.identity_config is None)
         ):
             raise ValueError(
-                f"backend '{backend.id}' requires slot_save_root and cache_id "
-                "when slot snapshots are enabled"
+                f"backend '{backend.id}' requires cache_id, and slot_save_root unless "
+                "identity_config is set, when slot snapshots are enabled"
             )
         return backend
     if backend.server is None or not backend.server.is_file() or not os.access(backend.server, os.X_OK):
