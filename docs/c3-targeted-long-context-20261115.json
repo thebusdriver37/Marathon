@@ -1,0 +1,263 @@
+{
+  "schema": 1,
+  "date": "2026-11-15",
+  "scope": "Fresh synthetic long-context diagnosis and targeted DFlash2 C3 retraining experiment. No private conversations, snapshots, production traffic, or private user data were read. Production C3 and the broker configuration were unchanged. Deployment was not authorized and was not performed.",
+  "outcome": "Negative. The targeted quantized candidate did not improve held-out near-262K acceptance or throughput. Identical-token replay fell 0.139% overall and 1.0% on prose versus deployed Q4 C3. Repeated live decode fell 1.804% overall and 1.71% on prose, with marker recall falling from 33/48 to 30/48. Retain deployed C3 Q4_K_M; do not promote the candidate.",
+  "runtime_verified": {
+    "target": "/home/deforest/AI/models/gguf/swift15-heretic-ara-merge/Swift-1.5-Qwen3.8-27B-Heretic-ARA-Merge-IQ4_XS.gguf",
+    "target_sha256": "1d86cf30fb3702c444293289c2f904e692693c825a2b1f7fd4df0dc2959425d0",
+    "deployed_drafter": "/home/deforest/AI/models/gguf/qwen3.8-27b-dflash2/Qwen3.8-27B-DFlash2-Marathon-C3real-Q4_K_M.gguf",
+    "deployed_drafter_sha256": "af42cdeaac664eaa8e1c85e7b1f5f5e264cf1b078b42c6b63ee11eda4ffe443b",
+    "server_image": "sha256:89c1e303977f17d3ebcfa4b98679a984930d2c9993a4d91c87313147238e458c",
+    "server_context_capacity": 262144,
+    "target_kv": "q4_0",
+    "draft_kv": "q4_0",
+    "tree_nodes": 7,
+    "tree_temperature": 2.0,
+    "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.05},
+    "training_master": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/mini-C3/checkpoint-1638",
+    "training_master_sha256": "547f11a3ca22c020c676d0647f69f7017fc85cc22af9c9603b149bcbf60347b6",
+    "note": "GPU power limits were the persisted 300 W policy; clocks were dynamic rather than pinned. The trace server used min_p 0.05. The production frontend min_p was not separately verified. Three of 20 live trace records had displayed-text hash mismatches despite exact token-id matches."
+  },
+  "diagnosis": {
+    "source": "docs/dflash2-diagnosis-20261115.json",
+    "heldout_baseline": {
+      "source": "docs/dflash2-diagnosis-20261115.json and /home/deforest/AI/experiments/dflash2-targeted-20261115/reports/final-baseline.json",
+      "tasks": 5,
+      "occupied_context_tokens_total": 1300694,
+      "occupied_context_range": [258974, 260816],
+      "generated_tokens": 7900,
+      "tree_rounds": 1661,
+      "traceable_tree_rounds": 1658,
+      "tree_emitted_tokens": 7707,
+      "traceable_tree_emitted_tokens": 7693,
+      "ngram_rounds": 8,
+      "ngram_emitted_tokens": 188,
+      "prefill_rows": 5,
+      "prefill_emitted_tokens": 5,
+      "failures_on_reached_prefixes": 1328,
+      "systematic_candidate_coverage": 187,
+      "systematic_tree_allocation": 857,
+      "intrinsic_sampling_failures": 284,
+      "tokens_per_tree_round": 4.639927623642944,
+      "prose": {"traceable_rounds": 491, "tokens_per_round": 3.3238289205702647, "coverage_rate": 0.1934826883910387, "allocation_rate": 0.5417515274949084},
+      "reasoning": {"traceable_rounds": 389, "tokens_per_round": 5.038560411311054, "coverage_rate": 0.06683804627249357, "allocation_rate": 0.5758354755784062},
+      "code": {"traceable_rounds": 366, "tokens_per_round": 5.581967213114754, "coverage_rate": 0.06830601092896176, "allocation_rate": 0.43169398907103823},
+      "tool": {"traceable_rounds": 412, "tokens_per_round": 4.995145631067961, "coverage_rate": 0.09951456310679611, "allocation_rate": 0.5072815533980582}
+    },
+    "mechanisms": {
+      "candidate_coverage": "The sampled target token was absent from the relevant candidate set. This is systematic when target_sample_rank is 0, and is not counted as a learnable failure when sampling chose a lower-ranked target.",
+      "ranking_tree_allocation": "The target continuation was present in the candidate set but was not selected or did not receive enough seven-node tree budget. This is the dominant aggregate failure class across prose, reasoning, code, and tool use.",
+      "downstream_mismatch": "After the first wrong draft choice, later positions are unreachable and are not counted as independent failures. Only the last target correction on each reached prefix is counted.",
+      "execution_slowdown": "Matched low- and high-acceptance rounds had median decode ratio 1.0002 and total-round ratio 0.9997; no execution slowdown accompanied normal acceptance in the diagnostic suite."
+    },
+    "prose_specific_evidence": {
+      "diagnostic_suite_traceable_rounds": 1726,
+      "systematic_coverage": 306,
+      "coverage_rate": 0.1772885283893395,
+      "systematic_allocation": 895,
+      "allocation_rate": 0.518539976825029,
+      "coverage_forms": {"new_word": 245, "subword": 42, "code_or_entity": 3, "number": 2, "punctuation": 2, "whitespace": 1, "other": 11},
+      "weak_hypotheses": "Only 6 connective-language failures and 4 uncertainty-word failures occurred among 306 systematic prose coverage failures. This did not support a narrow connective or uncertainty hypothesis.",
+      "strongest_supported_weakness": "Broad prose candidate coverage for ordinary new words and subword merges. It is prose-specific: 17.73% in prose versus 10.09% in reasoning, 7.24% in code, and 0% in the small tool diagnostic sample."
+    },
+    "sampling_uncertainty": "Sampled target tokens below candidate rank 0 are treated as intrinsic sampling uncertainty, not as training failures. A single sampled mismatch was not treated as proof of a drafter deficiency.",
+    "calibration_test": {
+      "method": "Identical-target-token replay over four synthetic validation cases at fixed seven-node membership, recomputing tree membership at each temperature.",
+      "tree_temperature_1_5": {"tokens_per_round": 3.9421128798842258, "change_pct_vs_2": 0.8918539848030482},
+      "temperature_2": {"tokens_per_round": 3.907265774378585},
+      "conclusion": "Temperature 1.5 was only +0.89% pooled and its bootstrap interval overlapped baseline. No runtime calibration change was adopted."
+    },
+    "hypothesis_status": "The strongest supported trainable weakness was prose candidate coverage. The dominant aggregate bottleneck was allocation, but it was not prose-specific and a bounded temperature calibration did not improve it. Failure counts were ground-truthed against flattened output tokens, selected ancestry, emitted prefixes, and recomputed allocation log-probabilities."
+  },
+  "targeted_data": {
+    "root": "/home/deforest/AI/experiments/dflash2-targeted-20261115",
+    "manifest": "corpus/manifest.json",
+    "archive_sha256": "759a4ecbdc42b26be24e5e0d40bb97dc99b354794be19ec27fce07c08185898a",
+    "archive_tokens": 244699,
+    "prompt_context_tokens": 2693462,
+    "supervised_output_tokens": 52408,
+    "occupied_context_tokens": 2745870,
+    "training_sessions": 11,
+    "split_policy": "Entire fresh synthetic sessions were assigned to training before augmentation. Validation used the already captured fresh diagnostic suite; final test used a separate fresh Solstice Ridgeline archive. No near-duplicate augmentation crosses splits.",
+    "families": {
+      "rare_compound_names_and_entities": {"supervised_tokens": 14832, "measured_weakness": "prose systematic candidate coverage for new words and subword merges"},
+      "administrative_explanatory_prose": {"supervised_tokens": 15937, "measured_weakness": "prose systematic coverage in explanatory transitions and factual detail"},
+      "matched_successful_prose": {"supervised_tokens": 10510, "measured_weakness": "regression guard for ordinary continuous prose"},
+      "reasoning_and_code_mix": {"supervised_tokens": 8000, "measured_weakness": "regression guard for reasoning and code acceptance"},
+      "tool_use_mix": {"supervised_tokens": 3129, "measured_weakness": "regression guard for tool-call formatting and continuation"}
+    },
+    "provenance": "Fresh synthetic Kestrel Meridian dossier generated by targeted_common.py. No public dataset was needed and none was used. No private data was read. Supervision came from the frozen IQ4_XS Marathon target, not another model's answers.",
+    "training_confirmation": {
+      "rare_names": {"coverage_rate": 0.16192959582790092, "traceable_rounds": 3835},
+      "administrative_prose": {"coverage_rate": 0.15170842824601366, "traceable_rounds": 4390},
+      "matched_successful_prose": {"coverage_rate": 0.1833855799373041, "traceable_rounds": 3190},
+      "reasoning_and_code": {"coverage_rate": 0.09226006191950464, "traceable_rounds": 1615},
+      "tool_use": {"coverage_rate": 0.09553158705701079, "traceable_rounds": 649},
+      "conclusion": "The rare-name family did not isolate a stronger coverage weakness than ordinary prose (16.19% versus 15.17% administrative and 18.34% matched prose). The corpus targeted broad prose coverage, not a rare-name-only defect."
+    },
+    "capture": {
+      "training": {"supervised_positions": 52408, "captured_rows": 74947, "rank_one_mismatches": 5104, "target_tokens_outside_replay_top16": 0, "integrity": true},
+      "final": {"supervised_positions": 7900, "captured_rows": 18145, "rank_one_mismatches": 488, "target_tokens_outside_replay_top16": 0, "integrity": true},
+      "method": "Full frozen-target prefixes at ctx 262144, q4_0 KV, absolute positions, and local receptive windows with 2/2 halos. The final archive sha256 was 7eb7fbba0e97e4331a8234290b1967d10275087640b26b2f8177f908497f9477 with 258319 tokens."
+    }
+  },
+  "training": {
+    "master": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/mini-C3/checkpoint-1638",
+    "mode": "continued LoRA",
+    "effective_lora": {"r": 256, "alpha": 256, "trainable_parameters": 133693440},
+    "target_frozen": true,
+    "steps": 196,
+    "eval_every": 49,
+    "anchors": 32,
+    "eval_anchors": 128,
+    "lr": 2e-5,
+    "loss": "D-PACE",
+    "dpace_alpha": 0.5,
+    "block_size": 8,
+    "shuffle_epochs": true,
+    "train_cases": 11,
+    "validation_cases": 4,
+    "gpu": 0,
+    "seconds": 107.7677366733551,
+    "checkpoints": ["checkpoint-0049", "checkpoint-0098", "checkpoint-0147", "checkpoint-0196"],
+    "offline_screening_serving_accepted_length_including_anchor": {"step_0": 4.328125, "step_49": 4.349609375, "step_98": 4.361328125, "step_147": 4.359375, "step_196": 4.31640625},
+    "selection": {
+      "selected": "checkpoint-0098",
+      "fp_validation_baseline_tokens_per_round": 3.9063097514340344,
+      "selected_fp_tokens_per_round": 3.9021479713603817,
+      "selected_fp_change_pct": -0.10653994021146973,
+      "fp_screen_passed": false,
+      "tie": "checkpoint-0147 tied pooled 3.9021479713603817 and was marginally better on prose (3.106463878326996 versus 3.1041033434650456), but 0098 was selected by the recorded deterministic tie break. The tie remains unresolved and is not promotion evidence.",
+      "rule": "Highest held-out validation tokens per round at fixed seven-node replay. Promotion required beating original FP; it did not."
+    }
+  },
+  "export": {
+    "checkpoint": "checkpoint-0098",
+    "candidate_sha256": "6d0e9236580953b585277ff4258b17f2600a5f986fedb9065a8a24d73479102c",
+    "deployed_c3_sha256": "af42cdeaac664eaa8e1c85e7b1f5f5e264cf1b078b42c6b63ee11eda4ffe443b",
+    "base": "/home/deforest/Documents/DEV/Marathon/.marathon/drafter-training/stock BF16",
+    "procedure": "Merge the floating-point LoRA adapter, then quantize changed tensors directly to Q4_K_M once. Do not train from the deployed Q4 GGUF.",
+    "changed_tensors": 36,
+    "other_tensor_bytes_identical": true,
+    "candidate_bytes": 1143006752,
+    "seconds": 182.64503121376038
+  },
+  "heldout_final": {
+    "manifest": "tasks/final-manifest.json",
+    "archive_sha256": "7eb7fbba0e97e4331a8234290b1967d10275087640b26b2f8177f908497f9477",
+    "archive_tokens": 258319,
+    "tasks": 5,
+    "prompt_tokens": [258402, 258384, 258389, 258851, 258768],
+    "generated_tokens": [1633, 2048, 2048, 123, 2048],
+    "occupied_context_range_final_baseline": [258974, 260816],
+    "identical_target_token_replay": {
+      "method": "All four artifacts replayed the same captured target-token streams in server order with seven nodes and tree temperature 2.0. Text is unchanged by construction; only drafting acceptance is compared.",
+      "models": {
+        "original_fp": {"rounds": 1689, "emitted_tokens": 7875, "tokens_per_round": 4.662522202486678, "low_acceptance_share": 0.044997039668442866, "prose": 3.286868686868687, "reasoning": 5.056930693069307, "code": 5.597260273972603, "tool": 5.087058823529412},
+        "candidate_fp": {"rounds": 1691, "emitted_tokens": 7880, "tokens_per_round": 4.659964518036665, "change_pct_vs_original_fp": -0.054856241727907484, "low_acceptance_share": 0.0384387936132466, "prose": 3.27364185110664, "reasoning": 5.056930693069307, "code": 5.566757493188011, "tool": 5.122931442080378},
+        "baseline_q4": {"rounds": 1690, "emitted_tokens": 7876, "tokens_per_round": 4.660355029585799, "low_acceptance_share": 0.04319526627218935, "prose": 3.286868686868687, "reasoning": 5.019656019656019, "code": 5.62534435261708, "tool": 5.091764705882353},
+        "candidate_q4": {"rounds": 1693, "emitted_tokens": 7879, "tokens_per_round": 4.653868871825162, "change_pct_vs_baseline_q4": -0.13917733132904342, "low_acceptance_share": 0.03603071470761961, "prose": 3.254, "reasoning": 5.056930693069307, "code": 5.597260273972603, "tool": 5.1084905660377355}
+      },
+      "quantization": "Candidate FP to candidate Q4 was -0.131%; baseline FP to baseline Q4 was -0.046%. There was no positive FP gain for quantization to retain."
+    },
+    "live_ab": {
+      "method": "Ten live generations per drafter: five held-out tasks, two repetitions each, with production sampling, seven-node tree, tree temperature 2.0, q4_0 target and draft KV, and 262144 capacity.",
+      "occupied_context_range": [258946, 260816],
+      "baseline_q4": {
+        "generated_tokens": 15968,
+        "tree_rounds": 3593,
+        "traceable_tree_rounds": 3588,
+        "ngram_rounds": 11,
+        "ngram_emitted_tokens": 178,
+        "prefill_rows": 10,
+        "undrafted_rows": 1,
+        "tokens_per_tree_round": 4.3935340022296545,
+        "decode_tok_s_weighted": 84.23856155945752,
+        "decode_tok_s_median": 90.1120118062862,
+        "prompt_ms_total": 1617978.875,
+        "cold_prefill_ms_total": 1613553.432,
+        "warm_prefill_ms_total": 4425.443,
+        "decode_ms_total": 189556.89299999998,
+        "wall_s_total": 1808.864925146103,
+        "low_acceptance_share": 0.055741360089186176,
+        "systematic_coverage_rate": 0.11399108138238573,
+        "systematic_allocation_rate": 0.5312151616499443,
+        "marker_recall": 0.6875,
+        "marker_hits": "33/48"
+      },
+      "candidate_q4": {
+        "generated_tokens": 16278,
+        "tree_rounds": 3687,
+        "traceable_tree_rounds": 3677,
+        "ngram_rounds": 17,
+        "ngram_emitted_tokens": 331,
+        "prefill_rows": 10,
+        "undrafted_rows": 2,
+        "tokens_per_tree_round": 4.326081044329617,
+        "decode_tok_s_weighted": 82.71832603475465,
+        "decode_tok_s_median": 90.12305906900452,
+        "prompt_ms_total": 1618006.128,
+        "cold_prefill_ms_total": 1613495.722,
+        "warm_prefill_ms_total": 4510.406,
+        "decode_ms_total": 196788.315,
+        "wall_s_total": 1816.111257076263,
+        "low_acceptance_share": 0.05656785422899103,
+        "systematic_coverage_rate": 0.11939080772368779,
+        "systematic_allocation_rate": 0.5398422627141691,
+        "marker_recall": 0.625,
+        "marker_hits": "30/48"
+      },
+      "changes": {
+        "decode_tok_s_weighted_pct": -1.804,
+        "tokens_per_tree_round_pct": -1.535,
+        "decode_ms_total_pct": 3.817,
+        "wall_s_total_pct": 0.401,
+        "cold_prefill_ms_total_pct": -0.0036,
+        "marker_recall_hits": "33/48 -> 30/48"
+      },
+      "family_changes": {
+        "prose": {"decode_tok_s_pct": -1.7139, "tokens_per_round_pct": -1.3976, "marker_recall": "10/14 -> 10/14"},
+        "reasoning": {"decode_tok_s_pct": -5.1236, "tokens_per_round_pct": -5.047, "marker_recall": "8/10 -> 10/10"},
+        "code": {"decode_tok_s_pct": 1.1418, "tokens_per_round_pct": 0.7999, "marker_recall": "5/10 -> 2/10"},
+        "tool": {"decode_tok_s_pct": -0.1311, "tokens_per_round_pct": 0.8788, "marker_recall": "10/14 -> 8/14"}
+      },
+      "paired_speed_ratio_bootstrap_p95": [0.9588382816546931, 1.0260891005532957],
+      "outputs_differ": "None of the 10 paired generations produced identical target-token streams, and no live generation matched the frozen baseline token stream. Live speed comparisons therefore accompany different sampled text and are not a same-text speed claim.",
+      "trace_validation": {
+        "records": 20,
+        "token_hash_matches_exact_completion": true,
+        "marker_counts_match_http_content": true,
+        "displayed_text_hash_mismatches": 3,
+        "accepted_path_matches_emitted_prefix": true,
+        "allocation_lp_formula_recomputed": true,
+        "unreachable_siblings_not_counted": true
+      }
+    }
+  },
+  "diagnosis_update": {
+    "candidate_prose_behavior": "Candidate live prose systematic coverage fell from 196/1106 = 17.72% to 187/1155 = 16.19%, but allocation failures rose from 570 to 618 and tree tokens per round fell 1.398%. The targeted coverage change did not translate into deployed acceptance.",
+    "quantized_result": "The candidate Q4 was worse than deployed C3 Q4 on pooled replay, prose replay, live decode, live tree tokens per round, and marker recall. Reasoning marker recall improved; code and tool marker recall regressed. This is not a net win.",
+    "verdict": "The targeted corpus did not establish a reproducible improvement. The measured prose coverage weakness remains a valid diagnosis, but this dataset/training recipe was insufficient to fix it without allocational regression."
+  },
+  "recommendation": {
+    "decision": "Retain deployed C3 Q4_K_M. Do not deploy the candidate.",
+    "reason": "The final quantized candidate regressed the primary identical-token replay and the repeated live test, including prose throughput and code/tool marker recall. Production remains unchanged.",
+    "if_investigating_further": "Prioritize allocation/scoring and a larger failure-mined prose corpus rather than repeating broad category targeting. checkpoint-0147 remains an unresolved FP tie, but it has no quantized evidence and is not a promotion candidate."
+  },
+  "limitations": [
+    "Five synthetic held-out tasks and two live repetitions per task do not establish a broad production distribution. Marker recall is coarse.",
+    "Identical-token replay compares drafting acceptance without timing or live sampling drift. Live text differed from the frozen baseline and between drafters.",
+    "The capture replay uses 7865 anchors per case set after block-boundary exclusions and can overshoot the final captured rows by accepted drafts.",
+    "The candidate's FP validation regression was small and the checkpoint tie with 0147 was unresolved; the final Q4 result still showed regression.",
+    "No public dataset was needed. External supervision would still need to come from the frozen Marathon target, not another model.",
+    "Live A/B ran on GPU0 under the persisted 300 W power limits with dynamic clocks rather than pinned clocks, so absolute throughput depends on hardware state.",
+    "The trace server used min_p 0.05; the production frontend min_p was not separately verified.",
+    "Three of 20 live records had displayed-text hash mismatches while token ids matched exactly; the cause remains unresolved."
+  ],
+  "reproduction": {
+    "scripts": ["capture_train.py", "capture_test.py", "train_targeted.py", "export_candidate.py", "run_replay.py", "analyze_replay.py", "live_ab.py", "analyze_live.py", "analyze_final_baseline.py", "validate_final_trace.py", "validate_live_trace.py"],
+    "reports": ["reports/training-command.json", "reports/training-run.json", "reports/validation-replay.json", "reports/export-candidate.json", "reports/final-baseline.json", "reports/final-replay.json", "reports/live-ab.json", "reports/live-ab-analysis.json", "reports/live-trace-validation.json", "reports/final-trace-validation.json"],
+    "experiment_directory": "/home/deforest/AI/experiments/dflash2-targeted-20261115"
+  }
+}

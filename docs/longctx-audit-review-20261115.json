@@ -1,0 +1,59 @@
+{
+  "date": "2026-11-15",
+  "experiment": "/home/deforest/AI/experiments/longctx-audit-20261115",
+  "verdict": "The corrected final suite has 54/54 correct saved answers. This is useful narrow synthetic evidence, not validation of general long-context reliability or the user's preferred 262K operating point. Fix the scorer, reproducibility, and generator ambiguities before further evaluation.",
+  "independent_checks": {
+    "method": "Compared complete saved answers against current suite metadata, removing only list numbering/bullets and outer whitespace, rather than trusting the substring scorer.",
+    "final_composite": "54/54: nine corrected mfr-v2 outputs plus 45 baseline outputs for other categories",
+    "reported_prompt_tokens_min": 199964,
+    "reported_prompt_tokens_max": 250159,
+    "baseline_original": "50/54, not the 51/54 stated in report.md's reproduction section",
+    "corrected_mfr": "9/9",
+    "deployed_subset": "5/6 according to the saved expected answers; the remaining output uses a different rounding interpretation",
+    "interventions": "Saved summary and structured runs each leave both initially failing dev items failing and change one previously passing dev item to failing. These were ambiguous v1 tasks."
+  },
+  "findings": [
+    {
+      "priority": "P1",
+      "location": "run_suite.py:88-95",
+      "issue": "The scorer is not exact. Abstention accepts any response containing 'not stated', including one that then invents a phone number. Numeric scoring falls back to substring matching, so expected 27 accepts 99927. Multi-fact scoring ignores extra trailing lines.",
+      "impact": "No observed false positives in the 54 saved final outputs, but future regression runs can silently pass incorrect answers.",
+      "fix": "Use complete normalized answer matching or an explicit task-specific parser that rejects contradictory/extra answers; add adversarial scorer checks."
+    },
+    {
+      "priority": "P1",
+      "location": "run_suite.py:118-122; README.md reproduction commands",
+      "issue": "Results are cached only by item ID and run name. Regenerating the corrected suite then following README's --run baseline command silently reuses all 54 old baseline records, including invalid v1 mfr results. Stored results have no prompt/content hash or suite revision to prevent stale reuse.",
+      "fix": "Use immutable versioned suite manifests and hash the exact prompt, expected answer, runtime and sampling configuration. Refuse incompatible cached results. Document a fresh run name without overwriting historical evidence."
+    },
+    {
+      "priority": "P2",
+      "location": "gen_suite.py:247-268",
+      "issue": "Constraint persistence differs from its description: the rule is planted in section 7 after the fact in section 5 or 6. Whole-thousands wording and the 128450 -> 128K example do not distinguish rounding from truncation, although expected answers use round(). Random 'unrelated' project names also collide with the queried project in three current constraint items.",
+      "fix": "Place the rule before the later fact, specify the exact rounding convention, and exclude the queried project from unrelated distractors. Treat the deployed 178K/179K difference as an ambiguous-item result rather than a clean reliability comparison."
+    },
+    {
+      "priority": "P2",
+      "location": "report.md:66-68",
+      "issue": "Interventions were tested only on ambiguous v1 prompts. The report's extension to interference on clean items is unsupported. Even formerly passing v1 cases can have ambiguous bindings.",
+      "fix": "Label these intervention results inconclusive for clean tasks; test corrected prompts and a fresh holdout before drawing effectiveness conclusions."
+    },
+    {
+      "priority": "P2",
+      "location": "report.md:93-105; gen_suite.py:218-244",
+      "issue": "Broad capability and population failure-rate claims exceed suite coverage. Near-name cases give a direct-extension value to only the target; two-hop cases have only one planted target-range cost center. Repetitive filler and disjoint target namespaces allow simpler strategies than robust disambiguation/reasoning. Three items per group are not a representative independent sample of real workloads. The approximately 6.4% binomial upper bound is conditional on sampling assumptions, not a general failure-rate guarantee.",
+      "fix": "Report observed success on this suite. Add competing plausible values and independent document/task templates, reserve fresh holdouts, and evaluate near 262K occupied context with output headroom."
+    }
+  ],
+  "additional_reproduction_issues": [
+    "verify_targets requires the transformed constraint answer to occur verbatim in the dossier. All nine constraint items therefore rebuild the identical seed 20 times and receive -r20 IDs, then are accepted without a successful validation check. Replace this with category-aware semantic generator assertions.",
+    "The --intervention marker option filters correction items but does not transform their prompts; it currently cannot test a marker intervention.",
+    "gen_mfr samples nominal depths but never uses depth to place facts. Measure actual token positions rather than interpreting those sampled depths as achieved coverage."
+  ],
+  "scope_limits": [
+    "Only synthetic suite artifacts and source were examined. No private conversations read.",
+    "No GPU workloads or server requests issued; no production configuration changed and no artifacts deleted.",
+    "Replica image/flag equivalence, historical cleanup and present GPU occupancy were not independently verified from a retained runtime manifest.",
+    "Original scripts and results remain unchanged; this review does not rerun the eight-hour experiment."
+  ]
+}

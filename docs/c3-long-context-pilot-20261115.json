@@ -1,0 +1,164 @@
+{
+  "date": "2026-11-15",
+  "outcome": "Completed bounded pilot; no convincing benefit on targeted prose. Candidate not promoted and temporary weights removed.",
+  "time_budget_minutes": 30,
+  "preflight_started_utc": "2026-11-15 06:57:27 UTC",
+  "pilot_finished_utc": "2026-11-15T07:24:34.776359+00:00",
+  "generation_through_final_test_minutes": 24.203734958171843,
+  "preflight_through_final_test_minutes": 27.129605984687807,
+  "training": {
+    "source": "floating-point mini-C3/checkpoint-1638; original left untouched",
+    "synthetic_supervised_tokens": 4096,
+    "training_tasks": 1,
+    "target_context_tokens": 205077,
+    "steps_per_candidate": 72,
+    "lr": 2e-05,
+    "anchors": 32,
+    "loss": "D-PACE",
+    "block_size": 8,
+    "mode": "continued LoRA",
+    "note": "Same fixed 72-step recipe run twice from the same original C3 checkpoint because original trainer discarded the final checkpoint on its chain screening metric. Second run retained the final checkpoint for production-tree evaluation, with identical screening results. No parameter search."
+  },
+  "heldout": {
+    "prose_tokens": 2048,
+    "code_tokens": 1536,
+    "prose_prompt_tokens": 205074,
+    "code_prompt_tokens": 205076,
+    "server_context_capacity": 262144,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+    "tree_nodes": 7,
+    "tree_temperature": 2.0
+  },
+  "live_comparisons": [
+    {
+      "case": "heldout-transit",
+      "prompt_tokens": 205074,
+      "output_tokens": 2048,
+      "baseline_tok_s": 57.0996178007654,
+      "candidate_tok_s": 56.82547837919633,
+      "change_percent": -0.4801072793965244,
+      "same_output_hash": false
+    },
+    {
+      "case": "heldout-code",
+      "prompt_tokens": 205076,
+      "output_tokens": 1536,
+      "baseline_tok_s": 102.05207780689753,
+      "candidate_tok_s": 109.33207291615916,
+      "change_percent": 7.133607924217689,
+      "same_output_hash": false
+    }
+  ],
+  "identical_target_token_replay": {
+    "baseline": {
+      "chain": {
+        "tokens_per_round": 2.3455797933409874,
+        "tokens": 2043,
+        "rounds": 871
+      },
+      "rank_t200": {
+        "tokens_per_round": 2.6636245110821384,
+        "tokens": 2043,
+        "rounds": 767
+      },
+      "uniform_anchor_tree_tokens": 2.737873591376776
+    },
+    "candidate": {
+      "chain": {
+        "tokens_per_round": 2.334857142857143,
+        "tokens": 2043,
+        "rounds": 875
+      },
+      "rank_t200": {
+        "tokens_per_round": 2.6705882352941175,
+        "tokens": 2043,
+        "rounds": 765
+      },
+      "uniform_anchor_tree_tokens": 2.737873591376776
+    },
+    "tree_relative_change_percent": 0.2614379084967089
+  },
+  "screening": {
+    "initial_chain_length": 2.453125,
+    "final_chain_length": 2.390625,
+    "meaning": "64-anchor floating-point screening proxy, not live speed or full production-tree acceptance."
+  },
+  "interpretation": [
+    "Quantized tree replay saved two rounds over 2043 identical target tokens: 767 versus 765, +0.26% tokens/round. Mean tree length across all 2041 eligible anchors was identical. This is effectively flat.",
+    "Live prose was unchanged/slightly slower. Live code was 7.1% faster but sampled outputs differed; one trial cannot establish a repeatable speedup.",
+    "This proves the bounded collect-capture-continue-train-quantize-evaluate workflow is feasible with existing tools, not that 4096 tokens from one task are sufficient for useful generalization.",
+    "No claim of comprehensive quality validation. Next useful trial would require more diverse hard segments and stronger held-out coverage, not just more epochs on this sample."
+  ],
+  "limitations": [
+    "One training task and one held-out prose task; category-targeted rather than per-token failure-mined training. No representative easy replay examples in the training mixture; code served as a regression probe only.",
+    "Synthetic randomized archive supplies context depth; it is not a real conversation workload.",
+    "Captures processed the full 205K prefix before retaining local feature windows with absolute positions. Features came from the existing q4_0 capture runtime.",
+    "Capture wrapper initially applied a greedy rank-one mismatch threshold to sampled outputs. Report-only recheck used the existing sampled-data tolerance; every supervised token was within teacher replay top-16. No feature recapture or content substitution.",
+    "Live baseline held-out prompt reused the synthetic prefix; candidate began from cold prefill. Reported speed excludes prefill, but prefill shape and different drafts can change sampled output through rounding. Paired replay controls the target token sequence."
+  ],
+  "export": {
+    "checkpoint": "/home/deforest/AI/models/c3-long-pilot-20261115/train-fixed/checkpoint-0072",
+    "mode": "lora",
+    "base_gguf": "/home/deforest/AI/models/gguf/qwen3.8-27b-dflash2/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+    "changed_tensors": [
+      "fc.weight",
+      "blk.0.attn_k.weight",
+      "blk.0.attn_output.weight",
+      "blk.0.attn_q.weight",
+      "blk.0.attn_v.weight",
+      "blk.0.ffn_down.weight",
+      "blk.0.ffn_gate.weight",
+      "blk.0.ffn_up.weight",
+      "blk.1.attn_k.weight",
+      "blk.1.attn_output.weight",
+      "blk.1.attn_q.weight",
+      "blk.1.attn_v.weight",
+      "blk.1.ffn_down.weight",
+      "blk.1.ffn_gate.weight",
+      "blk.1.ffn_up.weight",
+      "blk.2.attn_k.weight",
+      "blk.2.attn_output.weight",
+      "blk.2.attn_q.weight",
+      "blk.2.attn_v.weight",
+      "blk.2.ffn_down.weight",
+      "blk.2.ffn_gate.weight",
+      "blk.2.ffn_up.weight",
+      "blk.3.attn_k.weight",
+      "blk.3.attn_output.weight",
+      "blk.3.attn_q.weight",
+      "blk.3.attn_v.weight",
+      "blk.3.ffn_down.weight",
+      "blk.3.ffn_gate.weight",
+      "blk.3.ffn_up.weight",
+      "blk.4.attn_k.weight",
+      "blk.4.attn_output.weight",
+      "blk.4.attn_q.weight",
+      "blk.4.attn_v.weight",
+      "blk.4.ffn_down.weight",
+      "blk.4.ffn_gate.weight",
+      "blk.4.ffn_up.weight"
+    ],
+    "other_tensor_bytes_identical": true,
+    "sha256": "e1073b73245b9a35a26345904f9474b2cd5c3b0d5aa3be38b2997b2a5dfe63fe",
+    "bytes": 1143006752
+  },
+  "runtime": {
+    "image": "sha256:89c1e303977f17d3ebcfa4b98679a984930d2c9993a4d91c87313147238e458c",
+    "gpu": 3,
+    "power_policy": "Existing 300 W per-card policy and clock settings unchanged",
+    "gpu0": "Used for training-case feature capture, training and replay",
+    "gpu3": "Used for synthetic generation, held-out feature capture and live evaluation"
+  },
+  "cleanup": {
+    "production_changed": false,
+    "private_data_used": false,
+    "gpu0_and_gpu3_compute_jobs_released": true,
+    "benchmark_container_removed": true,
+    "feature_tensors_removed": true,
+    "candidate_and_adapter_removed": true,
+    "retained": "Compact report, scripts, synthetic token streams and scalar evaluation evidence only."
+  },
+  "reproduction_directory": "/home/deforest/AI/experiments/c3-long-pilot-20261115"
+}

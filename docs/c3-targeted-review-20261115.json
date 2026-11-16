@@ -1,0 +1,49 @@
+{
+  "date": "2026-11-15",
+  "scope": "Read-only audit of synthetic experiment reports, diagnosis/runtime instrumentation, training and replay/live evaluation scripts; CPU recomputation of final replay and candidate SHA256. No private conversations read, GPU workloads started, deployment changes made, or cleanup performed.",
+  "verdict": "Retain deployed C3. This pilot did not demonstrate an improvement, but does not establish that accurately targeted training cannot help. The diagnosis-to-training link needs correction before another training run.",
+  "findings": [
+    {
+      "priority": "P1",
+      "location": "docs/c3-targeted-long-context-20261115.json:49",
+      "issue": "Sampled target rank is incorrectly used to distinguish systematic/trainable from intrinsic/untrainable failures. A non-top-1 target token can still expose missing draft probability mass; a single top-1 mismatch does not establish a systematic weakness.",
+      "action": "Retain rank as a descriptive field. Establish recurring distributional mismatch at matched prefixes, with target support/probabilities and draft coverage or probability mass, before assigning trainability labels."
+    },
+    {
+      "priority": "P1",
+      "location": "docs/c3-targeted-long-context-20261115.json:91",
+      "issue": "The confirmation did not validate the proposed hard-example families: rare-name coverage failures were 16.19%, administrative prose 15.17%, and matched successful prose 18.34%. Failure-token frequencies without successful-token exposure denominators do not establish new-word/rare-name risk. The training experiment is broad prose adaptation rather than a demonstrated targeted repair.",
+      "action": "Find a reproducible enriched failure category using matched controls and exposure-normalized rates. Separate discovery and confirmation prompts before generating its training corpus."
+    },
+    {
+      "priority": "P2",
+      "location": "docs/c3-targeted-long-context-20261115.json:245",
+      "issue": "The live throughput and marker differences are observations, not demonstrated regressions. All paired outputs differed, the reported speed-ratio interval includes 1, and live_ab.py runs the entire baseline block before the candidate block. Marker substring counts are a coarse check with different sampled outputs.",
+      "action": "Describe the result as no demonstrated benefit. For a stronger live conclusion, counterbalance model order, hold sampling and hardware conditions fixed, increase independent tasks, and use task-aware quality grading."
+    },
+    {
+      "priority": "P2",
+      "location": "/home/deforest/AI/experiments/dflash2-targeted-20261115/analyze_replay.py:59",
+      "issue": "Per-case accept_hist_0to7 counts emitted token counts 0 through 7, although emitted equals accepted plus 1. It shifts all bins and omits fully accepted seven-draft rounds that emit eight tokens. The global histogram and pooled tokens/round calculation do not use this faulty expression.",
+      "action": "Count emitted.count(value + 1) for accepted bins 0 through 7, regenerate derived per-case histograms, and verify their sum equals rounds."
+    }
+  ],
+  "independent_checks": {
+    "candidate_sha256": "6d0e9236580953b585277ff4258b17f2600a5f986fedb9065a8a24d73479102c",
+    "final_replay_recomputed": {
+      "original_fp": {"tokens": 7875, "rounds": 1689, "tokens_per_round": 4.662522202486678},
+      "candidate_fp": {"tokens": 7880, "rounds": 1691, "tokens_per_round": 4.659964518036665},
+      "baseline_q4": {"tokens": 7876, "rounds": 1690, "tokens_per_round": 4.660355029585799},
+      "candidate_q4": {"tokens": 7879, "rounds": 1693, "tokens_per_round": 4.653868871825162}
+    },
+    "replay_boundary_limit": "Each variant replays the same reference streams but stops at different valid boundaries: 20-25 of 7900 supervised tokens remain unscored. The tiny reported percentage is specific to that convention; use explicit common endpoint/tail handling for future small-effect claims.",
+    "long_context": "Final replay case metadata confirms prefixes of 258384-258851 tokens and endpoints of 258974-260816 tokens, satisfying the requested long-context regime.",
+    "cleanup_policy": "No exact-path deletion approval requirement was found in the current applicable ancestor AGENTS.md files examined for the repository and targeted experiment. This does not establish what instructions were present during the original run. Cleanup artifacts were deliberately preserved for review."
+  },
+  "limits": [
+    "No training or live GPU benchmarks rerun.",
+    "Production deployment state and current GPU/process occupancy not independently verified.",
+    "The 36-tensor export claim was not independently byte-compared; candidate file hash was verified.",
+    "Existing reports and experiment scripts were not modified."
+  ]
+}

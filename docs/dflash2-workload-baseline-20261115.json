@@ -1,0 +1,280 @@
+{
+  "schema": 1,
+  "date": "2026-11-15",
+  "scope": "Workload-wide diagnosis of the deployed Marathon C3 DFlash2 drafter across 12 lanes at genuinely occupied 257K+ context. Discovery and validation only; final-test split remains sealed (no outputs). Fresh synthetic archives and prompts; no private conversations, snapshots, production traffic, user data, GPU jobs or runtime changes in this stage.",
+  "verdict": "No trainable weakness confirmed at this stage. Allocation (target present in the drafter raw top-16 but below the seven-node tree cutoff) is the dominant failure mechanism across every lane. Candidate coverage (target absent from raw top-16) is concentrated in prose, summarization, reasoning, planning and agentic coding. Selector exclusion is structurally empty and verification mismatch is zero. Round cost is flat with acceptance, so acceptance is the only throughput lever. Offline replay finds 501/3539 allocation failures (14.2%) were the unique highest-scoring unselected candidate and would be admitted by an eight-node tree, projecting +2.55% tree tokens/round across all lanes; live verification cost is not yet measured. Recommendation: retain deployed C3, do not train yet; next stage is a bounded live tree-budget experiment.",
+  "benchmark": {
+    "root": "/home/deforest/AI/experiments/dflash2-workload-benchmark-20261115",
+    "version": "mp-dflash2-workloads-v1-20261115",
+    "lanes": ["prose", "reasoning_math", "code", "tool", "structured_output", "dialogue", "translation", "summarization", "retrieval_qa", "planning", "agentic_coding", "long_context_recall"],
+    "tasks_per_split": 15,
+    "splits": {
+      "discovery": {"archive_tokens": 257128, "archive_sha256": "0bd138536ae8888bbeec3304610902dabaf57905bec3d2ea658602a808c38b61", "captured": true},
+      "validation": {"archive_tokens": 257133, "archive_sha256": "c6e4a4c978cc941510a92297a7ccfe4ad003b57635ba453d0b4d7220a95e4be4", "captured": true},
+      "final_test": {"archive_tokens": 257194, "archive_sha256": "802ea4c361d08bf6d38d7b3dd2e5f01e46b70f853e63598979978cc48d9ed5b5", "sealed": true, "tasks": 15}
+    },
+    "occupied_context": {"prompt_tokens_range": [257166, 257557], "occupied_tokens_range": [257221, 258724], "server_context_capacity": 262144, "minimum_headroom_tokens": 3420},
+    "provenance": "generate.py builds fresh fictional dossiers (Northstar Depot, Orchid Vale, Kestrel Ridge) and Marathon-format prompts; each split uses a separate archive and whole task family. No downloaded datasets and no user files.",
+    "task_design": {"families": "whole task/session families assigned before augmentation", "thinking": "reasoning and tool tasks use visible model-generated thinking where supported", "tools": "Marathon XML tool-call syntax plus apply_patch envelopes", "multi_turn": "dialogue and tool-multiturn cases use assistant tool calls and tool responses", "markers": "fictional flight markers and structured-output parse checks", "generation_targets": {"discovery": 9931, "validation": 9934}},
+    "source_rules": {"private_conversations": false, "production_snapshots": false, "production_traffic": false, "private_user_data": false, "downloaded_datasets": false, "public_data": "none used in this stage"},
+    "final_test": "Kestrel Ridge archive and task family sealed; no outputs, no capture, no scoring."
+  },
+  "runtime_verified": {
+    "target": "/home/deforest/AI/models/gguf/swift15-heretic-ara-merge/Swift-1.5-Qwen3.8-27B-Heretic-ARA-Merge-IQ4_XS.gguf",
+    "target_sha256": "1d86cf30fb3702c444293289c2f904e692693c825a2b1f7fd4df0dc2959425d0",
+    "deployed_drafter_sha256": "af42cdeaac664eaa8e1c85e7b1f5f5e264cf1b078b42c6b63ee11eda4ffe443b",
+    "production_image": "sha256:7a4d81d6ff62551b57a34bf02781cfad802554c261829a6efdff5274a13d1a78",
+    "production_image_label": "1.0.0-marathon-tree-mediaspec",
+    "capture_build": "/home/deforest/AI/backends/marathon-tree-20261113/v1/build-tree/bin/llama-server",
+    "tree_nodes": 7,
+    "tree_temperature": 2.0,
+    "selector_top_k": 16,
+    "drop_block_rows": 7,
+    "target_kv": "q4_0",
+    "draft_kv": "q4_0",
+    "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.05},
+    "unknown": "production frontend min_p was not separately verified; the trace server used 0.05."
+  },
+  "implementation_definitions": {
+    "source": "/home/deforest/AI/backends/marathon-tree-20261113/v1/common/speculative.cpp",
+    "verification_source": "/home/deforest/AI/backends/marathon-tree-20261113/v1/tools/server/server-context.cpp",
+    "ranking": "Target absent from the drafter's raw top-16 candidates at the reached prefix (ggml_top_k over raw drafter logits, selector_top_k=16).",
+    "selector": "Structurally empty in the deployed path: every raw top-16 token enters the lattice. build_dflash2_selector does not construct an additional candidate subset that can exclude a qualifying token.",
+    "allocation": "Target present in raw top-16 but its tree log-probability is below the minimum selected-node log-probability. The deployed tree is best-first over selector log-probabilities after dividing scores by tree_temp=2.0.",
+    "allocation_graph_path": "The selected tree is a tree of paths, not an independent top-seven flattening. The tree builder repeatedly adds the highest log-probability descendant of an already selected ancestor. Therefore a target token can be the drafter's own top raw candidate at a reached prefix and still be absent because the graph path selected a different ancestor subtree. Allocation failures are the deployed graph tree excluding candidates the drafter scored highly; whether that exclusion is intrinsic sampling uncertainty or a learnable scoring misalignment is unresolved.",
+    "tree_budget": "budget=min(tree_nodes=7, depth_max, 15). Seven nodes per round. One extra node is within the verification row limit.",
+    "verification_mismatch": "Failure classification expects the target correction to be the last target token of the round and the accepted path to match the emitted draft prefix. Zero mismatches observed.",
+    "downstream": "Failures are counted at the first divergence on the reached target path. Unreachable downstream siblings are not independent failures.",
+    "execution": "No acceptance-independent execution slowdown observed; round cost is flat with acceptance and matched low/high pairs."
+  },
+  "diagnostic_method": {
+    "round_kinds": "Trace separates prefill rows, DFlash tree rounds, ngram rounds and undrafted steps. Tree rounds are the only rounds used for drafter failure classification.",
+    "opportunity": "One reached DFlash tree round that was not draft-truncated. The 18 target-EOG rows remain in the reached-round denominator but are excluded from the failure numerator; one first divergence is counted per reached round.",
+    "first_failure": "The target token at the actual sampled target path that is not represented by the tree at the current reached prefix. Accepted path tokens are matched before classification.",
+    "manual_check": "A manually inspected synthetic trace was checked for flattened token IDs, accepted path, last target correction, recomputed allocation log-probabilities, candidate classification and unreachable-sibling handling. Assertions passed.",
+    "cross_check": "Suite analysis and trace validation independently recomputed tree rounds 5166, traceable 5150, failures 4640, emitted 19683, coverage 1101, allocation 3539 and mismatch 0. Both read the same single capture; numeric agreement is consistency, not a second independent capture.",
+    "validated_counts": {"prefill": 30, "tree": 5166, "tree_traceable": 5150, "tree_draft_truncated": 16, "tree_eog_false_failure": 18, "ngram": 6, "undrafted": 3},
+    "metric_guard": "Metric names such as acceptance are derived from token-level trace checks, not trusted by name. Verification mismatch is checked independently.",
+    "denominators": "Failure rates use 5150 traceable reached rounds, including 18 non-failure EOG rows. Throughput uses all 5166 tree rounds, including 16 draft-truncated rounds. Acceptance-tail bins use the same 5150 traceable rounds. Draft-truncated rounds are excluded from failure and tail classification but included in throughput."
+  },
+  "capture": {
+    "trace_sha256": "7be9fbdf442cac4d6f26f4ebd57eea7619faf855a91c327ad84cd519483dcce5",
+    "suite_index_sha256": "0b63758b37395d76bc30573db57a66c8d940b0f9f42ba2c9e9365a1e244d4fde",
+    "suite_analysis_sha256": "5a75cc141c66a8984835293985fd64446bb091be7fcfe9e6cd51f8f486bd50e6",
+    "extended_evidence_sha256": "f7b481453d75e22f596aaed1c4eabfcd4177326f51341d262f56e6018c6425ea",
+    "trace_validation_sha256": "75517a3f937db4a348ff6417ba009a5668f0aee6b9bedf85eb6eae96733e61b8",
+    "allocation_replay_sha256": "a1ddb801efb901165d2c70c45137397d1cf7b32bf098399f0d27c70a06fba90d",
+    "allocation_replay_script_sha256": "029fd2f6f8bb0a890294d14b51d45a6bf51b49fa81f109faac6746ba54cf3450",
+    "sampling_seed": 92000,
+    "generation_targets": {"discovery": 9931, "validation": 9934},
+    "round_kinds": {"prefill": 30, "tree": 5166, "tree_traceable": 5150, "tree_draft_truncated": 16, "tree_eog_false_failure": 18, "ngram": 6, "ngram_emitted": 149, "undrafted": 3}
+  },
+  "failures": {
+    "combined": {"opportunities": 5150, "failures": 4640, "failure_rate": 0.900971, "coverage": 1101, "coverage_rate": 0.213786, "allocation": 3539, "allocation_rate": 0.687184, "selector_exclusion": 0, "verification_mismatch": 0},
+    "discovery": {"tree_rounds": 2508, "traceable_tree_rounds": 2504, "draft_truncated_tree_rounds": 4, "opportunities": 2504, "failures": 2223, "coverage": 498, "allocation": 1725, "tree_emitted_tokens": 9770, "traceable_emitted_tokens": 9751, "tokens_per_tree_round": 3.895534, "tokens_per_traceable_tree_round": 3.894169},
+    "validation": {"tree_rounds": 2658, "traceable_tree_rounds": 2646, "draft_truncated_tree_rounds": 12, "opportunities": 2646, "failures": 2417, "coverage": 603, "allocation": 1814, "tree_emitted_tokens": 9913, "traceable_emitted_tokens": 9880, "tokens_per_tree_round": 3.729496, "tokens_per_traceable_tree_round": 3.733938},
+    "allocation_gap_lp": {"min": -6.2866, "p10": -2.2361, "p50": -0.8022, "p90": -0.1183, "max": -0.00047, "within_minus_0_1": 306, "within_minus_0_01": 35},
+    "allocation_candidate_rank": {"rank_0": 1006, "note": "Target was present in raw top-16 for every allocation failure, so candidate rank 0 means the drafter's own top token was a target token that the graph path did not select."},
+    "joint_target_and_candidate_ranks": {"combined": {"coverage_target_sample_rank_0": 692, "coverage_target_sample_rank_gt_0": 409, "allocation_target_rank_0_candidate_rank_0": 932, "allocation_target_rank_0_candidate_rank_gt_0": 1730, "allocation_target_rank_gt_0_candidate_rank_0": 74, "allocation_target_rank_gt_0_candidate_rank_gt_0": 803}}
+  },
+  "interpretation": {
+    "target_rank": "Target sample rank is descriptive only and is never used to label a failure learnable or unavoidable.",
+    "allocation_mechanics": "The seven-node best-first tree walks one selected path per round. A token that is the drafter's top candidate at a reached prefix can still be absent from the drafted tree when the graph-selected ancestor path differs. Allocation failures are the deployed graph tree excluding candidates the drafter scored highly; whether that exclusion is intrinsic sampling uncertainty or a learnable scoring misalignment is unresolved at this stage.",
+    "coverage_mechanics": "Coverage failures mean the target token is outside the drafter's raw top-16 at the reached prefix. Rare tokens account for most coverage failures. Training the draft stack can change those logits, so coverage is not proven impossible to improve.",
+    "selector": "Selector exclusion is structurally empty: every raw top-16 token enters the lattice, and tree construction scores all of them.",
+    "execution": "No acceptance-independent execution slowdown was observed. Matched low/high acceptance pairs show total ratio p50 0.99963 and decode ratio p50 0.99966."
+  },
+  "per_lane": {
+    "prose": {"tasks": 4, "tree_rounds": 1396, "traceable_tree_rounds": 1392, "draft_truncated_tree_rounds": 4, "tree_emitted_tokens": 4398, "traceable_emitted_tokens": 4385, "tokens_per_tree_round": 3.150430, "tokens_per_traceable_tree_round": 3.150144, "failure": {"p": 0.981322, "lo": 0.972772, "hi": 0.987222}, "coverage": {"failures": 385, "p": 0.276580, "lo": 0.253721, "hi": 0.300670}, "allocation": {"failures": 981, "p": 0.704741, "lo": 0.680241, "hi": 0.728115}, "decode_tok_s_weighted": 61.528164, "decode_total_s": 71.561, "draft_ms_p50": 4.644, "verify_ms_p50": 43.771, "total_ms_p50": 50.121, "tail": {"emitted_1": 0.114943, "emitted_2_3": 0.547414, "emitted_4_plus": 0.337644, "full_accept": 0.017241}, "support": "strong"},
+    "summarization": {"tasks": 2, "tree_rounds": 637, "traceable_tree_rounds": 633, "draft_truncated_tree_rounds": 4, "tree_emitted_tokens": 2046, "traceable_emitted_tokens": 2036, "tokens_per_tree_round": 3.211931, "tokens_per_traceable_tree_round": 3.216430, "failure": {"p": 0.981043, "lo": 0.967159, "hi": 0.989123}, "coverage": {"failures": 173, "p": 0.273302, "lo": 0.240029, "hi": 0.309309}, "allocation": {"failures": 448, "p": 0.707741, "lo": 0.671142, "hi": 0.741833}, "decode_tok_s_weighted": 62.806927, "decode_total_s": 32.608, "draft_ms_p50": 4.642, "verify_ms_p50": 43.752, "total_ms_p50": 50.118, "tail": {"emitted_1": 0.091627, "emitted_2_3": 0.562401, "emitted_4_plus": 0.345972, "full_accept": 0.018957}, "support": "strong"},
+    "agentic_coding": {"tasks": 2, "tree_rounds": 167, "traceable_tree_rounds": 167, "draft_truncated_tree_rounds": 0, "tree_emitted_tokens": 580, "traceable_emitted_tokens": 580, "tokens_per_tree_round": 3.473054, "tokens_per_traceable_tree_round": 3.473054, "failure": {"p": 0.970060, "lo": 0.931835, "hi": 0.987145}, "coverage": {"failures": 37, "p": 0.221557, "lo": 0.165229, "hi": 0.290407}, "allocation": {"failures": 125, "p": 0.748503, "lo": 0.677614, "hi": 0.808216}, "decode_tok_s_weighted": 68.006822, "decode_total_s": 8.558, "draft_ms_p50": 4.644, "verify_ms_p50": 43.747, "total_ms_p50": 50.101, "tail": {"emitted_1": 0.119760, "emitted_2_3": 0.473054, "emitted_4_plus": 0.407186, "full_accept": 0.017964}, "support": "moderate"},
+    "retrieval_qa": {"tasks": 2, "tree_rounds": 132, "traceable_tree_rounds": 132, "draft_truncated_tree_rounds": 0, "tree_emitted_tokens": 501, "traceable_emitted_tokens": 501, "tokens_per_tree_round": 3.795455, "tokens_per_traceable_tree_round": 3.795455, "failure": {"p": 0.916667, "lo": 0.856934, "hi": 0.952833}, "coverage": {"failures": 26, "p": 0.196970, "lo": 0.138111, "hi": 0.272968}, "allocation": {"failures": 95, "p": 0.719697, "lo": 0.637697, "hi": 0.789271}, "decode_tok_s_weighted": 74.208820, "decode_total_s": 6.778, "draft_ms_p50": 4.662, "verify_ms_p50": 43.734, "total_ms_p50": 50.134, "tail": {"emitted_1": 0.113636, "emitted_2_3": 0.378788, "emitted_4_plus": 0.507576, "full_accept": 0.068182}, "support": "moderate"},
+    "reasoning_math": {"tasks": 4, "tree_rounds": 1571, "traceable_tree_rounds": 1567, "draft_truncated_tree_rounds": 4, "tree_emitted_tokens": 6051, "traceable_emitted_tokens": 6033, "tokens_per_tree_round": 3.851687, "tokens_per_traceable_tree_round": 3.850032, "failure": {"p": 0.910657, "lo": 0.895512, "hi": 0.923794}, "coverage": {"failures": 330, "p": 0.210593, "lo": 0.191125, "hi": 0.231477}, "allocation": {"failures": 1097, "p": 0.700064, "lo": 0.676909, "hi": 0.722241}, "decode_tok_s_weighted": 73.966371, "decode_total_s": 83.065, "draft_ms_p50": 4.650, "verify_ms_p50": 43.760, "total_ms_p50": 50.148, "tail": {"emitted_1": 0.089343, "emitted_2_3": 0.440970, "emitted_4_plus": 0.469687, "full_accept": 0.089343}, "support": "strong"},
+    "planning": {"tasks": 2, "tree_rounds": 465, "traceable_tree_rounds": 463, "draft_truncated_tree_rounds": 2, "tree_emitted_tokens": 1876, "traceable_emitted_tokens": 1872, "tokens_per_tree_round": 4.034409, "tokens_per_traceable_tree_round": 4.043197, "failure": {"p": 0.857451, "lo": 0.822659, "hi": 0.886361}, "coverage": {"failures": 85, "p": 0.183585, "lo": 0.150973, "hi": 0.221405}, "allocation": {"failures": 312, "p": 0.673866, "lo": 0.629885, "hi": 0.714986}, "decode_tok_s_weighted": 79.055377, "decode_total_s": 23.756, "draft_ms_p50": 4.635, "verify_ms_p50": 43.709, "total_ms_p50": 50.008, "tail": {"emitted_1": 0.079914, "emitted_2_3": 0.431965, "emitted_4_plus": 0.488121, "full_accept": 0.140389}, "support": "strong"},
+    "long_context_recall": {"tasks": 2, "tree_rounds": 86, "traceable_tree_rounds": 86, "draft_truncated_tree_rounds": 0, "tree_emitted_tokens": 375, "traceable_emitted_tokens": 375, "tokens_per_tree_round": 4.360465, "tokens_per_traceable_tree_round": 4.360465, "failure": {"p": 0.802326, "lo": 0.706039, "hi": 0.872758}, "coverage": {"failures": 17, "p": 0.197674, "lo": 0.127242, "hi": 0.293961}, "allocation": {"failures": 52, "p": 0.604651, "lo": 0.498975, "hi": 0.701377}, "decode_tok_s_weighted": 85.176316, "decode_total_s": 4.426, "draft_ms_p50": 4.657, "verify_ms_p50": 43.662, "total_ms_p50": 50.103, "tail": {"emitted_1": 0.093023, "emitted_2_3": 0.372093, "emitted_4_plus": 0.534884, "full_accept": 0.174419}, "support": "small"},
+    "dialogue": {"tasks": 2, "tree_rounds": 38, "traceable_tree_rounds": 38, "draft_truncated_tree_rounds": 0, "tree_emitted_tokens": 180, "traceable_emitted_tokens": 180, "tokens_per_tree_round": 4.736842, "tokens_per_traceable_tree_round": 4.736842, "failure": {"p": 0.736842, "lo": 0.579908, "hi": 0.850285}, "coverage": {"failures": 0, "p": 0.0, "lo": 0.0, "hi": 0.091813}, "allocation": {"failures": 28, "p": 0.736842, "lo": 0.579908, "hi": 0.850285}, "decode_tok_s_weighted": 93.017741, "decode_total_s": 1.957, "draft_ms_p50": 4.669, "verify_ms_p50": 43.728, "total_ms_p50": 50.081, "tail": {"emitted_1": 0.0, "emitted_2_3": 0.289474, "emitted_4_plus": 0.710526, "full_accept": 0.210526}, "support": "small"},
+    "code": {"tasks": 2, "tree_rounds": 573, "traceable_tree_rounds": 571, "draft_truncated_tree_rounds": 2, "tree_emitted_tokens": 3008, "traceable_emitted_tokens": 3001, "tokens_per_tree_round": 5.249564, "tokens_per_traceable_tree_round": 5.255692, "failure": {"p": 0.723292, "lo": 0.685198, "hi": 0.758403}, "coverage": {"failures": 43, "p": 0.075306, "lo": 0.056386, "hi": 0.099903}, "allocation": {"failures": 370, "p": 0.647986, "lo": 0.607941, "hi": 0.686053}, "decode_tok_s_weighted": 101.075660, "decode_total_s": 30.393, "draft_ms_p50": 4.644, "verify_ms_p50": 43.725, "total_ms_p50": 50.067, "tail": {"emitted_1": 0.038529, "emitted_2_3": 0.245184, "emitted_4_plus": 0.716287, "full_accept": 0.276708}, "support": "strong"},
+    "tool": {"tasks": 2, "tree_rounds": 24, "traceable_tree_rounds": 24, "draft_truncated_tree_rounds": 0, "tree_emitted_tokens": 137, "traceable_emitted_tokens": 137, "tokens_per_tree_round": 5.708333, "tokens_per_traceable_tree_round": 5.708333, "failure": {"p": 0.666667, "lo": 0.467060, "hi": 0.820280}, "coverage": {"failures": 4, "p": 0.166667, "lo": 0.066786, "hi": 0.358535}, "allocation": {"failures": 12, "p": 0.5, "lo": 0.314271, "hi": 0.685729}, "decode_tok_s_weighted": 108.566608, "decode_total_s": 1.280, "draft_ms_p50": 4.667, "verify_ms_p50": 43.772, "total_ms_p50": 50.222, "tail": {"emitted_1": 0.0, "emitted_2_3": 0.125, "emitted_4_plus": 0.875, "full_accept": 0.291667}, "support": "small"},
+    "translation": {"tasks": 2, "tree_rounds": 12, "traceable_tree_rounds": 12, "draft_truncated_tree_rounds": 0, "tree_emitted_tokens": 68, "traceable_emitted_tokens": 68, "tokens_per_tree_round": 5.666667, "tokens_per_traceable_tree_round": 5.666667, "failure": {"p": 0.666667, "lo": 0.390618, "hi": 0.861882}, "coverage": {"failures": 0, "p": 0.0, "lo": 0.0, "hi": 0.242501}, "allocation": {"failures": 8, "p": 0.666667, "lo": 0.390618, "hi": 0.861882}, "decode_tok_s_weighted": 110.739168, "decode_total_s": 0.632, "draft_ms_p50": 4.640, "verify_ms_p50": 43.649, "total_ms_p50": 50.052, "tail": {"emitted_1": 0.0, "emitted_2_3": 0.166667, "emitted_4_plus": 0.833333, "full_accept": 0.166667}, "support": "small"},
+    "structured_output": {"tasks": 4, "tree_rounds": 65, "traceable_tree_rounds": 65, "draft_truncated_tree_rounds": 0, "tree_emitted_tokens": 463, "traceable_emitted_tokens": 463, "tokens_per_tree_round": 7.123077, "tokens_per_traceable_tree_round": 7.123077, "failure": {"p": 0.184615, "lo": 0.108888, "hi": 0.295542}, "coverage": {"failures": 1, "p": 0.015385, "lo": 0.002721, "hi": 0.082135}, "allocation": {"failures": 11, "p": 0.169231, "lo": 0.097211, "hi": 0.278166}, "decode_tok_s_weighted": 138.432060, "decode_total_s": 3.373, "draft_ms_p50": 4.636, "verify_ms_p50": 43.653, "total_ms_p50": 49.944, "tail": {"emitted_1": 0.030769, "emitted_2_3": 0.015385, "emitted_4_plus": 0.953846, "full_accept": 0.753846}, "support": "small"}
+  },
+  "support_definition": {
+    "strong": "at least 2 tasks and 300 traceable rounds; still synthetic",
+    "moderate": "2 tasks and 100-299 traceable rounds; wide intervals",
+    "small": "fewer than 100 traceable rounds or a very restricted output lane; do not generalize"
+  },
+  "matched_controls": {
+    "opportunity_frequency_quartiles": {
+      "cut_frequency": [2, 5, 20],
+      "combined": {
+        "rare_q1": {"exposure": 1758, "failure": 0.945961, "coverage": 0.324232, "allocation": 0.621729},
+        "q2": {"exposure": 985, "failure": 0.909645, "coverage": 0.243655, "allocation": 0.665990},
+        "q3": {"exposure": 1130, "failure": 0.900885, "coverage": 0.178761, "allocation": 0.722124},
+        "common_q4": {"exposure": 1277, "failure": 0.832420, "coverage": 0.069695, "allocation": 0.762725}
+      },
+      "prose": {
+        "rare_q1": {"exposure": 513, "failure": 0.992203, "coverage": 0.393762, "allocation": 0.598441},
+        "q2": {"exposure": 259, "failure": 0.980695, "coverage": 0.305019, "allocation": 0.675676},
+        "q3": {"exposure": 296, "failure": 0.983108, "coverage": 0.260135, "allocation": 0.722973},
+        "common_q4": {"exposure": 324, "failure": 0.962963, "coverage": 0.083333, "allocation": 0.879630}
+      }
+    },
+    "token_classes": {
+      "prose": {"spaced_word": {"n": 929, "coverage": 0.307858, "allocation": 0.684607}, "subword": {"n": 59, "coverage": 0.525424, "allocation": 0.457627}, "capitalized_word": {"n": 206, "coverage": 0.266990, "allocation": 0.708738}, "identifier_or_number": {"n": 46, "coverage": 0.0, "allocation": 0.826087}, "punctuation_or_other": {"n": 110, "coverage": 0.081818, "allocation": 0.890909}, "connective": {"n": 22, "coverage": 0.090909, "allocation": 0.909091}, "uncertainty": {"n": 5, "coverage": 0.2, "allocation": 0.8}, "whitespace": {"n": 15, "coverage": 0.066667, "allocation": 0.8}},
+      "code": {"spaced_word": {"n": 214, "coverage": 0.098131, "allocation": 0.766355}, "subword": {"n": 40, "coverage": 0.2, "allocation": 0.5}, "punctuation_or_other": {"n": 171, "coverage": 0.029240, "allocation": 0.637427}, "whitespace": {"n": 73, "coverage": 0.0, "allocation": 0.397260}, "capitalized_word": {"n": 54, "coverage": 0.166667, "allocation": 0.611111}},
+      "reasoning_math": {"spaced_word": {"n": 689, "coverage": 0.294630, "allocation": 0.682148}, "subword": {"n": 115, "coverage": 0.365217, "allocation": 0.556522}, "identifier_or_number": {"n": 152, "coverage": 0.032895, "allocation": 0.743421}, "punctuation_or_other": {"n": 341, "coverage": 0.073314, "allocation": 0.788856}, "connective": {"n": 15, "coverage": 0.066667, "allocation": 0.866667}, "uncertainty": {"n": 10, "coverage": 0.2, "allocation": 0.6}},
+      "structured_output": {"identifier_or_number": {"n": 13, "coverage": 0.0, "allocation": 0.307692}, "punctuation_or_other": {"n": 19, "coverage": 0.0, "allocation": 0.052632}, "whitespace": {"n": 19, "coverage": 0.0, "allocation": 0.105263}, "subword": {"n": 8, "coverage": 0.125, "allocation": 0.25}}
+    },
+    "output_position": {
+      "prose": {"bins": [{"range": "0-63", "n": 79, "failure": 1.0}, {"range": "64-127", "n": 81, "failure": 1.0}, {"range": "128-255", "n": 172, "failure": 0.976744}, {"range": "256-511", "n": 337, "failure": 0.988131}, {"range": "512-1023", "n": 420, "failure": 0.978571}, {"range": "1024+", "n": 303, "failure": 0.970297}], "conclusion": "Flat failure across output position; no prose context-depth trend inside 257K-259K occupied contexts."},
+      "code": {"bins": [{"range": "0-63", "n": 39, "failure": 1.0}, {"range": "64-127", "n": 29, "failure": 0.965517}, {"range": "128-255", "n": 50, "failure": 0.78}, {"range": "256-511", "n": 97, "failure": 0.721649}, {"range": "512-1023", "n": 166, "failure": 0.632530}, {"range": "1024+", "n": 190, "failure": 0.694737}], "conclusion": "Code acceptance improves after the first 64 output tokens, unlike prose."},
+      "reasoning_math": {"failure_range_min": 0.872727, "failure_range_max": 0.967480, "conclusion": "Reasoning stays high-failure with no clear monotonic depth trend."},
+      "structured_output": {"bins": [{"range": "0-63", "n": 38, "failure": 0.263158}, {"range": "64-127", "n": 24, "failure": 0.083333}, {"range": "128-255", "n": 3, "failure": 0.0}], "conclusion": "Structured output is the low-failure outlier; most rounds fully accept."}
+    }
+  },
+  "low_acceptance_tail": {
+    "prose": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 1392, "traceable_emitted_tokens": 4385, "emitted_1": 160, "emitted_2_3": 762, "emitted_4_plus": 470, "full_accept": 24, "tokens_per_traceable_tree_round": 3.150144},
+    "summarization": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 633, "traceable_emitted_tokens": 2036, "emitted_1": 58, "emitted_2_3": 356, "emitted_4_plus": 219, "full_accept": 12, "tokens_per_traceable_tree_round": 3.216430},
+    "agentic_coding": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 167, "traceable_emitted_tokens": 580, "emitted_1": 20, "emitted_2_3": 79, "emitted_4_plus": 68, "full_accept": 3, "tokens_per_traceable_tree_round": 3.473054},
+    "reasoning_math": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 1567, "traceable_emitted_tokens": 6033, "emitted_1": 140, "emitted_2_3": 691, "emitted_4_plus": 736, "full_accept": 140, "tokens_per_traceable_tree_round": 3.850032},
+    "planning": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 463, "traceable_emitted_tokens": 1872, "emitted_1": 37, "emitted_2_3": 200, "emitted_4_plus": 226, "full_accept": 65, "tokens_per_traceable_tree_round": 4.043197},
+    "retrieval_qa": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 132, "traceable_emitted_tokens": 501, "emitted_1": 15, "emitted_2_3": 50, "emitted_4_plus": 67, "full_accept": 9, "tokens_per_traceable_tree_round": 3.795455},
+    "long_context_recall": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 86, "traceable_emitted_tokens": 375, "emitted_1": 8, "emitted_2_3": 32, "emitted_4_plus": 46, "full_accept": 15, "tokens_per_traceable_tree_round": 4.360465},
+    "dialogue": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 38, "traceable_emitted_tokens": 180, "emitted_1": 0, "emitted_2_3": 11, "emitted_4_plus": 27, "full_accept": 8, "tokens_per_traceable_tree_round": 4.736842},
+    "code": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 571, "traceable_emitted_tokens": 3001, "emitted_1": 22, "emitted_2_3": 140, "emitted_4_plus": 409, "full_accept": 158, "tokens_per_traceable_tree_round": 5.255692},
+    "tool": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 24, "traceable_emitted_tokens": 137, "emitted_1": 0, "emitted_2_3": 3, "emitted_4_plus": 21, "full_accept": 7, "tokens_per_traceable_tree_round": 5.708333},
+    "translation": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 12, "traceable_emitted_tokens": 68, "emitted_1": 0, "emitted_2_3": 2, "emitted_4_plus": 10, "full_accept": 2, "tokens_per_traceable_tree_round": 5.666667},
+    "structured_output": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 65, "traceable_emitted_tokens": 463, "emitted_1": 2, "emitted_2_3": 1, "emitted_4_plus": 62, "full_accept": 49, "tokens_per_traceable_tree_round": 7.123077}
+  },
+  "timing": {
+    "overall": {"emitted_1": {"rounds": 462, "failure": 0.993506, "decode_ms_p50": 43.771, "total_ms_p50": 50.116}, "emitted_2_3": {"rounds": 2327, "failure": 0.997422, "decode_ms_p50": 43.769, "total_ms_p50": 50.131}, "emitted_4_plus": {"rounds": 2361, "failure": 0.787802, "decode_ms_p50": 43.726, "total_ms_p50": 50.087}},
+    "matched_low_vs_high": {"pairs": 2780, "total_ratio_p50": 0.999631, "total_ratio_p90": 1.006500, "decode_ratio_p50": 0.999657},
+    "prefill": {"discovery": {"cold_tasks": 3, "cold_s": 1201.227, "warm_tasks": 12, "warm_s": 9.963, "decode_s": 131.602}, "validation": {"cold_tasks": 3, "cold_s": 1203.190, "warm_tasks": 12, "warm_s": 10.045, "decode_s": 136.784}},
+    "conclusion": "Round cost is flat with acceptance buckets and matched low/high pairs. Acceptance, not execution slowdown, is the throughput lever. Prefill is separated and dominated by three cold cache tasks per split."
+  },
+  "shadow_chain": {"denominator": "traceable_tree_rounds", "traceable_tree_rounds": 5150, "tree_tokens_per_traceable_round": 3.811845, "chain_tokens_per_traceable_round": 3.486214, "tree_better": 1567, "chain_better": 467, "equal": 3116, "structured_output": {"tree": 7.123077, "chain": 7.2}, "note": "Offline shadow-chain comparison at identical target tokens; not a live chain execution."},
+  "quality": {"markers_present": 44, "markers_total": 48, "missing": [{"task_id": "discovery-code-module", "markers": ["SKU"]}, {"task_id": "discovery-tool-multiturn", "markers": ["apply_patch"]}, {"task_id": "validation-code-module", "markers": ["SKU"]}, {"task_id": "validation-tool-multiturn", "markers": ["apply_patch"]}], "structured_json": "Three outputs parse as JSON; discovery structured-schema is wrapped in a markdown fence.", "retrieval_note": "Both retrieval QA tasks answer no record because the dossier contains no transfer literal; the prompt is underspecified. Do not treat that answer as a drafter speed defect.", "assessment": "Coarse marker checks, not a quality benchmark. Golden knowledge checks plus end-to-end request tests are needed before deployment."},
+  "representative_examples": [
+    {"lane": "prose", "failure": "tree_allocation", "task_id": "discovery-prose-explain", "round_index": 1, "context_depth": 257184, "target": ":", "emitted_tokens": 6, "candidate_rank": 0, "candidate_tree_lp": -2.755227, "budget_cutoff_lp": -2.097250},
+    {"lane": "prose", "failure": "candidate_coverage", "task_id": "discovery-prose-explain", "round_index": 2, "context_depth": 257190, "target": "thesis", "emitted_tokens": 2, "target_sample_rank": 0, "candidate_present": false},
+    {"lane": "reasoning_math", "failure": "tree_allocation", "task_id": "discovery-reasoning-math", "round_index": 2, "context_depth": 257181, "target": " a", "emitted_tokens": 4, "candidate_rank": 0, "candidate_tree_lp": -1.392970, "budget_cutoff_lp": -1.301573},
+    {"lane": "code", "failure": "tree_allocation", "task_id": "discovery-code-module", "round_index": 3, "context_depth": 257190, "target": " for", "emitted_tokens": 2, "candidate_rank": 0, "candidate_tree_lp": -3.128077, "budget_cutoff_lp": -2.957175},
+    {"lane": "structured_output", "context": "Low-failure lane, not a coverage weakness", "full_accept_rate": 0.753846, "tokens_per_tree_round": 7.123077, "tokens_per_traceable_tree_round": 7.123077}
+  ],
+  "decision": {
+    "production": "Retain deployed C3. Production configuration and weights remain unchanged.",
+    "training": "No training run is justified yet. The prior targeted Q4 pilot showed no demonstrated live or quantized benefit, and allocation has not been shown learnable.",
+    "next_stage": "Bounded live eight-node tree capture on discovery+validation only, then identical-target replay and counterbalanced live A/B if the offline projection survives verification cost.",
+    "final_test": "Sealed; no final-test outputs have been generated."
+  },
+  "ranked_weaknesses": [
+    {
+      "rank": 1,
+      "mechanism": "tree allocation / graph-path scoring",
+      "evidence": "3539 of 4640 failures (76.3%) and 68.7% of all reached opportunities. Dominant in every lane. 501 allocation failures are the unique eighth-best unselected candidate; 306 have target lp within 0.1 of the seven-node cutoff.",
+      "confidence": "High within this 257K+ synthetic suite; mechanism is source-verified and replicated across discovery and validation families.",
+      "learnability": "Unresolved. Could reflect intrinsic target-path uncertainty or a learnable drafter scoring misalignment. The graph path can select an ancestor whose subtree excludes a drafter top token, so raw top-16 membership alone does not imply a training defect.",
+      "remedy_order": "Runtime allocation replay first. If a bounded tree-budget or scoring change passes live matched-prefix tests, no weight training is justified for this mechanism."
+    },
+    {
+      "rank": 2,
+      "mechanism": "candidate coverage / raw top-16 ranking",
+      "evidence": "1101 failures (23.7% of failures, 21.4% of opportunities). Rare-frequency quartile coverage 32.4% versus common 7.0%. Prose subword coverage 52.5%, spaced-word 30.8%; code coverage 7.5% overall.",
+      "confidence": "Moderate. Coverage is concentrated and replicated, but the prior rare-name prose pilot did not isolate it: rare-name prose failed 16.19% versus 18.34% for matched prose, i.e. it tested broad adaptation, not a confirmed targeted repair.",
+      "learnability": "Unresolved. Training the draft stack can change logits feeding the selector. A targeted dataset would need matched-prefix confirmation that the mechanism survives controls.",
+      "remedy_order": "After allocation replay. Do not generate training data until coverage has a confirmed, isolated failure family and matched successful controls at identical prefixes."
+    },
+    {
+      "rank": 3,
+      "mechanism": "selector candidate exclusion",
+      "evidence": "0 failures. Candidate IDs come from ggml_top_k over raw drafter logits with selector_top_k=16; every raw top-16 token enters the lattice.",
+      "confidence": "High, source-derived. Structurally empty in this runtime path.",
+      "learnability": "Not a current mechanism. Selection logic may still matter if candidate construction changes; no experiment is justified on the deployed build.",
+      "remedy_order": "Do not test selector exclusion. It cannot explain the observed failures."
+    },
+    {
+      "rank": 4,
+      "mechanism": "execution slowdown",
+      "evidence": "No acceptance-independent slowdown: emitted-one, emitted-two-three and emitted-four-plus total p50 are 50.116, 50.131 and 50.087 ms. Matched low/high total ratio p50 0.99963.",
+      "confidence": "High for this capture. Recheck only if a runtime tree-budget change adds verification rows.",
+      "learnability": "Not a learning mechanism.",
+      "remedy_order": "Measure a tree-budget capture directly; do not train to fix round cost."
+    }
+  ],
+  "offline_allocation_replay": {
+    "source": "/home/deforest/AI/experiments/dflash2-workload-benchmark-20261115/analysis/allocation-replay.json",
+    "scope": "Discovery+validation trace only; final-test split remains sealed.",
+    "method": "Reconstruct the remaining heap after the deployed seven-node best-first selection from root scores and selected-node next scores. Budget 8 keeps all seven baseline nodes and adds the unique highest-lp unselected candidate.",
+    "validation": {"allocation_failures": 3539, "target_candidates_matched": 3539, "target_lp_mismatches": 0, "selected_node_lp_reconstruction": "asserted for every selected node only on the 3539 allocation-failure rows replayed; not asserted on all 5150 traceable tree rows", "ambiguous_ties": 0},
+    "result": {
+      "immediate_admissions": 501,
+      "share_of_allocation_failures": 0.141566,
+      "share_of_traceable_rounds": 0.097282,
+      "denominator": "all 5166 tree rounds, including 16 draft-truncated rounds",
+      "baseline_tokens_per_tree_round": 3.810105,
+      "projected_tokens_per_tree_round": 3.907085,
+      "projected_absolute_gain_per_tree_round": 0.096980,
+      "projected_relative_gain": 0.025453
+    },
+    "per_lane_admissions": {"prose": 110, "summarization": 51, "reasoning_math": 155, "code": 85, "agentic_coding": 14, "tool": 3, "dialogue": 3, "structured_output": 4, "translation": 3, "planning": 43, "retrieval_qa": 17, "long_context_recall": 13},
+    "per_lane_projected_relative_gain_range": [0.008639, 0.044118],
+    "interpretation": "The fixed-point mechanism is shared across lanes: a drafter top token is often the next-best unselected tree candidate, not merely a bad rank. The projection is an immediate one-token gain only. It excludes deeper continuation after the new branch, verification-row cost, generation-cap clipping and live sampling variability."
+  },
+  "next_experiment": {
+    "name": "bounded live eight-node tree capture",
+    "goal": "Measure whether one extra verification row plus 501 offline admissions produces a real tokens-per-round gain without increasing total round cost.",
+    "scope": "Discovery+validation only. No final-test outputs. No training, no C3 replacement, no deployment.",
+    "gpu_requirement": "One free local GPU; read and follow manage-local-gpu before launch; do not interrupt existing jobs.",
+    "bounded_settings": {"LLAMA_SPEC_TREE_NODES": 8, "LLAMA_SPEC_TREE_TEMP": 2.0, "sampling": "temperature 1.0, top_p 0.95, top_k 20, min_p 0.05", "target_kv": "q4_0", "draft_kv": "q4_0", "power": "match the 257K baseline capture"},
+    "measurements": ["tree tokens per round", "immediate allocation admissions on reached prefixes", "verification/decode ms p50 and p90", "total round ms p50 and p90", "decode tok/s per lane", "low-acceptance tail", "all flight markers and structured-output parseability"],
+    "controls": ["deployed seven-node tree in the same run order", "counterbalanced order", "matched prompts and occupied contexts", "same sampling and seeds", "identical-target-token replay where available"],
+    "stop_rule": "If live verification cost cancels the offline acceptance projection, or any lane regresses materially, stop and retain deployed C3. Do not start training from an offline-only gain."
+  },
+  "uncertainty_and_limitations": [
+    "Discovery and validation are separate synthetic families, but they share target sampling and runtime; they are not independent model populations. Cross-check recomputation agrees numerically because it uses the same single trace.",
+    "Final-test remains sealed. No final-test outputs exist for this diagnosis. A held-out pass is still required before any recommendation beyond retain C3.",
+    "Several lanes have small denominators: dialogue 38 rounds, tool 24, translation 12, structured output 65, long-context recall 86. Wilson intervals are wide; do not generalize these lane extremes.",
+    "All contexts are near 258K; the suite cannot isolate context-depth effects. Output-position bins are descriptive and correlated with task length.",
+    "Token-class and frequency bins are observational lexical controls, not causal manipulations. Uncertainty samples are too small (prose n=5, reasoning n=10, planning n=4).",
+    "Target sample rank is descriptive only. A rank-0 coverage failure is not categorized as unavoidable; conversely a top-ranked rejection is not proof of systematic misalignment.",
+    "Selector exclusion is structurally empty only for raw top-16 candidate construction. Training the draft stack can still change raw logits; unchanged selector weights do not prove coverage cannot improve.",
+    "The shadow-chain comparison is offline from captured scores, not live chain execution and not a deployable alternative.",
+    "Quality markers are coarse. Two code outputs miss SKU, both tool-multiturn outputs stop after an inspection tool call instead of applying a patch, and retrieval QA prompts ask for a transfer literal absent from the dossier.",
+    "Production frontend min_p was not separately verified; the capture server used 0.05. Trace build provenance beyond the recorded binary and runtime constants is not fully audited.",
+    "Cold prefill dominates two of three cold tasks per split and is reported separately. Warm prefill is 10.0 s per split.",
+    "The budget-8 replay projects one immediate accepted token per admission. It does not model deeper continuation, verification-row cost, generation-cap clipping or quantization/runtime interaction."
+  ],
+  "corrections_applied": [
+    "Revoked old unavoidable/untrainable labels derived from target-token rank; target_sample_rank remains descriptive.",
+    "Revoked rare-name prose as an isolated targeted weakness: 16.19% versus matched administrative prose 15.17% and matched prose 18.34%.",
+    "Revoked the prior live degradation claim: every paired output differed, baseline ran first, and the confidence interval included no change; supported conclusion is no demonstrated improvement.",
+    "Fixed the per-case acceptance histogram bug; pooled tokens-per-round was unaffected.",
+    "Accepted that unchanged selector weights do not prove coverage cannot improve because draft-stack training can change logits feeding the selector.",
+    "Superseded the broad water-management pilot and prose-first assumption with workload-wide evidence that allocation dominates."
+  ],
+  "stage_status": {
+    "diagnosis_complete": true,
+    "final_test_sealed": true,
+    "training_started": false,
+    "candidate_exported": false,
+    "live_ab_started": false,
+    "production_changed": false,
+    "offline_allocation_replay_complete": true,
+    "gpu_used_for_this_stage": false,
+    "next_bounded_stage": "live eight-node tree capture"
+  },
+  "sources": {
+    "benchmark_root": "/home/deforest/AI/experiments/dflash2-workload-benchmark-20261115",
+    "trace": "traces/benchmark.jsonl",
+    "suite_analysis": "analysis/suite-analysis.json",
+    "extended_evidence": "analysis/extended-evidence.json",
+    "trace_validation": "analysis/trace-validation.json",
+    "cross_check": "analysis/cross-check.json",
+    "allocation_replay": "analysis/allocation-replay.json",
+    "allocation_replay_script": "analysis/offline_allocation_replay.py",
+    "runtime_source": "/home/deforest/AI/backends/marathon-tree-20261113/v1/common/speculative.cpp",
+    "verification_source": "/home/deforest/AI/backends/marathon-tree-20261113/v1/tools/server/server-context.cpp",
+    "prior_review": "docs/c3-targeted-review-20261115.json",
+    "prior_training": "docs/c3-targeted-long-context-20261115.json"
+  }
+}
