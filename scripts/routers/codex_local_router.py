@@ -2949,16 +2949,28 @@ class RouterState:
             self.live_slot_by_model if profile.supports_slots
             else self.last_response_by_model
         )
+
+        def usable(snapshot: ResponseSnapshot | None) -> bool:
+            return bool(
+                snapshot is not None
+                and snapshot.profile_slug == profile.slug
+                and snapshot.prompt_cache_key == request["prompt_cache_key"]
+                and snapshot.instructions_text == request.get("instructions", "")
+                and snapshot.tool_scaffold
+                and snapshot.tool_scaffold.get("tools")
+            )
+
         source = self.lineage.get(sources.get(profile.slug))
-        if (
-            source is None
-            or source.profile_slug != profile.slug
-            or source.prompt_cache_key != request["prompt_cache_key"]
-            or source.instructions_text != request.get("instructions", "")
-            or not source.tool_scaffold
-            or not source.tool_scaffold.get("tools")
-        ):
-            return None
+        if not usable(source):
+            # Another conversation (a second session, a sub-agent, a fork) may
+            # have used this model since. The tool scaffold belongs to the
+            # conversation, so take it from this conversation's newest response;
+            # otherwise the compaction prompt loses its tool block and cannot
+            # prefix-match the saved conversation checkpoint or backend cache.
+            candidates = [snapshot for snapshot in self.lineage.values() if usable(snapshot)]
+            if not candidates:
+                return None
+            source = max(candidates, key=lambda snapshot: snapshot.created_at)
         for key in ("tools", "parallel_tool_calls"):
             if key in source.tool_scaffold:
                 request[key] = copy.deepcopy(source.tool_scaffold[key])
@@ -6368,7 +6380,28 @@ class RouterState:
         self._restore_managed_web_input(profile, request)
         request = normalize_responses_request(request, profile)
         request["model"] = profile.alias
+        had_tools = bool(request.get("tools"))
         compaction_source = self._compaction_tool_scaffold(profile, request)
+        if _codex_request_kind(request) == "compaction":
+            pointers = (
+                self.live_slot_by_model if profile.supports_slots
+                else self.last_response_by_model
+            )
+            # Counts only: whether the compaction prompt kept its tool block (and so
+            # can prefix-match the conversation's cache), never request content.
+            self.telemetry.emit(
+                "router.compaction.prefix_scaffold",
+                {
+                    "profile_slug": profile.slug,
+                    "had_tools": had_tools,
+                    "restored": compaction_source is not None,
+                    "source": (
+                        None if compaction_source is None
+                        else "latest" if pointers.get(profile.slug) == compaction_source.response_id
+                        else "conversation-history"
+                    ),
+                },
+            )
 
         base_instructions_hash = str(
             request.pop("_marathon_instruction_base_hash", "") or ""

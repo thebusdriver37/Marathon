@@ -79,7 +79,7 @@ class CompactionCacheTests(unittest.TestCase):
 
     def test_unavailable_or_disabled_cache_falls_back(self):
         for flag, supports_slots, source in (
-            ("0", True, snapshot()), ("1", False, snapshot()),
+            ("0", True, snapshot()), ("0", False, snapshot()),
             ("1", True, replace(snapshot(), profile_slug="other")),
             ("1", True, replace(snapshot(), tool_scaffold=None)), ("1", True, None),
         ):
@@ -95,6 +95,32 @@ class CompactionCacheTests(unittest.TestCase):
                 self.assertIsNone(state._compaction_tool_scaffold(
                     replace(profile(), supports_slots=supports_slots), body))
                 self.assertEqual(body, before)
+
+    def test_scaffold_comes_from_this_conversation_after_another_used_the_model(self):
+        # Another conversation (second session, sub-agent, fork) used the model after
+        # this one, or an external backend has no last-response pointer. The tool
+        # block belongs to the conversation, so it must still be restored; otherwise
+        # the compaction prompt cannot prefix-match the conversation's saved state.
+        for supports_slots, pointer in itertools.product((True, False), ("other", None)):
+            with self.subTest(supports_slots=supports_slots, pointer=pointer), mock.patch.dict(
+                router.os.environ, {"MARATHON_COMPACTION_PREFIX_CACHE": "1"}
+            ):
+                state = object.__new__(router.RouterState)
+                older = replace(snapshot(), response_id="older", created_at=1,
+                                tool_scaffold={"tools": [{"name": "stale"}]})
+                own = replace(snapshot(), created_at=2)
+                other = replace(snapshot(), response_id="other", prompt_cache_key="b", created_at=3,
+                                tool_scaffold={"tools": [{"name": "other conversation"}]})
+                state.lineage = {"older": older, "previous": own, "other": other}
+                pointers = {"test": pointer} if pointer else {}
+                state.live_slot_by_model = dict(pointers)
+                state.last_response_by_model = dict(pointers)
+                body = request()
+                selected = state._compaction_tool_scaffold(
+                    replace(profile(), supports_slots=supports_slots), body)
+                self.assertIs(selected, own)
+                self.assertEqual(body["tools"], TOOLS)
+                self.assertEqual(body["tool_choice"], "none")
 
     def test_compaction_uses_live_slot_but_does_not_trust_a_lost_slot(self):
         for supports_slots, slot_valid, switched in (
