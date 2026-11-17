@@ -1,0 +1,89 @@
+diff --git a/common/ngram-map.cpp b/common/ngram-map.cpp
+index d1cb4519f..c7eafd994 100644
+--- a/common/ngram-map.cpp
++++ b/common/ngram-map.cpp
+@@ -125,7 +125,21 @@ void common_ngram_map_begin(
+     LOG_DBG("%s: begin, idx_last_draft=%zu, new begin=%zu, #keys=%zu\n", __func__,
+             map.idx_last_check, size_begin, map.keys.size());
+ 
++    // first position where the new prompt differs from the tokens the map indexed before
++    size_t n_common = 0;
++    {
++        const size_t lim = std::min(map.seen.size(), size_begin);
++        while (n_common < lim && map.seen[n_common] == tokens[n_common]) {
++            ++n_common;
++        }
++    }
++    const bool changed = n_common < map.seen.size();
++
+     size_t idx_begin_cleanup = map.size_last_begin;
++    if (changed) {
++        const size_t nm = (size_t) map.size_key + map.size_value;
++        idx_begin_cleanup = std::min(idx_begin_cleanup, n_common > nm ? n_common - nm : 0);
++    }
+     if (idx_begin_cleanup > size_begin) {
+         if (size_begin > (size_t) map.size_key + map.size_value) {
+             idx_begin_cleanup = size_begin - map.size_key - map.size_value;
+@@ -136,7 +150,7 @@ void common_ngram_map_begin(
+     }
+ 
+     size_t count_map_entries_upd = 0;
+-    if (!map.key_map.empty() && size_begin < map.idx_last_check) {
++    if (!map.key_map.empty() && (changed || size_begin < map.idx_last_check)) {
+         if (map.show_key_map_stats) {
+             // Print statistics of hash map map_key.
+             size_t count_nonzero = 0;
+@@ -168,7 +182,7 @@ void common_ngram_map_begin(
+         map.key_map_last_idx = (idx_begin_cleanup > 0) ? (uint32_t) (idx_begin_cleanup - 1) : 0;
+     }
+ 
+-    if (size_begin < map.idx_last_check && !map.keys.empty()) {
++    if ((changed || size_begin < map.idx_last_check) && !map.keys.empty()) {
+         size_t count_keys = map.keys.size();
+         size_t count_keys_del = 0;
+         size_t count_values_del = 0;
+@@ -181,6 +195,9 @@ void common_ngram_map_begin(
+                 count_keys_del++;
+                 continue;
+             }
++            if (key.stat_idx > idx_begin_cleanup) {
++                key.stat_idx = idx_begin_cleanup;
++            }
+             if (map.key_only) {
+                 continue;
+             }
+@@ -214,6 +231,9 @@ void common_ngram_map_begin(
+                 count_keys, count_keys_del, count_values_del, count_map_entries_upd);
+     }
+ 
++    if (changed) {
++        map.seen.resize(n_common);
++    }
+     map.idx_last_check = size_begin;
+     map.size_last_begin = size_begin;
+ }
+@@ -242,6 +262,9 @@ void common_ngram_map_draft(common_ngram_map & map,
+         GGML_ABORT("%s: map.idx_last_check > cur_len: %zu > %zu", __func__, map.idx_last_check, cur_len);
+     }
+     map.idx_last_check = cur_len;
++    if (map.seen.size() < cur_len) {
++        map.seen.insert(map.seen.end(), inp.begin() + map.seen.size(), inp.end());
++    }
+ 
+     // search pattern, the key n-gram
+     std::vector<llama_token> key_tokens;
+diff --git a/common/ngram-map.h b/common/ngram-map.h
+index 97608ef17..3d3a6df31 100644
+--- a/common/ngram-map.h
++++ b/common/ngram-map.h
+@@ -92,6 +92,10 @@ struct common_ngram_map {
+     // uint32_t instead of size_t (size of current histories is << UINT32_MAX)
+     std::vector<uint32_t> key_map;              // key_map[hash] = index of ngram in context window
+     uint32_t              key_map_last_idx = 0; // index of the last ngram added to key_map
++
++    // tokens the map has indexed so far (prompt plus accepted output). Used by common_ngram_map_begin to find the
++    // first position where a new prompt differs, so stale entries past it are dropped even if the prompt grew.
++    std::vector<llama_token> seen;
+ };
+ 
+ // Initialize the n-gram map with the given token history.
