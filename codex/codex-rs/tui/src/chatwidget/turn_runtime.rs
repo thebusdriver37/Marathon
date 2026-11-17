@@ -140,8 +140,12 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn complete_turn_response(&mut self, output_tokens: Option<i64>) {
-        self.turn_throughput.complete_response(output_tokens, Instant::now());
+    pub(super) fn complete_turn_response(
+        &mut self,
+        response_id: &str,
+        metrics: Option<&codex_app_server_protocol::MarathonResponseMetrics>,
+    ) {
+        self.turn_throughput.complete_response(response_id, metrics);
         self.refresh_status_line();
     }
 

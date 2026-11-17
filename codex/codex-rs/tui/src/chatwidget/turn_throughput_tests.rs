@@ -1,157 +1,160 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use codex_app_server_protocol::MarathonResponseMetrics;
 use pretty_assertions::assert_eq;
 
 use super::GenerationStage;
 use super::ThroughputSample;
 use super::TurnThroughput;
 
-#[test]
-fn live_sample_is_estimated_from_streamed_bytes() {
-    let started_at = Instant::now();
-    let mut throughput = TurnThroughput::default();
+fn metrics(tokens: u64, seconds: u64) -> MarathonResponseMetrics {
+    MarathonResponseMetrics {
+        decode_tokens: tokens,
+        decode_microseconds: seconds * 1_000_000,
+        backend_calls: 1,
+        timed_backend_calls: 1,
+        ..MarathonResponseMetrics::default()
+    }
+}
 
-    throughput.start_turn(started_at);
+#[test]
+fn backend_decode_excludes_prefill_and_tool_waits() {
+    let start = Instant::now();
+    let mut throughput = TurnThroughput::default();
+    throughput.start_turn(start);
     throughput.record_output_delta(
-        "1234567890123456789012345678901234567890",
+        "first output",
         GenerationStage::Thinking,
-        started_at,
+        start + Duration::from_secs(5),
     );
-
+    throughput.complete_response("response", Some(&metrics(/*tokens*/ 2600, /*seconds*/ 40)));
+    throughput.finish_turn(start + Duration::from_secs(80));
     assert_eq!(
-        throughput.sample(started_at + Duration::from_secs(2)),
+        throughput.sample(),
         Some(ThroughputSample {
-            tokens_per_second: 5.0,
-            estimated: true,
+            tokens_per_second: 65.0
+        })
+    );
+    assert_eq!(
+        throughput.time_to_first_output(),
+        Some(Duration::from_secs(5))
+    );
+    assert_eq!(
+        throughput.elapsed(start + Duration::from_secs(100)),
+        Some(Duration::from_secs(80))
+    );
+}
+
+#[test]
+fn completed_calls_have_a_decode_time_weighted_average() {
+    let mut throughput = TurnThroughput::default();
+    throughput.start_turn(Instant::now());
+    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
+    throughput.complete_response("second", Some(&metrics(/*tokens*/ 200, /*seconds*/ 6)));
+    assert_eq!(
+        throughput.sample(),
+        Some(ThroughputSample {
+            tokens_per_second: 50.0
         })
     );
 }
 
 #[test]
-fn completed_response_replaces_estimate_with_exact_usage() {
-    let started_at = Instant::now();
-    let completed_at = started_at + Duration::from_secs(2);
+fn duplicate_completion_does_not_count_twice() {
     let mut throughput = TurnThroughput::default();
-
-    throughput.start_turn(started_at);
-    throughput.record_output_delta("streamed text", GenerationStage::Answering, started_at);
-    throughput.complete_response(Some(30), completed_at);
-
+    throughput.start_turn(Instant::now());
+    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
+    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
+    throughput.complete_response("second", Some(&metrics(/*tokens*/ 200, /*seconds*/ 6)));
     assert_eq!(
-        throughput.sample(completed_at),
+        throughput.sample(),
         Some(ThroughputSample {
-            tokens_per_second: 15.0,
-            estimated: false,
+            tokens_per_second: 50.0
         })
     );
 }
 
 #[test]
-fn fast_completed_response_still_reports_throughput() {
-    let started_at = Instant::now();
-    let completed_at = started_at + Duration::from_millis(100);
+fn incomplete_timing_coverage_is_not_reported_as_turn_decode() {
+    for missing in [
+        None,
+        Some(MarathonResponseMetrics {
+            backend_calls: 2,
+            ..metrics(/*tokens*/ 200, /*seconds*/ 2)
+        }),
+        Some(metrics(/*tokens*/ 200, /*seconds*/ 0)),
+    ] {
+        let mut throughput = TurnThroughput::default();
+        throughput.start_turn(Instant::now());
+        throughput.complete_response("measured", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
+        throughput.complete_response("missing", missing.as_ref());
+        assert_eq!(throughput.sample(), None);
+    }
+}
+
+#[test]
+fn a_new_turn_clears_previous_measurements() {
+    let start = Instant::now();
     let mut throughput = TurnThroughput::default();
-
-    throughput.start_turn(started_at);
-    throughput.record_output_delta("READY", GenerationStage::Answering, started_at);
-    throughput.complete_response(Some(4), completed_at);
-
+    throughput.start_turn(start);
+    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
+    throughput.finish_turn(start + Duration::from_secs(4));
+    throughput.start_turn(start + Duration::from_secs(10));
+    assert_eq!(throughput.sample(), None);
+    assert_eq!(throughput.time_to_first_output(), None);
     assert_eq!(
-        throughput.sample(completed_at),
-        Some(ThroughputSample {
-            tokens_per_second: 40.0,
-            estimated: false,
-        })
+        throughput.generation_stage(),
+        Some(GenerationStage::Prefill)
+    );
+    assert_eq!(
+        throughput.elapsed(start + Duration::from_secs(12)),
+        Some(Duration::from_secs(2))
     );
 }
 
 #[test]
-fn completed_responses_form_a_generation_time_weighted_turn_average() {
-    let started_at = Instant::now();
+fn interrupted_generation_does_not_publish_a_partial_turn_average() {
+    let start = Instant::now();
     let mut throughput = TurnThroughput::default();
-
-    throughput.start_turn(started_at);
-    throughput.record_output_delta("first", GenerationStage::Thinking, started_at);
-    throughput.complete_response(Some(20), started_at + Duration::from_secs(2));
+    throughput.start_turn(start);
+    throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
     throughput.record_output_delta(
-        "second",
-        GenerationStage::Answering,
-        started_at + Duration::from_secs(10),
+        "unfinished",
+        GenerationStage::Thinking,
+        start + Duration::from_secs(5),
     );
-    throughput.complete_response(Some(40), started_at + Duration::from_secs(14));
-
-    assert_eq!(
-        throughput.sample(started_at + Duration::from_secs(14)),
-        Some(ThroughputSample {
-            tokens_per_second: 10.0,
-            estimated: false,
-        })
-    );
+    throughput.finish_turn(start + Duration::from_secs(6));
+    assert_eq!(throughput.sample(), None);
 }
 
 #[test]
-fn starting_a_turn_clears_the_previous_sample() {
-    let started_at = Instant::now();
+fn first_output_is_recorded_once_and_stage_tracks_the_stream() {
+    let start = Instant::now();
     let mut throughput = TurnThroughput::default();
-    throughput.record_output_delta("streamed text", GenerationStage::Answering, started_at);
-    throughput.complete_response(Some(30), started_at + Duration::from_secs(2));
-
-    throughput.start_turn(started_at + Duration::from_secs(3));
-
-    assert_eq!(throughput.sample(started_at + Duration::from_secs(3)), None);
-    assert_eq!(
-        throughput.generation_stage(),
-        Some(GenerationStage::Prefill)
+    throughput.start_turn(start);
+    throughput.record_output_delta(
+        "thinking",
+        GenerationStage::Thinking,
+        start + Duration::from_secs(2),
     );
-}
-
-#[test]
-fn generation_stage_tracks_prefill_thinking_and_answering() {
-    let started_at = Instant::now();
-    let mut throughput = TurnThroughput::default();
-
-    throughput.start_turn(started_at);
-    assert_eq!(
-        throughput.generation_stage(),
-        Some(GenerationStage::Prefill)
-    );
-
-    throughput.record_output_delta("thought", GenerationStage::Thinking, started_at);
     assert_eq!(
         throughput.generation_stage(),
         Some(GenerationStage::Thinking)
     );
-
-    throughput.record_output_delta("answer", GenerationStage::Answering, started_at);
+    throughput.record_output_delta(
+        "answer",
+        GenerationStage::Answering,
+        start + Duration::from_secs(8),
+    );
     assert_eq!(
         throughput.generation_stage(),
         Some(GenerationStage::Answering)
     );
-
-    throughput.finish_turn(started_at + Duration::from_secs(1));
-    assert_eq!(throughput.generation_stage(), None);
-}
-
-#[test]
-fn records_time_to_first_output_once() {
-    let started_at = Instant::now();
-    let mut throughput = TurnThroughput::default();
-
-    throughput.start_turn(started_at);
-    throughput.record_output_delta(
-        "first",
-        GenerationStage::Thinking,
-        started_at + Duration::from_millis(2_500),
-    );
-    throughput.record_output_delta(
-        "second",
-        GenerationStage::Answering,
-        started_at + Duration::from_secs(4),
-    );
-
     assert_eq!(
         throughput.time_to_first_output(),
-        Some(Duration::from_millis(2_500))
+        Some(Duration::from_secs(2))
     );
+    throughput.finish_turn(start + Duration::from_secs(10));
+    assert_eq!(throughput.generation_stage(), None);
 }

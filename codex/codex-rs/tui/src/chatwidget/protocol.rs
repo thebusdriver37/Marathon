@@ -59,9 +59,6 @@ impl ChatWidget {
                 }
             }
             ServerNotification::ThreadTokenUsageUpdated(notification) => {
-                if !from_replay {
-                    self.complete_turn_response(Some(notification.token_usage.last.output_tokens));
-                }
                 self.set_token_info(Some(token_usage_info_from_app_server(
                     notification.token_usage,
                 )));
@@ -434,7 +431,11 @@ impl ChatWidget {
             ServerNotification::RawResponseCompleted(notification) => {
                 if !from_replay {
                     self.complete_turn_response(
-                        notification.usage.map(|usage| usage.output_tokens),
+                        &notification.response_id,
+                        notification
+                            .usage_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.marathon.as_ref()),
                     );
                 }
             }

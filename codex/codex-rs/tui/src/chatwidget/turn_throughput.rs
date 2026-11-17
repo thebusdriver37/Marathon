@@ -1,11 +1,8 @@
-//! Per-turn output throughput derived from live deltas and exact response usage.
-
+use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
-use codex_utils_string::approx_tokens_from_byte_count;
-
-const MIN_SAMPLE_DURATION: Duration = Duration::from_millis(1);
+use codex_app_server_protocol::MarathonResponseMetrics;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GenerationStage {
@@ -27,23 +24,19 @@ impl GenerationStage {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ThroughputSample {
     pub(super) tokens_per_second: f64,
-    pub(super) estimated: bool,
 }
 
-#[derive(Debug)]
-struct ActiveResponse {
-    started_at: Instant,
-    output_bytes: usize,
-}
-
+/// Backend decode totals and client-observed latency have different clocks.
+/// Never infer decode throughput from streamed byte counts or tool-loop wall time.
 #[derive(Debug, Default)]
 pub(super) struct TurnThroughput {
     turn_started_at: Option<Instant>,
+    turn_finished_at: Option<Instant>,
     time_to_first_output: Option<Duration>,
-    active_response: Option<ActiveResponse>,
-    completed_output_tokens: u64,
-    completed_generation_duration: Duration,
-    last_sample: Option<ThroughputSample>,
+    seen_responses: HashSet<String>,
+    decode_tokens: u64,
+    decode_microseconds: u64,
+    missing_timings: bool,
     generation_stage: Option<GenerationStage>,
 }
 
@@ -56,7 +49,7 @@ impl TurnThroughput {
 
     pub(super) fn record_output_delta(
         &mut self,
-        delta: &str,
+        _delta: &str,
         generation_stage: GenerationStage,
         now: Instant,
     ) {
@@ -66,46 +59,40 @@ impl TurnThroughput {
             self.time_to_first_output = Some(now.saturating_duration_since(turn_started_at));
         }
         self.generation_stage = Some(generation_stage);
-        let response = self.active_response.get_or_insert(ActiveResponse {
-            started_at: now,
-            output_bytes: 0,
-        });
-        response.output_bytes = response.output_bytes.saturating_add(delta.len());
     }
 
-    pub(super) fn complete_response(&mut self, output_tokens: Option<i64>, now: Instant) {
-        self.generation_stage = None;
-        let live_sample = self.sample(now);
-        let Some(response) = self.active_response.take() else {
-            return;
-        };
-        let elapsed = now.saturating_duration_since(response.started_at);
-        let Some(output_tokens) = output_tokens.and_then(|tokens| u64::try_from(tokens).ok())
-        else {
-            self.last_sample = live_sample;
-            return;
-        };
-        if output_tokens == 0 || elapsed < MIN_SAMPLE_DURATION {
-            self.last_sample = live_sample;
+    pub(super) fn complete_response(
+        &mut self,
+        response_id: &str,
+        metrics: Option<&MarathonResponseMetrics>,
+    ) {
+        if self.turn_started_at.is_none() || !self.seen_responses.insert(response_id.to_string()) {
             return;
         }
-
-        self.completed_output_tokens = self.completed_output_tokens.saturating_add(output_tokens);
-        self.completed_generation_duration =
-            self.completed_generation_duration.saturating_add(elapsed);
-        self.last_sample = sample_from_totals(
-            self.completed_output_tokens,
-            self.completed_generation_duration,
-            /*estimated*/ false,
-        );
+        self.generation_stage = None;
+        let Some(metrics) = metrics else {
+            self.missing_timings = true;
+            return;
+        };
+        if metrics.backend_calls == 0
+            || metrics.timed_backend_calls != metrics.backend_calls
+            || (metrics.decode_tokens > 0 && metrics.decode_microseconds == 0)
+        {
+            self.missing_timings = true;
+            return;
+        }
+        self.decode_tokens = self.decode_tokens.saturating_add(metrics.decode_tokens);
+        self.decode_microseconds = self
+            .decode_microseconds
+            .saturating_add(metrics.decode_microseconds);
     }
 
     pub(super) fn finish_turn(&mut self, now: Instant) {
-        self.generation_stage = None;
-        if self.active_response.is_some() {
-            self.last_sample = self.sample(now);
-            self.active_response = None;
+        if self.generation_stage.is_some() {
+            self.missing_timings = true;
         }
+        self.generation_stage = None;
+        self.turn_finished_at.get_or_insert(now);
     }
 
     pub(super) fn generation_stage(&self) -> Option<GenerationStage> {
@@ -116,37 +103,27 @@ impl TurnThroughput {
         self.time_to_first_output
     }
 
+    pub(super) fn elapsed(&self, now: Instant) -> Option<Duration> {
+        self.turn_started_at.map(|start| {
+            self.turn_finished_at
+                .unwrap_or(now)
+                .saturating_duration_since(start)
+        })
+    }
+
     pub(super) fn set_generation_stage(&mut self, generation_stage: GenerationStage) {
         self.generation_stage = Some(generation_stage);
     }
 
-    pub(super) fn sample(&self, now: Instant) -> Option<ThroughputSample> {
-        let Some(response) = self.active_response.as_ref() else {
-            return self.last_sample;
-        };
-        let elapsed = now.saturating_duration_since(response.started_at);
-        let live_tokens = approx_tokens_from_byte_count(response.output_bytes);
-        sample_from_totals(
-            self.completed_output_tokens.saturating_add(live_tokens),
-            self.completed_generation_duration.saturating_add(elapsed),
-            /*estimated*/ true,
-        )
-        .or(self.last_sample)
+    pub(super) fn sample(&self) -> Option<ThroughputSample> {
+        if self.missing_timings || self.decode_tokens == 0 || self.decode_microseconds == 0 {
+            return None;
+        }
+        Some(ThroughputSample {
+            tokens_per_second: self.decode_tokens as f64 * 1_000_000.0
+                / self.decode_microseconds as f64,
+        })
     }
-}
-
-fn sample_from_totals(
-    output_tokens: u64,
-    generation_duration: Duration,
-    estimated: bool,
-) -> Option<ThroughputSample> {
-    if output_tokens == 0 || generation_duration < MIN_SAMPLE_DURATION {
-        return None;
-    }
-    Some(ThroughputSample {
-        tokens_per_second: output_tokens as f64 / generation_duration.as_secs_f64(),
-        estimated,
-    })
 }
 
 #[cfg(test)]

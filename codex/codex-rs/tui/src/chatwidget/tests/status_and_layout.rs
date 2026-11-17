@@ -3110,6 +3110,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
         GenerationStage::Answering,
         started_at,
     );
+    chat.handle_server_notification(
+        ServerNotification::RawResponseCompleted(
+            codex_app_server_protocol::RawResponseCompletedNotification {
+                thread_id: "thread".to_string(),
+                turn_id: "turn".to_string(),
+                response_id: "response".to_string(),
+                usage: None,
+                usage_metadata: Some(codex_app_server_protocol::ResponseUsageMetadata {
+                    amount: None,
+                    metadata: None,
+                    marathon: Some(codex_app_server_protocol::MarathonResponseMetrics {
+                        decode_tokens: 4_200,
+                        decode_microseconds: 70_000_000,
+                        backend_calls: 2,
+                        timed_backend_calls: 2,
+                        ..Default::default()
+                    }),
+                }),
+            },
+        ),
+        /*replay_kind*/ None,
+    );
     let response_usage = TokenUsage {
         total_tokens: 4_200,
         output_tokens: 4_200,
@@ -3123,14 +3145,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
             model_context_window: Some(131_072),
         }),
     );
+    chat.turn_throughput
+        .finish_turn(started_at + Duration::from_secs(200));
     chat.refresh_status_line();
 
     assert_eq!(
         status_line_text(&chat),
-        Some("21 tok/s avg · first token 2.5s".to_string())
+        Some("60 tok/s decode · first output 2.5s · total 202s".to_string())
     );
 
-    let width = 48;
+    let width = 72;
     let height = chat.desired_height(width);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
     terminal

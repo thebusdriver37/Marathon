@@ -459,14 +459,16 @@ impl ChatWidget {
             return Some(stage.label().to_string());
         }
 
-        self.turn_throughput.sample(Instant::now()).map(|sample| {
-            let prefix = if sample.estimated { "~" } else { "" };
-            let rate = format!("{prefix}{:.0} tok/s avg", sample.tokens_per_second);
-            self.turn_throughput
-                .time_to_first_output()
-                .map(|latency| format!("{rate} · first token {}", format_latency(latency)))
-                .unwrap_or(rate)
-        })
+        let elapsed = self.turn_throughput.elapsed(Instant::now())?;
+        let mut label = self.turn_throughput.sample().map_or_else(
+            || "decode n/a".to_string(),
+            |sample| format!("{:.0} tok/s decode", sample.tokens_per_second),
+        );
+        if let Some(latency) = self.turn_throughput.time_to_first_output() {
+            label.push_str(&format!(" · first output {}", format_latency(latency)));
+        }
+        label.push_str(&format!(" · total {}", format_latency(elapsed)));
+        Some(label)
     }
 
     pub(super) fn status_line_limit_display(
