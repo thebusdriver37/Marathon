@@ -49,7 +49,6 @@ use crate::stream_events_utils::TurnItemContributorPolicy;
 use crate::stream_events_utils::finalize_non_tool_response_item;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
-use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
 use crate::stream_events_utils::raw_assistant_output_text_from_item;
 use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
@@ -3453,17 +3452,6 @@ async fn try_run_sampling_request(
     }
 
     outcome
-}
-
-pub(crate) fn get_last_assistant_message_from_turn<'a>(
-    responses: impl DoubleEndedIterator<Item = &'a ResponseItem>,
-) -> Option<String> {
-    for item in responses.rev() {
-        if let Some(message) = last_assistant_message_from_item(item, /*plan_mode*/ false) {
-            return Some(message);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

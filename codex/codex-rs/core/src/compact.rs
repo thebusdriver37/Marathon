@@ -22,7 +22,7 @@ use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::RequestEffortUsage;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
-use crate::session::turn::get_last_assistant_message_from_turn;
+use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::session::turn_context::TurnContext;
 use crate::state::AutoCompactWindowIds;
 use crate::util::backoff;
@@ -49,6 +49,7 @@ use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -389,17 +390,7 @@ async fn run_compact_task_inner_impl(
 
     let history_snapshot = sess.clone_history().await;
     let history_items = history_snapshot.annotated_items();
-    let summary_suffix = if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
-        get_last_assistant_message_from_turn(compaction_response.output.iter())
-            .filter(|summary| !summary.trim().is_empty())
-            .ok_or_else(|| {
-                CodexErr::Stream(
-                    "Post-turn compaction completed without an assistant summary".to_string(),
-                )
-            })?
-    } else {
-        get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default()
-    };
+    let summary_suffix = compaction_response.summary;
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     let user_messages = collect_annotated_user_messages(history_items);
 
@@ -815,7 +806,7 @@ fn build_compacted_history_with_limit(
 
 struct CompactionResponse {
     response_id: String,
-    output: Vec<ResponseItem>,
+    summary: String,
 }
 
 async fn drain_to_completed(
@@ -847,6 +838,7 @@ async fn drain_to_completed(
         )
         .await?;
     let mut output = Vec::new();
+    let mut summary = None;
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
@@ -856,7 +848,16 @@ async fn drain_to_completed(
         };
         match event {
             // Keep each attempt isolated until the response completes successfully.
-            Ok(ResponseEvent::OutputItemDone(item)) => output.push(item),
+            Ok(ResponseEvent::OutputItemDone(item)) => {
+                if !matches!(&item, ResponseItem::Message {
+                    phase: Some(MessagePhase::Commentary), ..
+                }) && let Some(message) = last_assistant_message_from_item(&item, false)
+                    && !message.trim().is_empty()
+                {
+                    summary = Some(message);
+                }
+                output.push(item);
+            }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;
             }
@@ -894,9 +895,25 @@ async fn drain_to_completed(
                 .await;
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
                     .await?;
+                let summary = summary.ok_or_else(|| CodexErr::Stream(
+                    "compaction response completed without a usable assistant summary".to_string()
+                ))?;
+                if !matches!(phase, CompactionPhase::PostTurn) {
+                    sess.record_annotated_conversation_items(
+                        turn_context,
+                        turn_context.model_info(),
+                        output.into_iter().map(|item| ResponseItemEnvelope {
+                            item,
+                            metadata: Some(CodexHarnessMetadata {
+                                compaction_output: true,
+                                ..Default::default()
+                            }),
+                        }).collect(),
+                    ).await;
+                }
                 return Ok(CompactionResponse {
                     response_id,
-                    output,
+                    summary,
                 });
             }
             Ok(_) => continue,

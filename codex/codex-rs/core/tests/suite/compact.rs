@@ -4457,6 +4457,200 @@ async fn manual_compact_retries_after_context_window_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compact_retries_reasoning_only_completion_and_uses_fresh_summary() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+    let user_turn = sse(vec![
+        ev_assistant_message("m1", FIRST_REPLY),
+        ev_completed("r1"),
+    ]);
+    let reasoning_only_compact = sse(vec![
+        ev_reasoning_item("reasoning-only", &["still analyzing"], &[]),
+        ev_completed("r2"),
+    ]);
+    let successful_compact = sse(vec![
+        ev_assistant_message("m2", SUMMARY_TEXT),
+        ev_completed("r3"),
+    ]);
+    let follow_up = sse(vec![
+        ev_assistant_message("m3", FINAL_REPLY),
+        ev_completed("r4"),
+    ]);
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            user_turn,
+            reasoning_only_compact,
+            successful_compact,
+            follow_up,
+        ],
+    )
+    .await;
+
+    let mut model_provider = non_openai_model_provider(&server);
+    model_provider.stream_max_retries = Some(1);
+    let codex = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            set_test_compact_prompt(config);
+            config.model_auto_compact_token_limit = Some(200_000);
+        })
+        .build(&server)
+        .await
+        .expect("build codex")
+        .codex;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "first turn".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("submit user input");
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await.expect("trigger compact");
+    let retry_message = wait_for_event_match(&codex, |event| match event {
+        EventMsg::StreamError(stream_error) => Some(stream_error.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(
+        retry_message.contains("Reconnecting... 1/1"),
+        "expected compaction retry, got {retry_message}"
+    );
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let compaction_response_ids = fs::read_to_string(codex.rollout_path().expect("rollout path"))
+        .expect("read rollout")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(compacted) => Some(compacted.compaction_response_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(compaction_response_ids, vec![Some("r3".to_string())]);
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "after compact".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("submit follow-up input");
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "expected user turn, two compact attempts, and follow-up turn"
+    );
+    let follow_up_body = requests[3].body_json().to_string();
+    assert!(
+        body_contains_text(&follow_up_body, &summary_with_prefix(SUMMARY_TEXT)),
+        "follow-up should contain the fresh compaction summary"
+    );
+    assert!(
+        !body_contains_text(&follow_up_body, FIRST_REPLY),
+        "follow-up should not reuse the prior assistant reply as its summary"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compact_empty_completions_fail_without_replacing_history() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+    let user_turn = sse(vec![
+        ev_assistant_message("m1", FIRST_REPLY),
+        ev_completed("r1"),
+    ]);
+    let empty_compact_1 = sse(vec![ev_completed("r2")]);
+    let empty_compact_2 = sse(vec![ev_completed("r3")]);
+    let follow_up = sse(vec![
+        ev_assistant_message("m2", FINAL_REPLY),
+        ev_completed("r4"),
+    ]);
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![user_turn, empty_compact_1, empty_compact_2, follow_up],
+    )
+    .await;
+
+    let mut model_provider = non_openai_model_provider(&server);
+    model_provider.stream_max_retries = Some(1);
+    let codex = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            set_test_compact_prompt(config);
+            config.model_auto_compact_token_limit = Some(200_000);
+        })
+        .build(&server)
+        .await
+        .expect("build codex")
+        .codex;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "first turn".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("submit user input");
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await.expect("trigger compact");
+    let retry_message = wait_for_event_match(&codex, |event| match event {
+        EventMsg::StreamError(stream_error) => Some(stream_error.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(
+        retry_message.contains("Reconnecting... 1/1"),
+        "expected compaction retry, got {retry_message}"
+    );
+    let error_message = wait_for_event_match(&codex, |event| match event {
+        EventMsg::Error(error) => Some(error.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(
+        error_message.contains("compaction response completed without a usable assistant summary"),
+        "expected missing-summary failure, got {error_message}"
+    );
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "after failed compact".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("submit follow-up input");
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "expected user turn, two compact attempts, and follow-up turn"
+    );
+    let follow_up_body = requests[3].body_json().to_string();
+    assert!(
+        body_contains_text(&follow_up_body, "first turn")
+            && body_contains_text(&follow_up_body, FIRST_REPLY),
+        "failed compaction should preserve the original conversation history"
+    );
+    assert!(
+        !body_contains_text(&follow_up_body, SUMMARY_PREFIX),
+        "failed compaction should not install a replacement summary"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // TODO(ccunningham): Re-enable after the follow-up compaction behavior PR lands.
 // Current main behavior around non-context manual /compact failures is known-incorrect.
 #[ignore = "behavior change covered in follow-up compaction PR"]
