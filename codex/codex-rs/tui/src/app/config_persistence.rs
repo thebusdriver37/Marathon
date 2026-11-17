@@ -1035,7 +1035,8 @@ impl App {
 
     pub(super) fn reasoning_label(reasoning_effort: Option<&ReasoningEffortConfig>) -> String {
         match reasoning_effort {
-            None | Some(ReasoningEffortConfig::None) => "default".to_string(),
+            None => "default".to_string(),
+            Some(ReasoningEffortConfig::None) => "none".to_string(),
             Some(reasoning_effort) => reasoning_effort.as_str().to_string(),
         }
     }
@@ -1441,6 +1442,15 @@ mod tests {
     use crossterm::event::KeyEvent;
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
+
+    #[test]
+    fn reasoning_label_distinguishes_unset_from_disabled() {
+        assert_eq!(App::reasoning_label(None), "default");
+        assert_eq!(
+            App::reasoning_label(Some(&ReasoningEffortConfig::None)),
+            "none"
+        );
+    }
 
     #[tokio::test]
     async fn update_reasoning_effort_updates_collaboration_mode() {

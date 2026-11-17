@@ -4215,6 +4215,22 @@ async fn status_line_and_terminal_title_reasoning_render_only_effort() {
 }
 
 #[tokio::test]
+async fn status_line_reasoning_distinguishes_unset_from_disabled() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.config.tui_status_line = Some(vec!["reasoning".to_string()]);
+
+    chat.set_reasoning_effort(None);
+    chat.refresh_status_line();
+
+    assert_eq!(status_line_text(&chat), Some("default".to_string()));
+
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::None));
+    chat.refresh_status_line();
+
+    assert_eq!(status_line_text(&chat), Some("none".to_string()));
+}
+
+#[tokio::test]
 async fn status_line_reasoning_updates_on_mode_switch_without_manual_refresh() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);

@@ -475,7 +475,8 @@ impl ChatWidget {
         effort: Option<&ReasoningEffortConfig>,
     ) -> String {
         match effort {
-            None | Some(ReasoningEffortConfig::None) => "default".to_string(),
+            None => "default".to_string(),
+            Some(ReasoningEffortConfig::None) => "none".to_string(),
             Some(effort) => effort.as_str().to_string(),
         }
     }
