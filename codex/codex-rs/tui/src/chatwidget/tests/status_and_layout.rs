@@ -3206,6 +3206,72 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
 }
 
 #[tokio::test]
+async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
+    handle_turn_started(&mut chat, "turn-patch-progress");
+    handle_agent_message_delta(&mut chat, "I will add the page.");
+
+    let changes = vec![FileUpdateChange {
+        path: "src/pages/dashboard.rs".to_string(),
+        kind: PatchChangeKind::Add,
+        diff: "first\nsecond\nthird\n".to_string(),
+    }];
+    chat.handle_server_notification(
+        ServerNotification::FileChangePatchUpdated(
+            codex_app_server_protocol::FileChangePatchUpdatedNotification {
+                thread_id: "thread".to_string(),
+                turn_id: "turn-patch-progress".to_string(),
+                item_id: "patch-1".to_string(),
+                changes: changes.clone(),
+            },
+        ),
+        None,
+    );
+
+    let drafting = status_line_text(&chat).expect("drafting status");
+    assert!(
+        drafting.starts_with("Drafting src/pages/dashboard.rs · 3 lines · "),
+        "unexpected drafting status: {drafting}"
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread".to_string(),
+            turn_id: "turn-patch-progress".to_string(),
+            item: AppServerThreadItem::FileChange {
+                id: "patch-1".to_string(),
+                changes: changes.clone(),
+                status: AppServerPatchApplyStatus::InProgress,
+            },
+            started_at_ms: 0,
+        }),
+        None,
+    );
+    assert!(
+        status_line_text(&chat).is_some_and(|status| {
+            status.starts_with("Applying src/pages/dashboard.rs · 3 lines · ")
+        }),
+        "patch application should replace the drafting stage"
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread".to_string(),
+            turn_id: "turn-patch-progress".to_string(),
+            item: AppServerThreadItem::FileChange {
+                id: "patch-1".to_string(),
+                changes,
+                status: AppServerPatchApplyStatus::Completed,
+            },
+            completed_at_ms: 0,
+        }),
+        None,
+    );
+    assert_eq!(status_line_text(&chat), Some("Prefill".to_string()));
+}
+
+#[tokio::test]
 async fn status_line_legacy_context_usage_renders_context_used_percent() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

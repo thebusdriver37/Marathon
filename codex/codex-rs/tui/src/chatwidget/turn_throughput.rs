@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
+use codex_app_server_protocol::FileUpdateChange;
 use codex_app_server_protocol::MarathonResponseMetrics;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,6 +10,8 @@ pub(super) enum GenerationStage {
     Prefill,
     Thinking,
     Answering,
+    DraftingCode,
+    ApplyingChanges,
 }
 
 impl GenerationStage {
@@ -17,8 +20,18 @@ impl GenerationStage {
             Self::Prefill => "Prefill",
             Self::Thinking => "Thinking",
             Self::Answering => "Answering",
+            Self::DraftingCode => "Drafting",
+            Self::ApplyingChanges => "Applying",
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PatchProgress {
+    pub(super) call_id: String,
+    pub(super) target: String,
+    pub(super) line_count: usize,
+    pub(super) started_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,6 +52,7 @@ pub(super) struct TurnThroughput {
     missing_timings: bool,
     latest_sample: Option<ThroughputSample>,
     generation_stage: Option<GenerationStage>,
+    patch_progress: Option<PatchProgress>,
 }
 
 impl TurnThroughput {
@@ -107,6 +121,7 @@ impl TurnThroughput {
             self.missing_timings = true;
         }
         self.generation_stage = None;
+        self.patch_progress = None;
         self.turn_finished_at.get_or_insert(now);
     }
 
@@ -128,6 +143,72 @@ impl TurnThroughput {
 
     pub(super) fn set_generation_stage(&mut self, generation_stage: GenerationStage) {
         self.generation_stage = Some(generation_stage);
+        if !matches!(
+            generation_stage,
+            GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
+        ) {
+            self.patch_progress = None;
+        }
+    }
+
+    pub(super) fn record_patch_progress(
+        &mut self,
+        call_id: &str,
+        changes: &[FileUpdateChange],
+        now: Instant,
+    ) {
+        let started_at = self
+            .patch_progress
+            .as_ref()
+            .filter(|progress| progress.call_id == call_id)
+            .map_or(now, |progress| progress.started_at);
+        self.patch_progress = Some(PatchProgress {
+            call_id: call_id.to_string(),
+            target: patch_target(changes),
+            line_count: changes
+                .iter()
+                .map(|change| change.diff.lines().count())
+                .sum(),
+            started_at,
+        });
+        self.record_first_output(now);
+        self.generation_stage = Some(GenerationStage::DraftingCode);
+    }
+
+    pub(super) fn begin_patch_apply(
+        &mut self,
+        call_id: &str,
+        changes: &[FileUpdateChange],
+        now: Instant,
+    ) {
+        if self
+            .patch_progress
+            .as_ref()
+            .is_none_or(|progress| progress.call_id != call_id)
+        {
+            self.record_patch_progress(call_id, changes, now);
+        }
+        self.generation_stage = Some(GenerationStage::ApplyingChanges);
+    }
+
+    pub(super) fn finish_patch_apply(&mut self, call_id: &str) {
+        if self
+            .patch_progress
+            .as_ref()
+            .is_some_and(|progress| progress.call_id == call_id)
+        {
+            self.patch_progress = None;
+        }
+        if matches!(
+            self.generation_stage,
+            Some(GenerationStage::DraftingCode | GenerationStage::ApplyingChanges)
+        ) {
+            self.generation_stage = Some(GenerationStage::Prefill);
+        }
+    }
+
+    pub(super) fn patch_progress(&self) -> Option<&PatchProgress> {
+        self.patch_progress.as_ref()
     }
 
     pub(super) fn is_finished(&self) -> bool {
@@ -146,6 +227,14 @@ impl TurnThroughput {
             tokens_per_second: self.decode_tokens as f64 * 1_000_000.0
                 / self.decode_microseconds as f64,
         })
+    }
+}
+
+fn patch_target(changes: &[FileUpdateChange]) -> String {
+    match changes {
+        [] => "code".to_string(),
+        [change] => change.path.clone(),
+        changes => format!("{} files", changes.len()),
     }
 }
 

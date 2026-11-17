@@ -456,6 +456,26 @@ impl ChatWidget {
 
     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
         if let Some(stage) = self.turn_throughput.generation_stage() {
+            if matches!(
+                stage,
+                GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
+            ) && let Some(progress) = self.turn_throughput.patch_progress()
+            {
+                let mut label = format!("{} {}", stage.label(), progress.target);
+                if progress.line_count > 0 {
+                    let unit = if progress.line_count == 1 {
+                        "line"
+                    } else {
+                        "lines"
+                    };
+                    label.push_str(&format!(" · {} {unit}", progress.line_count));
+                }
+                label.push_str(&format!(
+                    " · {}",
+                    format_latency(Instant::now().saturating_duration_since(progress.started_at))
+                ));
+                return Some(label);
+            }
             return Some(stage.label().to_string());
         }
 

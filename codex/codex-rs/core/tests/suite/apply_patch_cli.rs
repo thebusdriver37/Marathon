@@ -1672,15 +1672,7 @@ async fn apply_patch_cli_can_use_exec_command_output_as_patch_input() -> Result<
 async fn apply_patch_custom_tool_streaming_emits_updated_changes() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = apply_patch_harness_with(|builder| {
-        builder.with_config(|config| {
-            config
-                .features
-                .enable(Feature::ApplyPatchStreamingEvents)
-                .expect("enable apply_patch streaming events");
-        })
-    })
-    .await?;
+    let harness = apply_patch_harness().await?;
     let test = harness.test();
     let codex = test.codex.clone();
     let call_id = "apply-patch-streaming";

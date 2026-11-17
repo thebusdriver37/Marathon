@@ -126,8 +126,12 @@ impl ChatWidget {
                                 .set_generation_stage(GenerationStage::Answering);
                             self.refresh_status_line();
                         }
+                        ThreadItem::FileChange { id, changes, .. } => {
+                            self.turn_throughput
+                                .begin_patch_apply(id, changes, Instant::now());
+                            self.refresh_status_line();
+                        }
                         ThreadItem::CommandExecution { .. }
-                        | ThreadItem::FileChange { .. }
                         | ThreadItem::McpToolCall { .. }
                         | ThreadItem::DynamicToolCall { .. }
                         | ThreadItem::WebSearch { .. }
@@ -141,6 +145,10 @@ impl ChatWidget {
                 self.handle_item_started_notification(notification, replay_kind);
             }
             ServerNotification::ItemCompleted(notification) => {
+                if !from_replay && let ThreadItem::FileChange { id, .. } = &notification.item {
+                    self.turn_throughput.finish_patch_apply(id);
+                    self.refresh_status_line();
+                }
                 self.handle_item_completed_notification(notification, replay_kind);
             }
             ServerNotification::AgentMessageDelta(notification) => {
@@ -212,6 +220,16 @@ impl ChatWidget {
             }
             ServerNotification::FileChangeOutputDelta(notification) => {
                 self.on_patch_apply_output_delta(notification.item_id, notification.delta);
+            }
+            ServerNotification::FileChangePatchUpdated(notification) => {
+                if !from_replay {
+                    self.turn_throughput.record_patch_progress(
+                        &notification.item_id,
+                        &notification.changes,
+                        Instant::now(),
+                    );
+                    self.refresh_status_line();
+                }
             }
             ServerNotification::TurnDiffUpdated(notification) => {
                 self.on_turn_diff(notification.diff)
@@ -414,7 +432,6 @@ impl ChatWidget {
             | ServerNotification::ProcessOutputDelta(_)
             | ServerNotification::ProcessExited(_)
             | ServerNotification::McpServerEventStream(_)
-            | ServerNotification::FileChangePatchUpdated(_)
             | ServerNotification::McpToolCallProgress(_)
             | ServerNotification::AppListUpdated(_)
             | ServerNotification::EnvironmentConnected(_)

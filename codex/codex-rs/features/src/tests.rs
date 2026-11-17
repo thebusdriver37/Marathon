@@ -904,15 +904,12 @@ server_names = ["history", "notes"]
 #[test]
 fn unstable_warning_event_only_mentions_enabled_under_development_features() {
     let mut configured_features = Table::new();
-    configured_features.insert(
-        "apply_patch_streaming_events".to_string(),
-        TomlValue::Boolean(true),
-    );
+    configured_features.insert("artifact".to_string(), TomlValue::Boolean(true));
     configured_features.insert("fast_mode".to_string(), TomlValue::Boolean(true));
     configured_features.insert("unknown".to_string(), TomlValue::Boolean(true));
 
     let mut features = Features::with_defaults();
-    features.enable(Feature::ApplyPatchStreamingEvents);
+    features.enable(Feature::Artifact);
 
     let warning = unstable_features_warning_event(
         Some(&configured_features),
@@ -925,7 +922,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
     let EventMsg::Warning(WarningEvent { message }) = warning.msg else {
         panic!("expected warning event");
     };
-    assert!(message.contains("apply_patch_streaming_events"));
+    assert!(message.contains("artifact"));
     assert!(!message.contains("fast_mode"));
     assert!(message.contains("/tmp/config.toml"));
 }
