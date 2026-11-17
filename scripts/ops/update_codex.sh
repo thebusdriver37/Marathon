@@ -77,6 +77,14 @@ if ! GIT_ALTERNATE_OBJECT_DIRECTORIES="$upstream_objects" \
   git -C "$ROOT_DIR" apply --3way --directory=codex "${excludes[@]}" "$patch_file"; then
   merged=0
 fi
+# The merge can stage file versions that exist only in the upstream cache.
+# Copy them into this repository so the index never points at missing objects.
+git -C "$ROOT_DIR" ls-files -s -- codex | awk '{print $2}' | sort -u \
+  | git -C "$ROOT_DIR" cat-file --batch-check | awk '$2 == "missing" {print $1}' \
+  | while read -r object; do
+      GIT_ALTERNATE_OBJECT_DIRECTORIES="$upstream_objects" \
+        git -C "$ROOT_DIR" cat-file blob "$object" | git -C "$ROOT_DIR" hash-object -w --stdin >/dev/null
+    done
 printf '%s\n' "$TARGET_REF" >"$CODEX_REF_FILE"
 
 conflicts="$(git -C "$ROOT_DIR" diff --name-only --diff-filter=U -- codex)"
@@ -94,7 +102,13 @@ fi
 # Take upstream's pinned versions, then let Cargo drop what pruned crates used.
 echo "-> Refreshing Cargo.lock from upstream $TARGET_REF..."
 git -C "$UPSTREAM_DIR" show "$TARGET_SHA:codex-rs/Cargo.lock" >"$CODEX_DIR/codex-rs/Cargo.lock"
-(cd "$CODEX_DIR/codex-rs" && cargo metadata --format-version 1 >/dev/null)
+if ! (cd "$CODEX_DIR/codex-rs" && cargo metadata --format-version 1 >/dev/null); then
+  echo
+  echo "Cargo could not resolve the workspace. If a kept crate now depends on one listed in"
+  echo "config/codex-pruned.txt, restore that crate from upstream $TARGET_REF, re-add it to"
+  echo "codex/codex-rs/Cargo.toml, drop it from the pruned list, and rerun the cargo metadata step."
+  exit 1
+fi
 
 if [[ "${MARATHON_CODEX_SKIP_BUILD:-0}" != "1" ]]; then
   echo "-> Building Marathon Codex..."

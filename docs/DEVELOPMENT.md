@@ -136,8 +136,8 @@ described in [runtime packaging](RUNTIME.md#cpu-checked-dflash-host-staging-cand
 `codex/` is Marathon's own copy of upstream [openai/codex](https://github.com/openai/codex)
 (`codex-rs/` plus its license files), edited directly like the rest of the repository.
 `config/codex.ref` records the upstream release it is based on, currently
-`rust-v0.165.0` (`360319d8dee62d87e2d59fc0c21805d79519cfed`).
-The vendoring commit imports that release unchanged, so `git log -- codex` and
+`rust-v0.169.0` (`d32063f96c2dff1dc96af839b3952abb6acfeda4`).
+The vendoring commit imported `rust-v0.165.0` unchanged, so `git log -- codex` and
 `git diff <import commit> -- codex` show everything Marathon changed. Each former
 `patches/codex/*.patch` became one commit titled `Codex: ... (was patch NNN)`.
 
@@ -150,7 +150,11 @@ To take a newer upstream release, run `marathon update-codex [TAG]` on a clean
 merges upstream's changes between the two releases into `codex/`, refreshes
 `Cargo.lock` from upstream's pins, updates `config/codex.ref` and builds. Where
 upstream and Marathon changed the same lines it stops with conflict markers to
-resolve. With no tag it takes the newest fetched stable release.
+resolve. With no tag it takes the newest fetched stable release. If upstream
+starts depending on a pruned crate, restore it from upstream and drop it from
+`config/codex-pruned.txt`; regenerate the protocol export bundles afterwards
+(`app-server-protocol/scripts/write_schema_fixtures.py` steps, with and without
+`CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=1`) so they keep Marathon's response metrics.
 
 The 0.165.0 baseline preserves per-step model usage accounting, validated compaction
 summaries with upstream compaction metadata, provider-filtered session lookup,
