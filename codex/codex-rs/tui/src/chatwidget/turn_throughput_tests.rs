@@ -197,3 +197,31 @@ fn latest_call_recovers_after_missing_timings_but_turn_average_does_not() {
     throughput.finish_turn(Instant::now());
     assert_eq!(throughput.sample(), None);
 }
+
+#[test]
+fn tool_activity_precedes_later_text_and_empty_deltas_do_not_start_the_clock() {
+    let start = Instant::now();
+    let mut throughput = TurnThroughput::default();
+    throughput.start_turn(start);
+    throughput.record_output_delta(
+        "",
+        GenerationStage::Thinking,
+        start + Duration::from_secs(1),
+    );
+    assert_eq!(throughput.time_to_first_output(), None);
+    throughput.record_first_output(start + Duration::from_secs(5));
+    throughput.record_output_delta(
+        "Done",
+        GenerationStage::Answering,
+        start + Duration::from_secs(37),
+    );
+    throughput.finish_turn(start + Duration::from_secs(40));
+    assert_eq!(
+        throughput.time_to_first_output(),
+        Some(Duration::from_secs(5))
+    );
+    assert_eq!(
+        throughput.elapsed(start + Duration::from_secs(100)),
+        Some(Duration::from_secs(40))
+    );
+}

@@ -3168,7 +3168,7 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
 
     assert_eq!(
         status_line_text(&chat),
-        Some("60.6 tok/s turn avg · first output 2.5s · total 202s".to_string())
+        Some("60.6 tok/s turn avg · first activity 2.5s · total 202s".to_string())
     );
 
     let width = 72;

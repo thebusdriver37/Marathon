@@ -126,6 +126,15 @@ impl ChatWidget {
                                 .set_generation_stage(GenerationStage::Answering);
                             self.refresh_status_line();
                         }
+                        ThreadItem::CommandExecution { .. }
+                        | ThreadItem::FileChange { .. }
+                        | ThreadItem::McpToolCall { .. }
+                        | ThreadItem::DynamicToolCall { .. }
+                        | ThreadItem::WebSearch { .. }
+                        | ThreadItem::CollabAgentToolCall { .. } => {
+                            self.turn_throughput.record_first_output(Instant::now());
+                            self.refresh_status_line();
+                        }
                         _ => {}
                     }
                 }

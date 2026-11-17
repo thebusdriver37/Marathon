@@ -470,7 +470,7 @@ impl ChatWidget {
             |sample| format!("{:.1} tok/s {rate_label}", sample.tokens_per_second),
         );
         if let Some(latency) = self.turn_throughput.time_to_first_output() {
-            label.push_str(&format!(" · first output {}", format_latency(latency)));
+            label.push_str(&format!(" · first activity {}", format_latency(latency)));
         }
         label.push_str(&format!(" · total {}", format_latency(elapsed)));
         Some(label)

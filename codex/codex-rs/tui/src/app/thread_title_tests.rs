@@ -218,7 +218,7 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
     }
     let response = responses::mount_response_once(&server, template).await;
     let codex_home = tempdir()?;
-    let provider_id = "thread-title-test";
+    let provider_id = "marathon-local";
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(

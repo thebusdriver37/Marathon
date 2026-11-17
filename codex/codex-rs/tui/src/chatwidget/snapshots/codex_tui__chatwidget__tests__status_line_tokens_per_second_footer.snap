@@ -6,4 +6,4 @@ expression: normalized_backend_snapshot(terminal.backend())
 "                                                                        "
 "› Ask Codex to do anything                                              "
 "                                                                        "
-"  60.6 tok/s turn avg · first output 2.5s · total 202s                  "
+"  60.6 tok/s turn avg · first activity 2.5s · total 202s                "

@@ -50,16 +50,23 @@ impl TurnThroughput {
 
     pub(super) fn record_output_delta(
         &mut self,
-        _delta: &str,
+        delta: &str,
         generation_stage: GenerationStage,
         now: Instant,
     ) {
+        if delta.is_empty() {
+            return;
+        }
+        self.record_first_output(now);
+        self.generation_stage = Some(generation_stage);
+    }
+
+    pub(super) fn record_first_output(&mut self, now: Instant) {
         if self.time_to_first_output.is_none()
             && let Some(turn_started_at) = self.turn_started_at
         {
             self.time_to_first_output = Some(now.saturating_duration_since(turn_started_at));
         }
-        self.generation_stage = Some(generation_stage);
     }
 
     pub(super) fn complete_response(

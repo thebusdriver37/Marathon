@@ -66,6 +66,14 @@ impl App {
         destination: ThreadTitleDestination,
         prompt: String,
     ) {
+        // A local runtime has one leased inference slot. Background naming
+        // evicts the conversation prefix and delays the next user turn.
+        // Keep the provisional title; explicit rename suggestions still work.
+        if self.chat_widget.config_ref().model_provider_id == "marathon-local"
+            && matches!(destination, ThreadTitleDestination::Automatic { .. })
+        {
+            return;
+        }
         let std::collections::hash_map::Entry::Vacant(entry) =
             self.pending_thread_titles.entry((thread_id, destination))
         else {
