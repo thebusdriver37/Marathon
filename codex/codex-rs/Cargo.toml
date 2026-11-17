@@ -7,8 +7,6 @@ members = [
     "agent-identity",
     "agent-roles",
     "backend-client",
-    "cloud-client",
-    "bwrap",
     "build-info",
     "ansi-escape",
     "attachment-store",
@@ -27,9 +25,7 @@ members = [
     "install-context",
     "codex-backend-openapi-models",
     "code-mode",
-    "code-mode-host",
     "code-mode-protocol",
-    "code-mode-runtime",
     "codex-home",
     "cloud-config",
     "cloud-tasks",
@@ -39,16 +35,13 @@ members = [
     "collaboration-mode-templates",
     "connectors",
     "config",
-    "config-schema",
     "context-fragments",
     "shell-command",
     "skills",
     "core",
-    "core-api",
     "core-plugin-common",
     "core-plugins",
     "diagnostics",
-    "direct-tool-timing",
     "guardian-context",
     "hooks",
     "history",
@@ -69,7 +62,6 @@ members = [
     "ext/git-attribution",
     "ext/guardian-reviewer",
     "ext/guardian-v2",
-    "ext/guardian-v3",
     "ext/history-notes",
     "ext/image-generation",
     "ext/items",
@@ -97,7 +89,6 @@ members = [
     "ollama",
     "process-hardening",
     "realtime-webrtc",
-    "voice-host",
     "protocol",
     "protocol/tests/support",
     "prompts",
@@ -105,21 +96,17 @@ members = [
     "rollout-trace",
     "rmcp-client",
     "responses-api-proxy",
-    "runtime-agent-instance",
     "response-debug-context",
     "sandboxing",
     "stdio-to-uds",
     "otel",
-    "otel-trace-websocket",
     "tcp-tunnel",
     "tui",
     "user-verification",
     "tools",
-    "v8-poc",
     "websocket-auth",
     "websocket-client",
     "windows-sandbox-rs/tests/support",
-    "windows-sandbox-service",
     "worktree",
     "workload-identity",
     "utils/absolute-path",
@@ -128,14 +115,12 @@ members = [
     "utils/cargo-bin",
     "git-utils",
     "utils/cache",
-    "utils/critical-path",
     "utils/git-discovery",
     "utils/image",
     "utils/json-to-toml",
     "utils/home-dir",
     "utils/process",
     "utils/pty",
-    "utils/readiness",
     "utils/redacted-string",
     "utils/rustls-provider",
     "utils/string",
@@ -156,7 +141,6 @@ members = [
     "state",
     "terminal-detection",
     "test-binary-support",
-    "thread-manager-sample",
     "thread-store",
     "uds",
     "codex-experimental-api-macros",
@@ -206,7 +190,6 @@ codex-cloud-tasks-client = { path = "cloud-tasks-client" }
 codex-cloud-tasks-mock-client = { path = "cloud-tasks-mock-client" }
 codex-code-mode = { path = "code-mode" }
 codex-code-mode-protocol = { path = "code-mode-protocol" }
-codex-code-mode-runtime = { path = "code-mode-runtime" }
 codex-home = { path = "codex-home" }
 codex-http-client = { path = "http-client" }
 codex-websocket-auth = { path = "websocket-auth" }
@@ -220,7 +203,6 @@ codex-message-board = { path = "message-board" }
 codex-connectors-extension = { path = "ext/connectors" }
 codex-context-fragments = { path = "context-fragments" }
 codex-core = { path = "core" }
-codex-core-api = { path = "core-api" }
 codex-core-plugin-common = { path = "core-plugin-common" }
 codex-core-plugins = { path = "core-plugins" }
 codex-diagnostics = { path = "diagnostics" }
@@ -268,7 +250,6 @@ codex-mxc-sandbox = { path = "mxc-sandbox" }
 codex-network-proxy = { path = "network-proxy" }
 codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
-codex-otel-trace-websocket = { path = "otel-trace-websocket" }
 codex-plugin = { path = "plugin" }
 codex-model-provider = { path = "model-provider" }
 codex-process-hardening = { path = "process-hardening" }
@@ -301,7 +282,6 @@ codex-utils-audio = { path = "utils/audio" }
 codex-utils-cache = { path = "utils/cache" }
 codex-utils-cargo-bin = { path = "utils/cargo-bin" }
 codex-utils-cli = { path = "utils/cli" }
-codex-utils-critical-path = { path = "utils/critical-path" }
 codex-utils-elapsed = { path = "utils/elapsed" }
 codex-utils-fuzzy-match = { path = "utils/fuzzy-match" }
 codex-utils-git-discovery = { path = "utils/git-discovery" }
@@ -324,7 +304,6 @@ codex-utils-stream-parser = { path = "utils/stream-parser" }
 codex-utils-string = { path = "utils/string" }
 codex-utils-template = { path = "utils/template" }
 codex-user-verification = { path = "user-verification" }
-codex-v8-poc = { path = "v8-poc" }
 codex-workload-identity = { path = "workload-identity" }
 codex-windows-sandbox = { path = "windows-sandbox-rs" }
 codex-windows-sandbox-test-support = { path = "windows-sandbox-rs/tests/support" }
@@ -624,7 +603,6 @@ unwrap_used = "deny"
 ignored = [
     "icu_provider",
     "openssl-sys",
-    "codex-v8-poc",
 ]
 
 [profile.dev]
