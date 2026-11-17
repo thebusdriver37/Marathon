@@ -408,6 +408,7 @@ mod turn_lifecycle;
 mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;
 mod turn_throughput;
+use self::turn_throughput::GenerationStage;
 use self::turn_throughput::TurnThroughput;
 mod usage;
 mod user_messages;

@@ -3104,8 +3104,11 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
     chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
     let started_at = Instant::now() - Duration::from_secs(200);
     chat.turn_throughput.start_turn();
-    chat.turn_throughput
-        .record_output_delta("streamed response", started_at);
+    chat.turn_throughput.record_output_delta(
+        "streamed response",
+        GenerationStage::Answering,
+        started_at,
+    );
     let response_usage = TokenUsage {
         total_tokens: 4_200,
         output_tokens: 4_200,
@@ -3132,6 +3135,28 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
     assert_chatwidget_snapshot!(
         "status_line_tokens_per_second_footer",
         normalized_backend_snapshot(terminal.backend())
+    );
+}
+
+#[tokio::test]
+async fn status_line_tokens_per_second_tracks_generation_stage() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
+
+    handle_turn_started(&mut chat, "turn-stage");
+    chat.refresh_status_line();
+    assert_eq!(status_line_text(&chat), Some("Prefill".to_string()));
+
+    handle_agent_reasoning_delta(&mut chat, "thinking");
+    assert!(
+        status_line_text(&chat).is_some_and(|status| status.starts_with("Thinking")),
+        "reasoning delta should identify thinking"
+    );
+
+    handle_agent_message_delta(&mut chat, "answering");
+    assert!(
+        status_line_text(&chat).is_some_and(|status| status.starts_with("Answering")),
+        "answer delta should identify answering"
     );
 }
 

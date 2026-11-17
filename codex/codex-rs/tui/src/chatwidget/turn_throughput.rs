@@ -7,6 +7,23 @@ use codex_utils_string::approx_tokens_from_byte_count;
 
 const MIN_SAMPLE_DURATION: Duration = Duration::from_millis(1);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GenerationStage {
+    Prefill,
+    Thinking,
+    Answering,
+}
+
+impl GenerationStage {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Prefill => "Prefill",
+            Self::Thinking => "Thinking",
+            Self::Answering => "Answering",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ThroughputSample {
     pub(super) tokens_per_second: f64,
@@ -25,14 +42,22 @@ pub(super) struct TurnThroughput {
     completed_output_tokens: u64,
     completed_generation_duration: Duration,
     last_sample: Option<ThroughputSample>,
+    generation_stage: Option<GenerationStage>,
 }
 
 impl TurnThroughput {
     pub(super) fn start_turn(&mut self) {
         *self = Self::default();
+        self.generation_stage = Some(GenerationStage::Prefill);
     }
 
-    pub(super) fn record_output_delta(&mut self, delta: &str, now: Instant) {
+    pub(super) fn record_output_delta(
+        &mut self,
+        delta: &str,
+        generation_stage: GenerationStage,
+        now: Instant,
+    ) {
+        self.generation_stage = Some(generation_stage);
         let response = self.active_response.get_or_insert(ActiveResponse {
             started_at: now,
             output_bytes: 0,
@@ -41,6 +66,7 @@ impl TurnThroughput {
     }
 
     pub(super) fn complete_response(&mut self, output_tokens: Option<i64>, now: Instant) {
+        self.generation_stage = None;
         let live_sample = self.sample(now);
         let Some(response) = self.active_response.take() else {
             return;
@@ -67,10 +93,19 @@ impl TurnThroughput {
     }
 
     pub(super) fn finish_turn(&mut self, now: Instant) {
+        self.generation_stage = None;
         if self.active_response.is_some() {
             self.last_sample = self.sample(now);
             self.active_response = None;
         }
+    }
+
+    pub(super) fn generation_stage(&self) -> Option<GenerationStage> {
+        self.generation_stage
+    }
+
+    pub(super) fn set_generation_stage(&mut self, generation_stage: GenerationStage) {
+        self.generation_stage = Some(generation_stage);
     }
 
     pub(super) fn sample(&self, now: Instant) -> Option<ThroughputSample> {

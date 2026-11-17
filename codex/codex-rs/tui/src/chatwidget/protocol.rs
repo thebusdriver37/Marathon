@@ -117,6 +117,21 @@ impl ChatWidget {
                 self.handle_turn_completed_notification(notification, replay_kind);
             }
             ServerNotification::ItemStarted(notification) => {
+                if !from_replay {
+                    match &notification.item {
+                        ThreadItem::Reasoning { .. } => {
+                            self.turn_throughput
+                                .set_generation_stage(GenerationStage::Thinking);
+                            self.refresh_status_line();
+                        }
+                        ThreadItem::AgentMessage { .. } | ThreadItem::Plan { .. } => {
+                            self.turn_throughput
+                                .set_generation_stage(GenerationStage::Answering);
+                            self.refresh_status_line();
+                        }
+                        _ => {}
+                    }
+                }
                 self.handle_item_started_notification(notification, replay_kind);
             }
             ServerNotification::ItemCompleted(notification) => {
@@ -124,7 +139,7 @@ impl ChatWidget {
             }
             ServerNotification::AgentMessageDelta(notification) => {
                 if !from_replay {
-                    self.record_turn_output_delta(&notification.delta);
+                    self.record_turn_output_delta(&notification.delta, GenerationStage::Answering);
                 }
                 self.restore_realtime_transcripts_before_turn(&notification.turn_id);
                 if !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
@@ -141,14 +156,14 @@ impl ChatWidget {
             }
             ServerNotification::PlanDelta(notification) => {
                 if !from_replay {
-                    self.record_turn_output_delta(&notification.delta);
+                    self.record_turn_output_delta(&notification.delta, GenerationStage::Answering);
                 }
                 self.restore_realtime_transcripts_before_turn(&notification.turn_id);
                 self.on_plan_delta(notification.delta);
             }
             ServerNotification::ReasoningSummaryTextDelta(notification) => {
                 if !from_replay {
-                    self.record_turn_output_delta(&notification.delta);
+                    self.record_turn_output_delta(&notification.delta, GenerationStage::Thinking);
                 }
                 if !self.is_realtime_delegated_reasoning_item(
                     &notification.turn_id,
@@ -161,7 +176,7 @@ impl ChatWidget {
             }
             ServerNotification::ReasoningTextDelta(notification) => {
                 if !from_replay {
-                    self.record_turn_output_delta(&notification.delta);
+                    self.record_turn_output_delta(&notification.delta, GenerationStage::Thinking);
                 }
                 if self.config.show_raw_agent_reasoning
                     && !self.is_realtime_delegated_reasoning_item(

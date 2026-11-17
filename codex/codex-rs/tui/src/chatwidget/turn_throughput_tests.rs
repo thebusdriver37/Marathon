@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use pretty_assertions::assert_eq;
 
+use super::GenerationStage;
 use super::ThroughputSample;
 use super::TurnThroughput;
 
@@ -12,7 +13,11 @@ fn live_sample_is_estimated_from_streamed_bytes() {
     let mut throughput = TurnThroughput::default();
 
     throughput.start_turn();
-    throughput.record_output_delta("1234567890123456789012345678901234567890", started_at);
+    throughput.record_output_delta(
+        "1234567890123456789012345678901234567890",
+        GenerationStage::Thinking,
+        started_at,
+    );
 
     assert_eq!(
         throughput.sample(started_at + Duration::from_secs(2)),
@@ -30,7 +35,7 @@ fn completed_response_replaces_estimate_with_exact_usage() {
     let mut throughput = TurnThroughput::default();
 
     throughput.start_turn();
-    throughput.record_output_delta("streamed text", started_at);
+    throughput.record_output_delta("streamed text", GenerationStage::Answering, started_at);
     throughput.complete_response(Some(30), completed_at);
 
     assert_eq!(
@@ -49,7 +54,7 @@ fn fast_completed_response_still_reports_throughput() {
     let mut throughput = TurnThroughput::default();
 
     throughput.start_turn();
-    throughput.record_output_delta("READY", started_at);
+    throughput.record_output_delta("READY", GenerationStage::Answering, started_at);
     throughput.complete_response(Some(4), completed_at);
 
     assert_eq!(
@@ -67,9 +72,13 @@ fn completed_responses_form_a_generation_time_weighted_turn_average() {
     let mut throughput = TurnThroughput::default();
 
     throughput.start_turn();
-    throughput.record_output_delta("first", started_at);
+    throughput.record_output_delta("first", GenerationStage::Thinking, started_at);
     throughput.complete_response(Some(20), started_at + Duration::from_secs(2));
-    throughput.record_output_delta("second", started_at + Duration::from_secs(10));
+    throughput.record_output_delta(
+        "second",
+        GenerationStage::Answering,
+        started_at + Duration::from_secs(10),
+    );
     throughput.complete_response(Some(40), started_at + Duration::from_secs(14));
 
     assert_eq!(
@@ -85,10 +94,41 @@ fn completed_responses_form_a_generation_time_weighted_turn_average() {
 fn starting_a_turn_clears_the_previous_sample() {
     let started_at = Instant::now();
     let mut throughput = TurnThroughput::default();
-    throughput.record_output_delta("streamed text", started_at);
+    throughput.record_output_delta("streamed text", GenerationStage::Answering, started_at);
     throughput.complete_response(Some(30), started_at + Duration::from_secs(2));
 
     throughput.start_turn();
 
     assert_eq!(throughput.sample(started_at + Duration::from_secs(3)), None);
+    assert_eq!(
+        throughput.generation_stage(),
+        Some(GenerationStage::Prefill)
+    );
+}
+
+#[test]
+fn generation_stage_tracks_prefill_thinking_and_answering() {
+    let started_at = Instant::now();
+    let mut throughput = TurnThroughput::default();
+
+    throughput.start_turn();
+    assert_eq!(
+        throughput.generation_stage(),
+        Some(GenerationStage::Prefill)
+    );
+
+    throughput.record_output_delta("thought", GenerationStage::Thinking, started_at);
+    assert_eq!(
+        throughput.generation_stage(),
+        Some(GenerationStage::Thinking)
+    );
+
+    throughput.record_output_delta("answer", GenerationStage::Answering, started_at);
+    assert_eq!(
+        throughput.generation_stage(),
+        Some(GenerationStage::Answering)
+    );
+
+    throughput.finish_turn(started_at + Duration::from_secs(1));
+    assert_eq!(throughput.generation_stage(), None);
 }

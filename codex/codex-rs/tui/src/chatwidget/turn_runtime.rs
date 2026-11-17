@@ -127,8 +127,13 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn record_turn_output_delta(&mut self, delta: &str) {
-        self.turn_throughput.record_output_delta(delta, Instant::now());
+    pub(super) fn record_turn_output_delta(
+        &mut self,
+        delta: &str,
+        generation_stage: GenerationStage,
+    ) {
+        self.turn_throughput
+            .record_output_delta(delta, generation_stage, Instant::now());
         self.refresh_status_line();
     }
 

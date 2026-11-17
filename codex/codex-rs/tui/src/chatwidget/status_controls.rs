@@ -455,10 +455,15 @@ impl ChatWidget {
     }
 
     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
-        self.turn_throughput.sample(Instant::now()).map(|sample| {
+        let sample = self.turn_throughput.sample(Instant::now()).map(|sample| {
             let prefix = if sample.estimated { "~" } else { "" };
             format!("{prefix}{:.1} tok/s", sample.tokens_per_second)
-        })
+        });
+        match (self.turn_throughput.generation_stage(), sample) {
+            (Some(stage), Some(sample)) => Some(format!("{} · {sample}", stage.label())),
+            (Some(stage), None) => Some(stage.label().to_string()),
+            (None, sample) => sample,
+        }
     }
 
     pub(super) fn status_line_limit_display(
