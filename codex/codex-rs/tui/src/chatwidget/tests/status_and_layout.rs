@@ -3077,6 +3077,22 @@ async fn status_line_context_remaining_renders_labeled_percent() {
 }
 
 #[tokio::test]
+async fn status_line_context_tokens_renders_live_context_count() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.config.tui_status_line = Some(vec!["context-tokens".to_string()]);
+
+    handle_token_count(&mut chat, Some(make_token_info(2_345, 131_072)));
+    chat.refresh_status_line();
+
+    assert_eq!(status_line_text(&chat), Some("2.35K context".to_string()));
+    assert!(
+        drain_insert_history(&mut rx).is_empty(),
+        "context-tokens should remain a valid status line item"
+    );
+}
+
+#[tokio::test]
 async fn status_line_legacy_context_usage_renders_context_used_percent() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

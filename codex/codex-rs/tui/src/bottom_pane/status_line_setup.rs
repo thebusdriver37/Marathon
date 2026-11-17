@@ -119,6 +119,9 @@ pub(crate) enum StatusLineItem {
     /// Total context window size in tokens.
     ContextWindowSize,
 
+    /// Tokens currently occupying the active context window.
+    ContextTokens,
+
     /// Total tokens used in the current session.
     UsedTokens,
 
@@ -196,6 +199,7 @@ impl StatusLineItem {
             StatusLineItem::ContextWindowSize => {
                 "Total context window size in tokens (omitted when unknown)"
             }
+            StatusLineItem::ContextTokens => "Tokens currently occupying active context",
             StatusLineItem::UsedTokens => "Total tokens used in session (omitted when zero)",
             StatusLineItem::TotalInputTokens => "Total input tokens used in session",
             StatusLineItem::TotalOutputTokens => "Total output tokens used in session",
@@ -242,6 +246,7 @@ impl StatusLineItem {
             StatusLineItem::WeeklyLimit => StatusSurfacePreviewItem::WeeklyLimit,
             StatusLineItem::CodexVersion => StatusSurfacePreviewItem::CodexVersion,
             StatusLineItem::ContextWindowSize => StatusSurfacePreviewItem::ContextWindowSize,
+            StatusLineItem::ContextTokens => StatusSurfacePreviewItem::ContextTokens,
             StatusLineItem::UsedTokens => StatusSurfacePreviewItem::UsedTokens,
             StatusLineItem::TotalInputTokens => StatusSurfacePreviewItem::TotalInputTokens,
             StatusLineItem::TotalOutputTokens => StatusSurfacePreviewItem::TotalOutputTokens,

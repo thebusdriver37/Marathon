@@ -47,6 +47,7 @@ impl StatusLineAccent {
             StatusLineItem::ContextRemaining
             | StatusLineItem::ContextUsed
             | StatusLineItem::ContextWindowSize
+            | StatusLineItem::ContextTokens
             | StatusLineItem::UsedTokens
             | StatusLineItem::TotalInputTokens
             | StatusLineItem::TotalOutputTokens
