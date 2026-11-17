@@ -115,7 +115,7 @@ async fn global_chord_keeps_hints_and_completes_before_deadline() -> Result<()> 
         render_bottom_popup(&app.chat_widget, /*width*/ 80)
             .replace(&test_path_display("/tmp/project"), "/tmp/project"),
         @"
-    › Ask Codex to do anything
+    › Ask Marathon to do anything
 
       ⌃x then · ⌃t open transcript · ⌃u interrupt turn · esc cancel
     "
