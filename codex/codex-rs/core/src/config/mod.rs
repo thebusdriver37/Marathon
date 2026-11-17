@@ -1632,6 +1632,14 @@ async fn config_toml_from_layers(layers: &ConfigLayerStack) -> std::io::Result<C
 }
 
 impl Config {
+    /// Marathon supplies startup defaults as CLI config. They are not a user's
+    /// request to replace the model and effort persisted with a resumed thread.
+    /// The launcher disables this flag for explicit model/profile overrides.
+    pub fn marathon_restore_thread_model(&self) -> bool {
+        self.model_provider_id == "marathon-local"
+            && std::env::var_os("MARATHON_RESTORE_THREAD_MODEL").is_some_and(|value| value == "1")
+    }
+
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
         &self.sqlite
     }

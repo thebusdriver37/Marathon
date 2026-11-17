@@ -915,7 +915,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     let default_cwd = config.cwd.to_path_buf();
     let default_approval_policy = config.permissions.approval_policy.value();
-    let default_effort = config.model_reasoning_effort.clone();
+    let default_effort = if matches!(command.as_ref(), Some(ExecCommand::Resume(_)))
+        && config.marathon_restore_thread_model()
+    {
+        // Leave the resumed thread's persisted effort in force on its first turn.
+        None
+    } else {
+        config.model_reasoning_effort.clone()
+    };
 
     let (initial_operation, prompt_summary) = match (command.as_ref(), prompt, images) {
         (Some(ExecCommand::Review(review_cli)), _, _) => {
@@ -1478,10 +1485,15 @@ fn thread_resume_params_from_config(
             config.cwd.as_path(),
         )
     });
+    let (model, model_provider) = if config.marathon_restore_thread_model() {
+        (None, None)
+    } else {
+        (config.model.clone(), Some(config.model_provider_id.clone()))
+    };
     ThreadResumeParams {
         thread_id,
-        model: config.model.clone(),
-        model_provider: Some(config.model_provider_id.clone()),
+        model,
+        model_provider,
         cwd: Some(config.cwd.to_string_lossy().to_string()),
         runtime_workspace_roots: Some(config.workspace_roots.clone()),
         approval_policy: Some(config.permissions.approval_policy.value().into()),

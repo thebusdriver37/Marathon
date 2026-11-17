@@ -32,6 +32,9 @@ pub(super) fn resume_model_settings_for_overrides(
     config: &Config,
     harness_overrides: &ConfigOverrides,
 ) -> crate::app_server_session::ResumeModelSettings {
+    if config.marathon_restore_thread_model() {
+        return crate::app_server_session::ResumeModelSettings::RestoreFromThread;
+    }
     let has_layer_override = config.config_layer_stack.layers_high_to_low().any(|layer| {
         matches!(
             &layer.name,
