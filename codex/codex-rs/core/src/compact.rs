@@ -875,38 +875,7 @@ async fn drain_to_completed(
                 usage_metadata,
                 ..
             }) => {
-                if !matches!(phase, CompactionPhase::PostTurn) {
-                    for item in std::mem::take(&mut output) {
-                        sess.record_annotated_conversation_items(
-                            turn_context,
-                            turn_context.model_info(),
-                            vec![ResponseItemEnvelope {
-                                item,
-                                metadata: Some(CodexHarnessMetadata {
-                                    compaction_output: true,
-                                    ..Default::default()
-                                }),
-                            }],
-                        )
-                        .await;
-                    }
-                }
-                sess.record_observed_response_completed(
-                    turn_context,
-                    &response_id,
-                    token_usage.as_ref(),
-                    usage_metadata.as_ref(),
-                )
-                .await;
-                sess.update_token_usage_info(turn_context, token_usage.as_ref())
-                    .await?;
-                let summary = summary.ok_or_else(|| {
-                    CodexErr::Stream(
-                        "compaction response completed without a usable assistant summary"
-                            .to_string(),
-                    )
-                })?;
-                if !matches!(phase, CompactionPhase::PostTurn) {
+                if summary.is_some() && !matches!(phase, CompactionPhase::PostTurn) {
                     sess.record_annotated_conversation_items(
                         turn_context,
                         turn_context.model_info(),
@@ -923,6 +892,21 @@ async fn drain_to_completed(
                     )
                     .await;
                 }
+                sess.record_observed_response_completed(
+                    turn_context,
+                    &response_id,
+                    token_usage.as_ref(),
+                    usage_metadata.as_ref(),
+                )
+                .await;
+                sess.update_token_usage_info(turn_context, token_usage.as_ref())
+                    .await?;
+                let summary = summary.ok_or_else(|| {
+                    CodexErr::Stream(
+                        "compaction response completed without a usable assistant summary"
+                            .to_string(),
+                    )
+                })?;
                 return Ok(CompactionResponse {
                     response_id,
                     summary,

@@ -4545,6 +4545,10 @@ async fn manual_compact_retries_reasoning_only_completion_and_uses_fresh_summary
         4,
         "expected user turn, two compact attempts, and follow-up turn"
     );
+    assert!(
+        !body_contains_text(&requests[2].body_json().to_string(), "still analyzing"),
+        "a rejected compaction attempt must not enter the retry history"
+    );
     let follow_up_body = requests[3].body_json().to_string();
     assert!(
         body_contains_text(&follow_up_body, &summary_with_prefix(SUMMARY_TEXT)),

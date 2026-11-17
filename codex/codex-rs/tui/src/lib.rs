@@ -837,7 +837,10 @@ async fn lookup_session_target_with_app_server(
                 if app_server.uses_remote_workspace()
                     || thread.model_provider == config.model_provider_id =>
             {
-                Ok(session_target_from_app_server_thread(app_server.backend_id(), thread))
+                Ok(session_target_from_app_server_thread(
+                    app_server.backend_id(),
+                    thread,
+                ))
             }
             Ok(thread) => {
                 warn!(

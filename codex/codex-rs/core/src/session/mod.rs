@@ -5231,8 +5231,14 @@ impl Session {
         token_usage: Option<&TokenUsage>,
         context: TokenUsageContext,
     ) -> CodexResult<()> {
-        self.record_response_usage_info(turn_context, settings, token_usage, context, /*context_usage*/ None)
-            .await
+        self.record_response_usage_info(
+            turn_context,
+            settings,
+            token_usage,
+            context,
+            /*context_usage*/ None,
+        )
+        .await
     }
 
     pub(crate) async fn record_response_usage_info(
@@ -5248,8 +5254,10 @@ impl Session {
                 let mut state = self.state.lock().await;
                 match context {
                     TokenUsageContext::Sampling => {
-                        state
-                            .update_token_info_from_usage(token_usage, turn_context.model_context_window());
+                        state.update_token_info_from_usage(
+                            token_usage,
+                            turn_context.model_context_window(),
+                        );
                         // A router-managed tool loop has cumulative usage but only its
                         // final model call describes the currently occupied context.
                         if let Some(context_usage) = context_usage
