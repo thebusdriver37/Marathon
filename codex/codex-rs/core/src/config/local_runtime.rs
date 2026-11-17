@@ -23,7 +23,6 @@ pub(super) fn enforce(config: &mut Config) -> std::io::Result<()> {
     config.otel.metrics_exporter = OtelExporterKind::None;
     config.otel.log_user_prompt = false;
     config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
-    config.orchestrator_skills_enabled = false;
     config.orchestrator_mcp_enabled = false;
     config.show_tooltips = false;
     config.tui_pet = None;

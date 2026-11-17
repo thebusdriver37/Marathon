@@ -476,12 +476,14 @@ impl StatusHistoryCell {
             StatusRateLimitData::Missing => {
                 vec![formatter.line(
                     "Limits",
-                    vec![Span::from(if state.refreshing_rate_limits {
-                        "refresh requested; run /status again shortly."
-                    } else {
-                        "data not available yet"
-                    })
-                    .dim()],
+                    vec![
+                        Span::from(if state.refreshing_rate_limits {
+                            "refresh requested; run /status again shortly."
+                        } else {
+                            "data not available yet"
+                        })
+                        .dim(),
+                    ],
                 )]
             }
         }

@@ -13,6 +13,15 @@ pub(super) async fn run_main_inner(
     loader_overrides: LoaderOverrides,
     mut explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 ) -> std::io::Result<AppExitInfo> {
+    if codex_http_client::local_runtime_enabled() {
+        if explicit_remote_endpoint.is_some() || cli.agents_overview {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Marathon cannot attach to an external or shared Codex server",
+            ));
+        }
+        cli.no_daemon = true;
+    }
     if cli.no_daemon && explicit_remote_endpoint.is_some() {
         return Err(std::io::Error::other(
             "--no-daemon cannot be used with --remote.",

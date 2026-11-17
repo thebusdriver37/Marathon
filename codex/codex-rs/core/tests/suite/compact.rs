@@ -2883,32 +2883,29 @@ async fn pre_sampling_compact_falls_back_from_retired_previous_model_after_renam
     )
     .await;
 
-    let request_log = mount_response_sequence(
-        &server,
-        vec![
-            sse_response(sse(vec![
-                ev_assistant_message("m1", "before switch"),
-                ev_completed_with_tokens("r1", /*total_tokens*/ 100),
-            ])),
-            invalid_request_response(format!(
-                "The '{retired_model}' model is not supported when using Codex with a ChatGPT account."
-            )),
-            sse_response(sse(vec![
-                json!({
-                    "type": "response.output_item.done",
-                    "item": {
-                        "type": "compaction",
-                        "encrypted_content": "RETIRED_MODEL_SUMMARY",
-                    }
-                }),
-                ev_completed_with_tokens("r2", /*total_tokens*/ 10),
-            ])),
-            sse_response(sse(vec![
-                ev_assistant_message("m3", "after switch"),
-                ev_completed_with_tokens("r3", /*total_tokens*/ 100),
-            ])),
-        ],
-    )
+    let request_log = mount_response_sequence(&server, vec![
+        sse_response(sse(vec![
+            ev_assistant_message("m1", "before switch"),
+            ev_completed_with_tokens("r1", /*total_tokens*/ 100),
+        ])),
+        invalid_request_response(format!(
+            "The '{retired_model}' model is not supported when using Codex with a ChatGPT account."
+        )),
+        sse_response(sse(vec![
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "compaction",
+                    "encrypted_content": "RETIRED_MODEL_SUMMARY",
+                }
+            }),
+            ev_completed_with_tokens("r2", /*total_tokens*/ 10),
+        ])),
+        sse_response(sse(vec![
+            ev_assistant_message("m3", "after switch"),
+            ev_completed_with_tokens("r3", /*total_tokens*/ 100),
+        ])),
+    ])
     .await;
 
     let model_provider = openai_model_provider(&server);
@@ -4525,7 +4522,7 @@ async fn manual_compact_retries_reasoning_only_completion_and_uses_fresh_summary
     let compaction_response_ids = fs::read_to_string(codex.rollout_path().expect("rollout path"))
         .expect("read rollout")
         .lines()
-        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
+        .filter_map(|line| codex_rollout::parse_rollout_line(line).ok())
         .filter_map(|line| match line.item {
             RolloutItem::Compacted(compacted) => Some(compacted.compaction_response_id),
             _ => None,

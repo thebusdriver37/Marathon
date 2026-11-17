@@ -218,7 +218,11 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
     }
     let response = responses::mount_response_once(&server, template).await;
     let codex_home = tempdir()?;
-    let provider_id = "marathon-local";
+    let provider_id = if automatic {
+        "test-provider"
+    } else {
+        "marathon-local"
+    };
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
@@ -237,6 +241,7 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
     let mut app = make_test_app().await;
     let (event_tx, mut event_rx) = unbounded_channel();
     app.local_settings.tui.animations = false;
+    app.local_settings.tui.status_line = Some(vec!["thread-name".to_string()]);
     app.app_event_tx = AppEventSender::new(event_tx);
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite =
@@ -319,6 +324,16 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
             None
         );
     } else {
+        // Automatic naming must not consume a local inference slot, but
+        // an explicit request for a rename suggestion must still work.
+        app.generate_thread_title(
+            &app_server,
+            thread_id,
+            ThreadTitleDestination::Automatic,
+            thread_title_prompt("Fix the login timeout"),
+        );
+        assert!(app.pending_thread_titles.is_empty());
+        assert!(event_rx.try_recv().is_err());
         app.chat_widget.apply_external_edit("/rename".to_string());
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

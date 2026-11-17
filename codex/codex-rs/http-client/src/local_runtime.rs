@@ -4,7 +4,8 @@ use std::io;
 use std::net::IpAddr;
 
 pub fn local_runtime_enabled() -> bool {
-    std::env::var_os("MARATHON_LOCAL_ONLY").is_some_and(|value| value == "1")
+    option_env!("MARATHON_BUILD_LOCAL_ONLY") == Some("1")
+        || std::env::var_os("MARATHON_LOCAL_ONLY").is_some_and(|value| value == "1")
 }
 
 /// Accept literal loopback destinations only, without DNS or proxy resolution.

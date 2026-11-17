@@ -22,9 +22,9 @@ use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::RequestEffortUsage;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
-use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::session::turn_context::TurnContext;
 use crate::state::AutoCompactWindowIds;
+use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::util::backoff;
 use codex_analytics::CodexCompactionEvent;
 use codex_analytics::CompactionImplementation;
@@ -849,9 +849,14 @@ async fn drain_to_completed(
         match event {
             // Keep each attempt isolated until the response completes successfully.
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                if !matches!(&item, ResponseItem::Message {
-                    phase: Some(MessagePhase::Commentary), ..
-                }) && let Some(message) = last_assistant_message_from_item(&item, false)
+                if !matches!(
+                    &item,
+                    ResponseItem::Message {
+                        phase: Some(MessagePhase::Commentary),
+                        ..
+                    }
+                ) && let Some(message) =
+                    last_assistant_message_from_item(&item, /*plan_mode*/ false)
                     && !message.trim().is_empty()
                 {
                     summary = Some(message);
@@ -895,21 +900,28 @@ async fn drain_to_completed(
                 .await;
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
                     .await?;
-                let summary = summary.ok_or_else(|| CodexErr::Stream(
-                    "compaction response completed without a usable assistant summary".to_string()
-                ))?;
+                let summary = summary.ok_or_else(|| {
+                    CodexErr::Stream(
+                        "compaction response completed without a usable assistant summary"
+                            .to_string(),
+                    )
+                })?;
                 if !matches!(phase, CompactionPhase::PostTurn) {
                     sess.record_annotated_conversation_items(
                         turn_context,
                         turn_context.model_info(),
-                        output.into_iter().map(|item| ResponseItemEnvelope {
-                            item,
-                            metadata: Some(CodexHarnessMetadata {
-                                compaction_output: true,
-                                ..Default::default()
-                            }),
-                        }).collect(),
-                    ).await;
+                        output
+                            .into_iter()
+                            .map(|item| ResponseItemEnvelope {
+                                item,
+                                metadata: Some(CodexHarnessMetadata {
+                                    compaction_output: true,
+                                    ..Default::default()
+                                }),
+                            })
+                            .collect(),
+                    )
+                    .await;
                 }
                 return Ok(CompactionResponse {
                     response_id,

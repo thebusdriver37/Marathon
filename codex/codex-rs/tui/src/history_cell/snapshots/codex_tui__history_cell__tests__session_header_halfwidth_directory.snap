@@ -1,20 +1,20 @@
 ---
 source: tui/src/history_cell/tests.rs
-assertion_line: 1903
+assertion_line: 1895
 expression: "format!(\"{buf:?}\")"
 ---
 Buffer {
     area: Rect { x: 0, y: 0, width: 42, height: 3 },
     content: [
         "                                          ",
-        "  >_ OpenAI Codex (vtest)                 ",
+        "  >_ Marathon (vtest)                     ",
         "     …ｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟ-project", // hidden by multi-width symbols: [(7, " "), (9, " "), (11, " "), (13, " "), (15, " "), (17, " "), (19, " "), (21, " "), (23, " "), (25, " "), (27, " "), (29, " "), (31, " "), (33, " ")]
     ],
     styles: [
         x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
-        x: 5, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
-        x: 17, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
-        x: 25, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 5, y: 1, fg: Red, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 13, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 21, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 5, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
         x: 7, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 8, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,

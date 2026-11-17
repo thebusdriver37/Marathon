@@ -1,10 +1,10 @@
 ---
 source: tui/src/chatwidget/tests/status_and_layout.rs
-assertion_line: 3040
+assertion_line: 3121
 expression: normalized_backend_snapshot(terminal.backend())
 ---
 "                                                                        "
 "                                                                        "
-"› Ask Codex to do anything                                              "
+"› Ask Marathon to do anything                                           "
 "                                                                        "
-"  60.6 tok/s · first 2.5s                                               "
+"  Working · 105.0 tok/s                                                 "

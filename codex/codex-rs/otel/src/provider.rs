@@ -192,6 +192,12 @@ impl OtelProvider {
     }
 
     pub fn try_new(settings: &OtelSettings) -> Result<Option<Self>, Box<dyn Error>> {
+        // Guard here too: CLI services can initialize telemetry before Config loads.
+        if option_env!("MARATHON_BUILD_LOCAL_ONLY") == Some("1")
+            || std::env::var_os("MARATHON_LOCAL_ONLY").is_some_and(|value| value == "1")
+        {
+            return Ok(None);
+        }
         let log_enabled = !matches!(settings.exporter, OtelExporter::None);
         let trace_enabled = !matches!(settings.trace_exporter, OtelExporter::None);
         let metric_exporter = crate::config::resolve_exporter(&settings.metrics_exporter);

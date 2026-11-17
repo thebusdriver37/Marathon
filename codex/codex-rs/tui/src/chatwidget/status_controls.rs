@@ -475,7 +475,7 @@ impl ChatWidget {
             return self.run_state_status_text();
         };
 
-        if self.config.animations
+        if self.local_settings.tui.animations
             && let Some(frame) = self
                 .turn_throughput
                 .generation_activity_frame(Instant::now())
@@ -487,7 +487,7 @@ impl ChatWidget {
 
     /// Keep the compact footer visibly alive throughout an active turn.
     pub(super) fn refresh_active_turn_status_line(&mut self) {
-        if !self.config.animations
+        if !self.local_settings.tui.animations
             || !self.turn_throughput.is_active()
             || !self
                 .configured_status_line_items()

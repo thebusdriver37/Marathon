@@ -3080,7 +3080,7 @@ async fn status_line_context_remaining_renders_labeled_percent() {
 async fn status_line_context_tokens_renders_compact_usage_ratio() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
-    chat.config.tui_status_line = Some(vec!["context-tokens".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["context-tokens".to_string()]);
 
     handle_token_count(&mut chat, Some(make_token_info(2_345, 131_072)));
     chat.refresh_status_line();
@@ -3104,8 +3104,8 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
 
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.show_welcome_banner = false;
-    chat.config.animations = false;
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.animations = false;
+    chat.local_settings.tui.status_line = Some(vec![
         "run-state".to_string(),
         "tokens-per-second".to_string(),
     ]);
@@ -3190,7 +3190,7 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
 #[tokio::test]
 async fn status_line_limits_active_states_to_working_and_thinking() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec!["run-state".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["run-state".to_string()]);
 
     handle_turn_started(&mut chat, "turn-stage");
     chat.refresh_status_line();
@@ -3236,8 +3236,8 @@ async fn active_turn_footer_schedules_continuous_animation_frames() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let (frame_requester, mut frame_rx) = crate::tui::FrameRequester::test_channel();
     chat.frame_requester = frame_requester;
-    chat.config.animations = true;
-    chat.config.tui_status_line = Some(vec!["run-state".to_string()]);
+    chat.local_settings.tui.animations = true;
+    chat.local_settings.tui.status_line = Some(vec!["run-state".to_string()]);
     handle_turn_started(&mut chat, "turn-animated-stage");
     while frame_rx.try_recv().is_ok() {}
 
@@ -3277,7 +3277,7 @@ async fn active_turn_footer_schedules_continuous_animation_frames() {
 #[tokio::test]
 async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec!["run-state".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["run-state".to_string()]);
     handle_turn_started(&mut chat, "turn-patch-progress");
     handle_agent_message_delta(&mut chat, "I will add the page.");
 
@@ -4423,7 +4423,7 @@ async fn status_line_and_terminal_title_reasoning_render_only_effort() {
 #[tokio::test]
 async fn status_line_reasoning_distinguishes_unset_from_disabled() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
-    chat.config.tui_status_line = Some(vec!["reasoning".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["reasoning".to_string()]);
 
     chat.set_reasoning_effort(None);
     chat.refresh_status_line();

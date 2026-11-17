@@ -1,9 +1,9 @@
 ---
 source: tui/src/history_cell/tests.rs
-assertion_line: 1885
+assertion_line: 1877
 expression: rendered
 ---
 
-  >_ OpenAI Codex (vtest)
+  >_ Marathon (vtest)
      /tmp/project
   permissions: YOLO mode

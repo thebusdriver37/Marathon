@@ -1,9 +1,9 @@
 ---
 source: tui/src/history_cell/tests.rs
-assertion_line: 1867
+assertion_line: 1859
 expression: "render_lines(&lines).join(\"\\n\")"
 ---
 
-  >_ OpenAI Codex (vtest)
+  >_ Marathon (vtest)
      project
   permissions: YOLO mode

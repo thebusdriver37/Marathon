@@ -610,8 +610,8 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
         if !remote {
             let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80)
                 .replace(&destination.path().display().to_string(), "<PROJECT>");
-            insta::assert_snapshot!(rendered, @r"
-            › Ask Codex to do anything
+            insta::assert_snapshot!(rendered, @"
+            › Ask Marathon to do anything
 
               GPT-6.1-Sol high · <PROJECT>
             ");

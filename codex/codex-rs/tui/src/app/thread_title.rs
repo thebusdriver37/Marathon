@@ -70,7 +70,7 @@ impl App {
         // evicts the conversation prefix and delays the next user turn.
         // Keep the provisional title; explicit rename suggestions still work.
         if self.chat_widget.config_ref().model_provider_id == "marathon-local"
-            && matches!(destination, ThreadTitleDestination::Automatic { .. })
+            && matches!(destination, ThreadTitleDestination::Automatic)
         {
             return;
         }

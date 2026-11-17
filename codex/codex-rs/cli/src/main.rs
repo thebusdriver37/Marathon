@@ -1040,9 +1040,35 @@ fn stage_str(stage: Stage) -> &'static str {
     }
 }
 
+fn reject_marathon_cloud_command(command: Option<&Subcommand>) -> anyhow::Result<()> {
+    if matches!(
+        command,
+        Some(
+            Subcommand::Agents(_)
+                | Subcommand::Login(_)
+                | Subcommand::Cloud(_)
+                | Subcommand::RemoteControl(_)
+                | Subcommand::Update
+                | Subcommand::ResponsesApiProxy(_)
+                | Subcommand::TcpTunnel(_)
+                | Subcommand::StdioToUds(_)
+        )
+    ) || matches!(
+        command,
+        Some(Subcommand::AppServer(AppServerCommand {
+            subcommand: Some(AppServerSubcommand::Daemon(_) | AppServerSubcommand::Proxy(_)),
+            ..
+        }))
+    ) {
+        anyhow::bail!("Marathon does not support Codex cloud, login, or shared-server commands");
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     codex_build_info::initialize!();
-    let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
+    let remote_control_disabled = codex_app_server::take_remote_control_disabled_env()
+        || codex_http_client::local_runtime_enabled();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         // Keep the CLI dispatcher off the runtime's stack while the TUI rebuilds a thread.
         Box::pin(cli_main(arg0_paths, remote_control_disabled)).await?;
@@ -1062,6 +1088,10 @@ async fn cli_main(
         subcommand,
     } = config_override_args::try_parse_from(std::env::args_os())
         .unwrap_or_else(|error| error.exit());
+    if codex_http_client::local_runtime_enabled() {
+        reject_marathon_cloud_command(subcommand.as_ref())?;
+        interactive.no_daemon = true;
+    }
     // Retain the launch target through TUI exit, even if a launcher changes selection.
     let daemon_cli_executable = arg0_paths
         .codex_self_exe
@@ -1091,6 +1121,9 @@ async fn cli_main(
     let root_remote_auth_token_env = agents_options
         .and_then(|options| options.remote.remote_auth_token_env.clone())
         .or(remote.remote_auth_token_env);
+    if codex_http_client::local_runtime_enabled() && root_remote.is_some() {
+        anyhow::bail!("Marathon cannot attach to an external Codex server");
+    }
     if let Some(options) = agents_options {
         interactive.cwd = options.cwd.clone().or(interactive.cwd.take());
         interactive.no_alt_screen |= options.no_alt_screen;
@@ -2627,6 +2660,12 @@ fn resolve_remote_endpoint(
     remote: Option<String>,
     remote_auth_token_env: Option<String>,
 ) -> std::io::Result<Option<codex_tui::RemoteAppServerEndpoint>> {
+    if codex_http_client::local_runtime_enabled() && remote.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Marathon cannot attach to an external Codex server",
+        ));
+    }
     let mut remote_endpoint = remote
         .as_deref()
         .map(codex_tui::resolve_remote_addr)
@@ -2825,6 +2864,28 @@ mod tests {
     use codex_protocol::ThreadId;
     use codex_tui::TokenUsage;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn marathon_rejects_cloud_and_shared_server_commands() {
+        for args in [
+            vec!["codex", "login"],
+            vec!["codex", "cloud"],
+            vec!["codex", "agents"],
+            vec!["codex", "update"],
+            vec!["codex", "app-server", "daemon", "start"],
+        ] {
+            let cli = MultitoolCli::try_parse_from(args).unwrap();
+            assert!(reject_marathon_cloud_command(cli.subcommand.as_ref()).is_err());
+        }
+        for args in [
+            vec!["codex"],
+            vec!["codex", "exec", "local test"],
+            vec!["codex", "resume"],
+        ] {
+            let cli = MultitoolCli::try_parse_from(args).unwrap();
+            assert!(reject_marathon_cloud_command(cli.subcommand.as_ref()).is_ok());
+        }
+    }
 
     #[test]
     fn interactive_tui_future_stays_bounded() {

@@ -176,6 +176,12 @@ impl ShutdownHandle {
 
 /// Starts a local callback server and returns the browser auth URL.
 pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+    if codex_http_client::local_runtime_enabled() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "OpenAI browser authentication is disabled in Marathon",
+        ));
+    }
     let pkce = generate_pkce();
     let state = opts.force_state.clone().unwrap_or_else(generate_state);
 
