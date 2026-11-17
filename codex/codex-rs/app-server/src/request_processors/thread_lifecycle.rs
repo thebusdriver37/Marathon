@@ -347,10 +347,15 @@ pub(super) async fn ensure_listener_task_running(
                             .then(|| thread_state.turn_summary.clone());
                         (thread_state.experimental_raw_events, terminal)
                     };
+                    let has_local_metrics = matches!(
+                        &event.msg,
+                        EventMsg::RawResponseCompleted(completed)
+                            if completed.usage_metadata.as_ref().is_some_and(|metadata| metadata.marathon.is_some())
+                    );
                     if matches!(
                         &event.msg,
                         EventMsg::RawResponseItem(_) | EventMsg::RawResponseCompleted(_) | EventMsg::PrivateSessionEvent(_)
-                    ) && !raw_events_enabled
+                    ) && !raw_events_enabled && !has_local_metrics
                     {
                         continue;
                     }

@@ -179,6 +179,7 @@ async fn responses_stream_parses_items_and_completed_end_to_end() -> Result<()> 
                 &Some(codex_protocol::ResponseUsageMetadata {
                     amount: Some("0.12345678901234567890".to_string()),
                     metadata: Some(expected_metadata),
+                    marathon: None,
                 })
             );
             assert_eq!(

@@ -1303,6 +1303,7 @@ mod tests {
                 usage_metadata: Some(codex_protocol::ResponseUsageMetadata {
                     amount: Some("0.125".to_string()),
                     metadata: Some(serde_json::json!({ "extra": { "label": "example" } })),
+                    marathon: None,
                 }),
                 end_turn: Some(true),
             }),
@@ -1331,7 +1332,8 @@ mod tests {
             Some(codex_protocol::ResponseUsageMetadata {
                 amount: Some("0.125".to_string()),
                 metadata: Some(serde_json::json!({ "extra": { "label": "example" } })),
-            })
+                marathon: None,
+            }),
         );
         assert_eq!(
             output.token_usage,

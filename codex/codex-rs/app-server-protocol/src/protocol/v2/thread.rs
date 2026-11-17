@@ -1975,6 +1975,26 @@ pub struct RawResponseCompletedNotification {
 pub struct ResponseUsageMetadata {
     pub amount: Option<String>,
     pub metadata: Option<JsonValue>,
+    pub marathon: Option<MarathonResponseMetrics>,
+}
+
+/// Backend decode and prefill totals for a completed local response.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MarathonResponseMetrics {
+    #[ts(type = "number")]
+    pub decode_tokens: u64,
+    #[ts(type = "number")]
+    pub decode_microseconds: u64,
+    #[ts(type = "number")]
+    pub prefill_tokens: u64,
+    #[ts(type = "number")]
+    pub prefill_microseconds: u64,
+    #[ts(type = "number")]
+    pub backend_calls: u64,
+    #[ts(type = "number")]
+    pub timed_backend_calls: u64,
 }
 
 impl From<codex_protocol::ResponseUsageMetadata> for ResponseUsageMetadata {
@@ -1982,6 +2002,14 @@ impl From<codex_protocol::ResponseUsageMetadata> for ResponseUsageMetadata {
         Self {
             amount: value.amount,
             metadata: value.metadata,
+            marathon: value.marathon.map(|metrics| MarathonResponseMetrics {
+                decode_tokens: metrics.decode_tokens,
+                decode_microseconds: metrics.decode_microseconds,
+                prefill_tokens: metrics.prefill_tokens,
+                prefill_microseconds: metrics.prefill_microseconds,
+                backend_calls: metrics.backend_calls,
+                timed_backend_calls: metrics.timed_backend_calls,
+            }),
         }
     }
 }

@@ -3198,6 +3198,10 @@ async fn try_run_sampling_request(
             } => {
                 response_completed = true;
                 request_token_usage = token_usage.clone();
+                let context_usage = usage_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.marathon.as_ref())
+                    .and_then(|metrics| metrics.context_usage.clone());
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(
@@ -3223,11 +3227,12 @@ async fn try_run_sampling_request(
                 )
                 .await;
                 let budget_result = sess
-                    .record_token_usage_info(
+                    .record_response_usage_info(
                         &turn_context,
                         &step_context.settings,
                         token_usage.as_ref(),
                         super::TokenUsageContext::Sampling,
+                        context_usage.as_ref(),
                     )
                     .await;
                 should_emit_token_count = true;

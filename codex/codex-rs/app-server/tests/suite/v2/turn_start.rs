@@ -1180,25 +1180,54 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
     Ok(())
 }
 
-#[test_case(None, None, None; "without_usage_metadata")]
-#[test_case(Some(json!({})), None, None; "without_amount")]
-#[test_case(Some(json!({ "amount": null })), None, None; "null_amount")]
-#[test_case(Some(json!({ "amount": "0" })), Some("0"), None; "zero_amount")]
+#[test_case(None, None, None, None; "without_usage_metadata")]
+#[test_case(Some(json!({})), None, None, None; "without_amount")]
+#[test_case(Some(json!({ "amount": null })), None, None, None; "null_amount")]
+#[test_case(Some(json!({ "amount": "0" })), Some("0"), None, None; "zero_amount")]
+#[test_case(
+    Some(json!({"marathon": {
+        "context_usage": {"input_tokens": 20, "cached_input_tokens": 7,
+            "cache_write_input_tokens": 0, "output_tokens": 5,
+            "reasoning_output_tokens": 3, "total_tokens": 25},
+        "decode_tokens": 5, "decode_microseconds": 100000,
+        "prefill_tokens": 13, "prefill_microseconds": 200000,
+        "backend_calls": 2, "timed_backend_calls": 2
+    }})),
+    None,
+    Some(json!({"label": "local response"})),
+    Some(json!({
+        "decodeTokens": 5, "decodeMicroseconds": 100000,
+        "prefillTokens": 13, "prefillMicroseconds": 200000,
+        "backendCalls": 2, "timedBackendCalls": 2
+    }));
+    "marathon_decode_and_context"
+)]
 #[test_case(
     Some(json!({ "amount": "0.12345678901234567890" })),
     Some("0.12345678901234567890"),
-    Some(json!({ "label": "example", "items": [0, null, true] }));
+    Some(json!({ "label": "example", "items": [0, null, true] })),
+    None;
     "exact_amount"
 )]
-#[test_case(None, None, Some(json!(null)); "null_extra")]
-#[test_case(None, None, Some(json!(0)); "zero_extra")]
-#[test_case(None, None, Some(json!({ "label": "example" })); "nested_extra")]
+#[test_case(None, None, Some(json!(null)), None; "null_extra")]
+#[test_case(None, None, Some(json!(0)), None; "zero_extra")]
+#[test_case(None, None, Some(json!({ "label": "example" })), None; "nested_extra")]
 #[tokio::test]
 async fn turn_start_emits_raw_response_completed_with_upstream_usage(
     upstream_metadata: Option<Value>,
     expected_amount: Option<&str>,
     extra: Option<Value>,
+    expected_marathon: Option<Value>,
 ) -> Result<()> {
+    let context_total = upstream_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/marathon/context_usage/total_tokens"))
+        .and_then(Value::as_i64)
+        .unwrap_or(37);
+    let raw_events_enabled = upstream_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("marathon"))
+        .is_none();
     let server = responses::start_mock_server().await;
     let mut completed = json!({
         "type": "response.completed",
@@ -1222,6 +1251,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
     let expected_metadata = json!({
         "amount": expected_amount,
         "metadata": completed["response"]["usage"],
+        "marathon": expected_marathon,
     });
     let body = responses::sse(vec![
         responses::ev_response_created("resp-1"),
@@ -1241,7 +1271,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
 
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
-            experimental_raw_events: true,
+            experimental_raw_events: raw_events_enabled,
             ..Default::default()
         })
         .await?;
@@ -1282,7 +1312,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
     assert_eq!(
         notification,
         RawResponseCompletedNotification {
-            thread_id: thread.id,
+            thread_id: thread.id.clone(),
             turn_id: turn.id,
             response_id: "resp-1".to_string(),
             usage_metadata: serde_json::from_value(expected_metadata)?,
@@ -1298,6 +1328,17 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
     );
 
     response_mock.single_request();
+    let usage_notification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/tokenUsage/updated"),
+    )
+    .await??;
+    let usage = usage_notification.params.expect("token usage notification");
+    assert_eq!(usage["tokenUsage"]["total"]["totalTokens"], json!(37));
+    assert_eq!(
+        usage["tokenUsage"]["last"]["totalTokens"],
+        json!(context_total)
+    );
     Ok(())
 }
 

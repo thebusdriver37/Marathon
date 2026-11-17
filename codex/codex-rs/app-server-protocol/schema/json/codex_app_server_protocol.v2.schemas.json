@@ -10749,6 +10749,50 @@
       ],
       "type": "object"
     },
+    "MarathonResponseMetrics": {
+      "description": "Backend decode and prefill totals for a completed local response.",
+      "properties": {
+        "backendCalls": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "decodeMicroseconds": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "decodeTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "prefillMicroseconds": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "prefillTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "timedBackendCalls": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "backendCalls",
+        "decodeMicroseconds",
+        "decodeTokens",
+        "prefillMicroseconds",
+        "prefillTokens",
+        "timedBackendCalls"
+      ],
+      "type": "object"
+    },
     "MarketplaceAddParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -15851,6 +15895,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "marathon": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MarathonResponseMetrics"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "metadata": true
