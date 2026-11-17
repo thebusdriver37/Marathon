@@ -455,68 +455,34 @@ impl ChatWidget {
     }
 
     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
-        if let Some(stage) = self.turn_throughput.generation_stage() {
+        if self.turn_throughput.is_active() {
             let now = Instant::now();
-            let stage_label = if self.config.animations {
+            let activity = if self.config.animations {
                 self.turn_throughput
                     .generation_activity_frame(now)
-                    .map_or_else(
-                        || stage.label().to_string(),
-                        |frame| format!("{frame} {}", stage.label()),
-                    )
+                    .map_or_else(|| "Working".to_string(), |frame| format!("{frame} Working"))
             } else {
-                stage.label().to_string()
+                "Working".to_string()
             };
-            if matches!(
-                stage,
-                GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
-            ) && let Some(progress) = self.turn_throughput.patch_progress()
-            {
-                let mut label = format!("{stage_label} {}", progress.target);
-                if progress.line_count > 0 {
-                    let unit = if progress.line_count == 1 {
-                        "line"
-                    } else {
-                        "lines"
-                    };
-                    label.push_str(&format!(" · {} {unit}", progress.line_count));
-                }
-                label.push_str(&format!(
-                    " · {}",
-                    format_latency(now.saturating_duration_since(progress.started_at))
-                ));
-                return Some(label);
-            }
-            let elapsed = self.turn_throughput.elapsed(now);
-            return Some(match elapsed {
-                Some(elapsed) => {
-                    format!("{stage_label} · total {}", format_latency(elapsed))
-                }
-                None => stage_label,
-            });
+            let elapsed = self.turn_throughput.elapsed(now)?;
+            return Some(format!("{activity} · {}", format_turn_elapsed(elapsed)));
         }
 
-        let elapsed = self.turn_throughput.elapsed(Instant::now())?;
-        let rate_label = if self.turn_throughput.is_finished() {
-            "turn avg"
-        } else {
-            "decode"
-        };
+        self.turn_throughput.elapsed(Instant::now())?;
         let mut label = self.turn_throughput.sample().map_or_else(
-            || format!("{rate_label} n/a"),
-            |sample| format!("{:.1} tok/s {rate_label}", sample.tokens_per_second),
+            || "speed n/a".to_string(),
+            |sample| format!("{:.1} tok/s", sample.tokens_per_second),
         );
         if let Some(latency) = self.turn_throughput.time_to_first_output() {
-            label.push_str(&format!(" · first activity {}", format_latency(latency)));
+            label.push_str(&format!(" · first {}", format_latency(latency)));
         }
-        label.push_str(&format!(" · total {}", format_latency(elapsed)));
         Some(label)
     }
 
-    /// Keep the compact generation footer visibly alive while model output is buffered.
-    pub(super) fn refresh_active_generation_status_line(&mut self) {
+    /// Keep the compact footer visibly alive throughout an active turn.
+    pub(super) fn refresh_active_turn_status_line(&mut self) {
         if !self.config.animations
-            || self.turn_throughput.generation_stage().is_none()
+            || !self.turn_throughput.is_active()
             || !self
                 .configured_status_line_items()
                 .iter()
@@ -557,5 +523,18 @@ fn format_latency(duration: Duration) -> String {
         format!("{seconds:.1}s")
     } else {
         format!("{seconds:.0}s")
+    }
+}
+
+fn format_turn_elapsed(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    if hours > 0 {
+        format!("{hours}:{:02}:{:02}", minutes % 60, seconds % 60)
+    } else if minutes > 0 {
+        format!("{minutes}:{:02}", seconds % 60)
+    } else {
+        format!("{seconds}s")
     }
 }

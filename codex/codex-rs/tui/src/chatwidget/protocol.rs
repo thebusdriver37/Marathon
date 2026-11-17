@@ -126,9 +126,8 @@ impl ChatWidget {
                                 .set_generation_stage(GenerationStage::Answering);
                             self.refresh_status_line();
                         }
-                        ThreadItem::FileChange { id, changes, .. } => {
-                            self.turn_throughput
-                                .begin_patch_apply(id, changes, Instant::now());
+                        ThreadItem::FileChange { id, .. } => {
+                            self.turn_throughput.begin_patch_apply(id, Instant::now());
                             self.refresh_status_line();
                         }
                         ThreadItem::CommandExecution { .. }
@@ -235,11 +234,8 @@ impl ChatWidget {
             }
             ServerNotification::FileChangePatchUpdated(notification) => {
                 if !from_replay {
-                    self.turn_throughput.record_patch_progress(
-                        &notification.item_id,
-                        &notification.changes,
-                        Instant::now(),
-                    );
+                    self.turn_throughput
+                        .record_patch_progress(&notification.item_id, Instant::now());
                     self.refresh_status_line();
                 }
             }

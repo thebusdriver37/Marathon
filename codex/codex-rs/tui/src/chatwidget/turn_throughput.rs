@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
-use codex_app_server_protocol::FileUpdateChange;
 use codex_app_server_protocol::MarathonResponseMetrics;
 
 pub(super) const GENERATION_ACTIVITY_INTERVAL: Duration = Duration::from_millis(100);
@@ -16,27 +15,6 @@ pub(super) enum GenerationStage {
     PreparingAction,
     DraftingCode,
     ApplyingChanges,
-}
-
-impl GenerationStage {
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Prefill => "Prefill",
-            Self::Thinking => "Thinking",
-            Self::Answering => "Generating",
-            Self::PreparingAction => "Preparing next action",
-            Self::DraftingCode => "Drafting",
-            Self::ApplyingChanges => "Applying",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct PatchProgress {
-    pub(super) call_id: String,
-    pub(super) target: String,
-    pub(super) line_count: usize,
-    pub(super) started_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,7 +35,7 @@ pub(super) struct TurnThroughput {
     missing_timings: bool,
     latest_sample: Option<ThroughputSample>,
     generation_stage: Option<GenerationStage>,
-    patch_progress: Option<PatchProgress>,
+    patch_call_id: Option<String>,
 }
 
 impl TurnThroughput {
@@ -126,7 +104,7 @@ impl TurnThroughput {
             self.missing_timings = true;
         }
         self.generation_stage = None;
-        self.patch_progress = None;
+        self.patch_call_id = None;
         self.turn_finished_at.get_or_insert(now);
     }
 
@@ -135,7 +113,9 @@ impl TurnThroughput {
     }
 
     pub(super) fn generation_activity_frame(&self, now: Instant) -> Option<&'static str> {
-        self.generation_stage?;
+        if !self.is_active() {
+            return None;
+        }
         let started_at = self.turn_started_at?;
         let frame_index = (now.saturating_duration_since(started_at).as_millis()
             / GENERATION_ACTIVITY_INTERVAL.as_millis())
@@ -163,57 +143,34 @@ impl TurnThroughput {
             generation_stage,
             GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
         ) {
-            self.patch_progress = None;
+            self.patch_call_id = None;
         }
     }
 
-    pub(super) fn record_patch_progress(
-        &mut self,
-        call_id: &str,
-        changes: &[FileUpdateChange],
-        now: Instant,
-    ) {
-        let started_at = self
-            .patch_progress
-            .as_ref()
-            .filter(|progress| progress.call_id == call_id)
-            .map_or(now, |progress| progress.started_at);
-        self.patch_progress = Some(PatchProgress {
-            call_id: call_id.to_string(),
-            target: patch_target(changes),
-            line_count: changes
-                .iter()
-                .map(|change| change.diff.lines().count())
-                .sum(),
-            started_at,
-        });
+    pub(super) fn record_patch_progress(&mut self, call_id: &str, now: Instant) {
+        self.patch_call_id = Some(call_id.to_string());
         self.record_first_output(now);
         self.generation_stage = Some(GenerationStage::DraftingCode);
     }
 
-    pub(super) fn begin_patch_apply(
-        &mut self,
-        call_id: &str,
-        changes: &[FileUpdateChange],
-        now: Instant,
-    ) {
+    pub(super) fn begin_patch_apply(&mut self, call_id: &str, now: Instant) {
         if self
-            .patch_progress
-            .as_ref()
-            .is_none_or(|progress| progress.call_id != call_id)
+            .patch_call_id
+            .as_deref()
+            .is_none_or(|active_call_id| active_call_id != call_id)
         {
-            self.record_patch_progress(call_id, changes, now);
+            self.record_patch_progress(call_id, now);
         }
         self.generation_stage = Some(GenerationStage::ApplyingChanges);
     }
 
     pub(super) fn finish_patch_apply(&mut self, call_id: &str) {
         if self
-            .patch_progress
-            .as_ref()
-            .is_some_and(|progress| progress.call_id == call_id)
+            .patch_call_id
+            .as_deref()
+            .is_some_and(|active_call_id| active_call_id == call_id)
         {
-            self.patch_progress = None;
+            self.patch_call_id = None;
         }
         if matches!(
             self.generation_stage,
@@ -223,12 +180,12 @@ impl TurnThroughput {
         }
     }
 
-    pub(super) fn patch_progress(&self) -> Option<&PatchProgress> {
-        self.patch_progress.as_ref()
-    }
-
     pub(super) fn is_finished(&self) -> bool {
         self.turn_finished_at.is_some()
+    }
+
+    pub(super) fn is_active(&self) -> bool {
+        self.turn_started_at.is_some() && !self.is_finished()
     }
 
     // During tool loops report the latest response; only summarize at turn end.
@@ -243,14 +200,6 @@ impl TurnThroughput {
             tokens_per_second: self.decode_tokens as f64 * 1_000_000.0
                 / self.decode_microseconds as f64,
         })
-    }
-}
-
-fn patch_target(changes: &[FileUpdateChange]) -> String {
-    match changes {
-        [] => "code".to_string(),
-        [change] => change.path.clone(),
-        changes => format!("{} files", changes.len()),
     }
 }
 

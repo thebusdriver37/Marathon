@@ -1,5 +1,0 @@
----
-source: tui/src/chatwidget/tests/status_and_layout.rs
-expression: "live_label.split(\" · total\").next().unwrap()"
----
-105.0 tok/s decode · first activity 2.5s

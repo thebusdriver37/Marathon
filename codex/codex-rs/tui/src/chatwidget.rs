@@ -1197,6 +1197,7 @@ impl ChatWidget {
         self.bottom_pane.pre_draw_tick();
         self.flush_realtime_transcript_history();
         self.refresh_realtime_microphone_level();
+        self.refresh_active_turn_status_line();
         if let Some(pet) = self.ambient_pet.as_ref() {
             pet.schedule_next_frame();
         }
@@ -1210,7 +1211,6 @@ impl ChatWidget {
             self.refresh_terminal_title();
         }
         self.refresh_status_line_if_workspace_headline_due();
-        self.refresh_active_generation_status_line();
         self.refresh_thread_usage_if_settlement_due();
         self.refresh_terminal_program_status();
     }

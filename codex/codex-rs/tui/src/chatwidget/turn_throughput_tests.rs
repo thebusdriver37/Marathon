@@ -190,6 +190,12 @@ fn generation_activity_frame_advances_and_stops_with_the_turn() {
         Some("⠋")
     );
 
+    throughput.complete_response("tool-loop", Some(&metrics(/*tokens*/ 100, /*seconds*/ 1)));
+    assert_eq!(
+        throughput.generation_activity_frame(start + GENERATION_ACTIVITY_INTERVAL * 11),
+        Some("⠙")
+    );
+
     throughput.finish_turn(start + Duration::from_secs(2));
     assert_eq!(
         throughput.generation_activity_frame(start + Duration::from_secs(3)),

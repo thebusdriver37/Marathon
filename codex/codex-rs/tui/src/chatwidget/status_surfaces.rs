@@ -793,10 +793,14 @@ impl ChatWidget {
             StatusLineItem::ContextWindowSize => self
                 .status_line_context_window_size()
                 .map(|cws| format!("{} window", format_tokens_compact(cws))),
-            StatusLineItem::ContextTokens => Some(format!(
-                "{} context",
-                format_tokens_compact(self.status_line_context_tokens())
-            )),
+            StatusLineItem::ContextTokens => {
+                let used = format_tokens_compact(self.status_line_context_tokens());
+                Some(
+                    self.status_line_context_window_size()
+                        .map(|window| format!("{used} / {} ctx", format_tokens_compact(window)))
+                        .unwrap_or_else(|| format!("{used} ctx")),
+                )
+            }
             StatusLineItem::TotalInputTokens => (!self.token_usage_pending).then(|| {
                 format!(
                     "{} in",

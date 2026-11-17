@@ -47,15 +47,14 @@ impl StatusLineAccent {
             StatusLineItem::ContextRemaining
             | StatusLineItem::ContextUsed
             | StatusLineItem::ContextWindowSize
-            | StatusLineItem::ContextTokens
             | StatusLineItem::UsedTokens
             | StatusLineItem::TotalInputTokens
             | StatusLineItem::TotalOutputTokens
-            | StatusLineItem::TokensPerSecond
             | StatusLineItem::ThreadCredits
             | StatusLineItem::EstimatedThreadCost => Self::Usage,
+            StatusLineItem::TokensPerSecond => Self::State,
             StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => Self::Limit,
-            StatusLineItem::CodexVersion | StatusLineItem::Hostname | StatusLineItem::SessionId => {
+            StatusLineItem::CodexVersion | StatusLineItem::Hostname | StatusLineItem::SessionId | StatusLineItem::ContextTokens => {
                 Self::Metadata
             }
             StatusLineItem::FastMode | StatusLineItem::Daybreak | StatusLineItem::RawOutput => {
