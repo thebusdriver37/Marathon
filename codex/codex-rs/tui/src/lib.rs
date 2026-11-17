@@ -833,10 +833,21 @@ async fn lookup_session_target_with_app_server(
             .thread_read(thread_id, /*include_turns*/ false)
             .await
         {
-            Ok(thread) => Ok(session_target_from_app_server_thread(
-                app_server.backend_id(),
-                thread,
-            )),
+            Ok(thread)
+                if app_server.uses_remote_workspace()
+                    || thread.model_provider == config.model_provider_id =>
+            {
+                Ok(session_target_from_app_server_thread(app_server.backend_id(), thread))
+            }
+            Ok(thread) => {
+                warn!(
+                    session = id_or_name,
+                    expected_provider = %config.model_provider_id,
+                    actual_provider = %thread.model_provider,
+                    "Refusing to open a session from another model provider"
+                );
+                Ok(None)
+            }
             Err(err) => {
                 warn!(
                     session = id_or_name,

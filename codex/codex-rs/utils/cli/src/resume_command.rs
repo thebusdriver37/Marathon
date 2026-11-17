@@ -42,9 +42,12 @@ pub fn cli_command_for_action(action: &str) -> String {
 pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
     let thread_id = thread_id?;
     match thread_name.filter(|name| !name.is_empty()) {
-        Some(thread_name) => Some(format!(
-            "codex resume, then select {thread_name} ({thread_id})"
-        )),
+        Some(thread_name) => {
+            let command = cli_command_for_action("resume");
+            Some(format!(
+                "{command}, then select {thread_name} ({thread_id})"
+            ))
+        }
         None => resume_command(/*thread_name*/ None, Some(thread_id)),
     }
 }
