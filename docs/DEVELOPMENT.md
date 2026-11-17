@@ -59,13 +59,13 @@ with 14 optional skips; compilation and shell syntax checks passed.
 ## Releases
 
 Set `marathon_app.__version__` to the release version, commit it, and push the matching `vX.Y.Z` tag.
-The release workflow tests Marathon, builds the patched Codex frontend on Linux x86_64, packages both together, and publishes the archive with its SHA-256 checksum.
+The release workflow tests Marathon, builds the Codex frontend from `codex/` on Linux x86_64, packages both together, and publishes the archive with its SHA-256 checksum.
 Do not create the tag until the ordinary CI workflow is green.
 Native runtime patching and GPU benchmarks have separate requirements described in [runtime packaging](RUNTIME.md).
 Python test success alone does not establish GPU correctness or speed.
 Normal frontend installation builds and smoke-tests the binary without requiring developer test runners.
-To run the native patch suite as part of a build, install a recent `just` and `cargo-nextest`, then run `MARATHON_CODEX_RUN_TESTS=1 ./bin/marathon build-codex`.
-Both runtime patchers preserve upstream sources and existing worktree edits, and reuse unchanged patch stacks.
+To run Marathon's native Codex tests as part of a build, install `cargo-nextest`, then run `MARATHON_CODEX_RUN_TESTS=1 ./bin/marathon build-codex`, or run `scripts/test_codex.sh` on its own.
+The llama.cpp patcher preserves upstream sources and existing worktree edits, and reuses unchanged patch stacks.
 
 ## Matched runtime measurements
 
@@ -131,11 +131,28 @@ python3 -m unittest discover -s tests -p test_bench_openai.py -v
 The DFlash allocation candidate and its independent CPU differential are
 described in [runtime packaging](RUNTIME.md#cpu-checked-dflash-host-staging-candidate).
 
-## Cached frontend builds
+## Vendored Codex frontend
 
-The Codex baseline is pinned by both `config/codex.ref` and the `codex` submodule.
-The current baseline is `rust-v0.165.0` (`360319d8dee62d87e2d59fc0c21805d79519cfed`).
-Its patch rebase preserves per-step model usage accounting, validated compaction
+`codex/` is Marathon's own copy of upstream [openai/codex](https://github.com/openai/codex)
+(`codex-rs/` plus its license files), edited directly like the rest of the repository.
+`config/codex.ref` records the upstream release it is based on, currently
+`rust-v0.165.0` (`360319d8dee62d87e2d59fc0c21805d79519cfed`).
+The vendoring commit imports that release unchanged, so `git log -- codex` and
+`git diff <import commit> -- codex` show everything Marathon changed. Each former
+`patches/codex/*.patch` became one commit titled `Codex: ... (was patch NNN)`.
+
+Upstream crates outside the `codex` binary's dependency graph, the vendored
+bubblewrap source, and OpenAI's Bazel and Nix files are not vendored;
+`config/codex-pruned.txt` lists them so upstream syncs skip them.
+
+To take a newer upstream release, run `marathon update-codex [TAG]` on a clean
+`codex/`. It caches upstream history in `.marathon/codex-upstream.git`, three-way
+merges upstream's changes between the two releases into `codex/`, refreshes
+`Cargo.lock` from upstream's pins, updates `config/codex.ref` and builds. Where
+upstream and Marathon changed the same lines it stops with conflict markers to
+resolve. With no tag it takes the newest fetched stable release.
+
+The 0.165.0 baseline preserves per-step model usage accounting, validated compaction
 summaries with upstream compaction metadata, provider-filtered session lookup,
 and local-only routing through the asynchronous HTTP client builder. The terminal
 uses upstream's current layout with Marathon branding and performance indicators.
@@ -173,14 +190,11 @@ synthetic tool turn and resume inside an offline network namespace, rejecting an
 non-loopback connection attempt. It uses fixture configuration and a temporary home,
 never personal conversations or account files.
 
-`marathon build-codex` reuses a managed source directory for each upstream revision and stores Cargo artifacts in `.marathon/codex-target-cache` by default.
-Patch changes update only affected files, preserving unchanged dependencies and their timestamps.
-The first managed build adopts the existing patched directory when possible.
-Builds are serialized, and patch updates refuse to overwrite staged, unstaged, or untracked user edits.
-A new upstream revision gets a separate source directory.
+`marathon build-codex` compiles `codex/codex-rs` in place and stores Cargo artifacts in `.marathon/codex-target-cache` by default, so edits rebuild incrementally.
+Builds are serialized. `MARATHON_CODEX_BUILD_PROFILE=debug` gives faster unoptimized builds for UI iteration.
 Release optimization and linking still take time after native code changes; a cold build still needs to compile dependencies.
 `CARGO_TARGET_DIR` or `MARATHON_CODEX_TARGET_DIR` can override the artifact directory.
-Direct calls to `scripts/apply_codex_patches.sh` retain immutable patch worktrees unless `MARATHON_PATCH_UPDATE=1` is set.
+The installed binary's `codex.source` stamp records the upstream release and the `codex/` tree it was built from; `marathon doctor` warns when they differ from the checkout.
 
 ## Live user workflows
 

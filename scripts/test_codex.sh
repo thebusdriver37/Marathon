@@ -6,19 +6,16 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [[ -z "${MARATHON_PATCHED_CODEX_DIR:-}" ]]; then
-  source "$ROOT_DIR/scripts/apply_codex_patches.sh"
-fi
-BUILD_CODEX_DIR="${MARATHON_PATCHED_CODEX_DIR:-$TARGET_CODEX_DIR}"
+CODEX_DIR="${MARATHON_CODEX_DIR:-$ROOT_DIR/codex}"
 TEMP_TARGET=""
 
-if ! command -v just >/dev/null 2>&1 || ! cargo nextest --version >/dev/null 2>&1; then
-  echo "error: native developer tests require a recent just and cargo-nextest; see docs/DEVELOPMENT.md" >&2
+if ! cargo nextest --version >/dev/null 2>&1; then
+  echo "error: native developer tests require cargo-nextest; see docs/DEVELOPMENT.md" >&2
   exit 1
 fi
 
-if [[ ! -d "$BUILD_CODEX_DIR/codex-rs" ]]; then
-  echo "error: patched Codex tree not found: $BUILD_CODEX_DIR" >&2
+if [[ ! -d "$CODEX_DIR/codex-rs" ]]; then
+  echo "error: Codex source not found: $CODEX_DIR/codex-rs" >&2
   exit 1
 fi
 
@@ -44,52 +41,53 @@ export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
 
 (
-  cd "$BUILD_CODEX_DIR/codex-rs"
+  cd "$CODEX_DIR/codex-rs"
   export RUST_MIN_STACK="${RUST_MIN_STACK:-8388608}"
+  export NEXTEST_PROFILE="${NEXTEST_PROFILE:-local}"
   # Nextest can inject SSL_CERT_FILE while probing system roots. The native-TLS
   # unit tests need a clean environment; CA probes must retain their own fixtures.
   host_triple="$(rustc -vV | sed -n 's/^host: //p' | tr '[:lower:]-' '[:upper:]_')"
   env "CARGO_TARGET_${host_triple}_RUNNER=env -u SSL_CERT_FILE -u CODEX_CA_CERTIFICATE" \
-    just test -p codex-http-client --lib
-  just test -p codex-http-client --test ca_env
-  just test -p codex-core --lib local_runtime
-  just test -p codex-cli marathon_rejects_cloud_and_shared_server_commands
-  just test -p codex-utils-cli
-  just test -p codex-protocol \
+    cargo nextest run --no-fail-fast -p codex-http-client --lib
+  cargo nextest run --no-fail-fast -p codex-http-client --test ca_env
+  cargo nextest run --no-fail-fast -p codex-core --lib local_runtime
+  cargo nextest run --no-fail-fast -p codex-cli marathon_rejects_cloud_and_shared_server_commands
+  cargo nextest run --no-fail-fast -p codex-utils-cli
+  cargo nextest run --no-fail-fast -p codex-protocol \
     token_usage_percentage_uses_the_full_runtime_window
-  just test -p codex-app-server-protocol --lib
-  just test -p codex-core --test all suite::compact::manual_compact
-  just test -p codex-core --test all \
+  cargo nextest run --no-fail-fast -p codex-app-server-protocol --lib
+  cargo nextest run --no-fail-fast -p codex-core --test all suite::compact::manual_compact
+  cargo nextest run --no-fail-fast -p codex-core --test all \
     responses_websocket_preserves_credit_usage_metadata
-  just test -p codex-core --test all \
+  cargo nextest run --no-fail-fast -p codex-core --test all \
     apply_patch_custom_tool_streaming_emits_updated_changes
-  just test -p codex-features \
+  cargo nextest run --no-fail-fast -p codex-features \
     unstable_warning_event_only_mentions_enabled_under_development_features
-  just test -p codex-api --test sse_end_to_end \
+  cargo nextest run --no-fail-fast -p codex-api --test sse_end_to_end \
     responses_stream_parses_items_and_completed_end_to_end
-  just test -p codex-tui \
+  cargo nextest run --no-fail-fast -p codex-tui \
     context_percentage_uses_the_full_runtime_window
-  just test -p codex-tui \
+  cargo nextest run --no-fail-fast -p codex-tui \
     status_line_context_tokens_renders_compact_usage_ratio
-  just test -p codex-tui turn_throughput
-  just test -p codex-tui --lib thread_title
-  env -u NO_COLOR just test -p codex-tui --lib \
+  cargo nextest run --no-fail-fast -p codex-tui turn_throughput
+  cargo nextest run --no-fail-fast -p codex-tui --lib thread_title
+  env -u NO_COLOR cargo nextest run --no-fail-fast -p codex-tui --lib \
     -E 'test(session_header) | test(status_snapshot) | test(onboarding::welcome) | test(terminal_title) | test(completed_global_chord)'
-  just test -p codex-app-server --test all \
+  cargo nextest run --no-fail-fast -p codex-app-server --test all \
     -E 'test(turn_start_emits_raw_response_completed_with_upstream_usage) | test(thread_compact_start_triggers_compaction_and_returns_empty_response)'
-  just test -p codex-app-server --test all \
+  cargo nextest run --no-fail-fast -p codex-app-server --test all \
     turn_start_streams_apply_patch_change_updates_v2
-  just test -p codex-tui \
+  cargo nextest run --no-fail-fast -p codex-tui \
     status_line_tokens_per_second_renders_completed_turn_rate_snapshot
-  just test -p codex-tui \
+  cargo nextest run --no-fail-fast -p codex-tui \
     status_line_limits_active_states_to_working_and_thinking
-  just test -p codex-tui \
+  cargo nextest run --no-fail-fast -p codex-tui \
     active_turn_footer_schedules_continuous_animation_frames
-  just test -p codex-tui \
+  cargo nextest run --no-fail-fast -p codex-tui \
     status_line_stays_stable_during_streaming_patch_lifecycle
-  just test -p codex-tui distinguishes_unset_from_disabled
-  just test -p codex-tui resolves_name_and_preview_from_server_list
-  just test -p codex-state \
+  cargo nextest run --no-fail-fast -p codex-tui distinguishes_unset_from_disabled
+  cargo nextest run --no-fail-fast -p codex-tui resolves_name_and_preview_from_server_list
+  cargo nextest run --no-fail-fast -p codex-state \
     sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics
 )
 

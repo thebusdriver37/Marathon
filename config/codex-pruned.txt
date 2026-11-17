@@ -1,0 +1,26 @@
+# Upstream Codex paths Marathon does not vendor, relative to codex/.
+# `marathon update-codex` skips upstream changes to these when it syncs.
+# Patterns are matched with git apply --exclude, where * also matches /.
+codex-rs/bwrap/*
+codex-rs/cloud-client/*
+codex-rs/code-mode-host/*
+codex-rs/code-mode-runtime/*
+codex-rs/config-schema/*
+codex-rs/core-api/*
+codex-rs/direct-tool-timing/*
+codex-rs/ext/guardian-v3/*
+codex-rs/otel-trace-websocket/*
+codex-rs/runtime-agent-instance/*
+codex-rs/thread-manager-sample/*
+codex-rs/utils/critical-path/*
+codex-rs/utils/readiness/*
+codex-rs/v8-poc/*
+codex-rs/voice-host/*
+codex-rs/windows-sandbox-service/*
+codex-rs/vendor/*
+codex-rs/docs/bazel.md
+codex-rs/scripts/setup-windows.ps1
+codex-rs/default.nix
+*BUILD.bazel
+*.bzl
+*.bazel

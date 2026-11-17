@@ -928,7 +928,7 @@ def _base_instructions() -> str:
     if not prompt_path.exists():
         raise FileNotFoundError(
             "Codex prompt file not found. Expected "
-            f"{prompt_path}. Initialize the Codex submodule or set MARATHON_PROMPT_FILE."
+            f"{prompt_path}. Restore the vendored codex/ tree or set MARATHON_PROMPT_FILE."
         )
     upstream_instructions = prompt_path.read_text(encoding="utf-8").rstrip()
     return "\n\n".join(

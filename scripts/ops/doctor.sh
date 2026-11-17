@@ -196,18 +196,21 @@ else
 fi
 
 codex_ref="$(tr -d '[:space:]' <"$ROOT_DIR/config/codex.ref" 2>/dev/null || true)"
-if [[ -n "$codex_ref" ]] && git -C "$ROOT_DIR/codex" rev-parse --verify "$codex_ref^{commit}" >/dev/null 2>&1; then
-  current_codex_sha="$(git -C "$ROOT_DIR/codex" rev-parse HEAD)"
-  expected_codex_sha="$(git -C "$ROOT_DIR/codex" rev-parse "$codex_ref^{commit}")"
-  if [[ "$current_codex_sha" == "$expected_codex_sha" ]]; then
-    pass "pinned Codex matches $codex_ref"
-  else
-    codex_behind="$(git -C "$ROOT_DIR/codex" rev-list --count "HEAD..$expected_codex_sha" 2>/dev/null || true)"
-    warn "pinned Codex does not match $codex_ref (${codex_behind:-?} commit(s) behind); run: marathon update-codex"
+if [[ -n "$codex_ref" ]]; then
+  info "vendored Codex is based on upstream $codex_ref"
+  if git -C "$ROOT_DIR/codex" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && [[ -z "$(git -C "$ROOT_DIR/codex" status --porcelain -- . 2>/dev/null)" ]]; then
+    expected_source="$codex_ref:$(git -C "$ROOT_DIR/codex" rev-parse HEAD:./)"
+    if [[ -f "$PATCHED_CODEX_BIN.source" && "$(cat "$PATCHED_CODEX_BIN.source")" != "$expected_source" ]]; then
+      warn "installed Codex was built from different source than codex/; run: marathon build-codex"
+    fi
   fi
-  latest_stable="$(git -C "$ROOT_DIR/codex" tag --list 'rust-v[0-9]*' --sort=-v:refname | sed '/alpha/d' | head -n1)"
-  if [[ -n "$latest_stable" && "$latest_stable" != "$codex_ref" ]]; then
-    warn "a newer fetched stable Codex tag exists: $latest_stable; update config/codex.ref"
+  upstream_cache="${MARATHON_CODEX_UPSTREAM_DIR:-$ROOT_DIR/.marathon/codex-upstream.git}"
+  if [[ -d "$upstream_cache" ]]; then
+    latest_stable="$(git -C "$upstream_cache" tag --list 'rust-v[0-9]*' --sort=-v:refname | grep -Ev 'alpha|beta|rc' | head -n1 || true)"
+    if [[ -n "$latest_stable" && "$latest_stable" != "$codex_ref" ]]; then
+      warn "a newer fetched stable Codex release exists: $latest_stable; run: marathon update-codex"
+    fi
   fi
 fi
 

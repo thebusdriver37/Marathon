@@ -11,38 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class LlamaPatchSetupTests(unittest.TestCase):
-    def test_codex_patch_setup_is_repeatable_and_preserves_upstream(self):
-        with tempfile.TemporaryDirectory(prefix="marathon-codex-patch-test-") as directory:
-            root = Path(directory)
-            source = root / "source"
-            source.mkdir()
-            subprocess.run(["git", "init", "-q", str(source)], check=True)
-            (source / "value").write_text("original\n")
-            subprocess.run(["git", "-C", str(source), "add", "value"], check=True)
-            subprocess.run(["git", "-C", str(source), "-c", "user.name=Fixture", "-c",
-                            "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
-            patches = root / "patches"
-            patches.mkdir()
-            (patches / "001.patch").write_text(
-                "diff --git a/value b/value\n--- a/value\n+++ b/value\n"
-                "@@ -1 +1 @@\n-original\n+patched\n"
-            )
-            target = root / "patched"
-            env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "MARATHON_"))}
-            env.update({"MARATHON_CODEX_DIR": str(source), "MARATHON_PATCH_DIR": str(patches),
-                        "MARATHON_PATCHED_CODEX_DIR": str(target), "GIT_CONFIG_GLOBAL": os.devnull,
-                        "GIT_CONFIG_NOSYSTEM": "1"})
-            command = ["bash", str(ROOT / "scripts/apply_codex_patches.sh")]
-            for _ in range(2):
-                result = subprocess.run(command, env=env, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((source / "value").read_text(), "original\n")
-            self.assertEqual((target / "value").read_text(), "patched\n")
-            (target / "value").write_text("user edit\n")
-            result = subprocess.run(command, env=env, capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual((target / "value").read_text(), "user edit\n")
-
     def test_real_setup_is_repeatable_and_preserves_local_edits(self):
         # Run the actual patch command against an isolated repository, with two
         # overlapping patches. No user source, backend, or network is involved.

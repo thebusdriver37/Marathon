@@ -479,18 +479,20 @@ Use `marathon update --check` to check immediately, `marathon update --skip` to 
 An update is prepared in a versioned directory and activated atomically for new launches, while running sessions keep using their current version.
 Use `marathon update --rollback` to return new launches to the previous installed release.
 
-The command below is for Marathon developers updating the patched upstream Codex source:
+The command below is for Marathon developers bringing a newer upstream Codex release into the vendored `codex/` source:
 
-Run this command to fetch the stable Codex tag recorded in `config/codex.ref`, preflight Marathon's patches, run regression tests, build a release binary, and install it atomically:
+Run this command to fetch upstream Codex, merge the changes between the release recorded in `config/codex.ref` and the newest stable release (or a tag you pass) into `codex/`, then build a release binary and install it atomically:
 
 ```bash
-marathon update-codex
+marathon update-codex [TAG]
 ```
+
+If upstream changed the same lines as Marathon, the command stops and lists the files with conflict markers to resolve before building.
 
 The previous binary remains available as `codex.previous`.
 Ordinary Marathon startup does not fetch, compile, or replace an existing Codex binary.
 
-`marathon build-codex` builds the currently pinned submodule and installs the patched binary.
+`marathon build-codex` builds Marathon's vendored `codex/` source and installs the binary.
 Temporary Cargo build output is removed after the build so the repository does not accumulate a large target directory.
 
 ## Diagnostics

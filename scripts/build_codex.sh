@@ -4,9 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/build_jobs.sh"
 CODEX_DIR="${MARATHON_CODEX_DIR:-$ROOT_DIR/codex}"
-PATCH_DIR="${MARATHON_PATCH_DIR:-$ROOT_DIR/patches/codex}"
-PATCH_IN_PLACE="${MARATHON_PATCH_IN_PLACE:-0}"
-BUILD_CODEX_DIR="$CODEX_DIR"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 INSTALL_BIN="${MARATHON_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
 BUILD_PROFILE="${MARATHON_CODEX_BUILD_PROFILE:-release}"
@@ -38,16 +35,11 @@ if ! pkg-config --exists openssl; then
 fi
 
 if [[ ! -f "$CODEX_DIR/codex-rs/Cargo.toml" ]]; then
-  if [[ "$CODEX_DIR" != "$ROOT_DIR/codex" ]]; then
-    echo "error: Codex source is missing at $CODEX_DIR" >&2
-    exit 1
-  fi
-  echo "-> Initializing the pinned Codex source..."
-  git -C "$ROOT_DIR" submodule update --init --depth 1 codex
+  echo "error: Codex source is missing at $CODEX_DIR/codex-rs" >&2
+  exit 1
 fi
 
-export MARATHON_PATCH_UPDATE=1
-# Serialize patch updates and compilation in the persistent build workspace.
+# Serialize compilation in the persistent build workspace.
 mkdir -p "$ROOT_DIR/.marathon"
 if [[ "${MARATHON_CODEX_BUILD_LOCK_OWNER:-}" != "$PPID" ]]; then
   exec python3 - "$ROOT_DIR/.marathon/codex-build.lock" "$0" "$@" <<'PYLOCK'
@@ -62,9 +54,6 @@ with open(sys.argv[1], "a") as lock:
     raise SystemExit(subprocess.call(["bash", *sys.argv[2:]], env=environment))
 PYLOCK
 fi
-source "$ROOT_DIR/scripts/apply_codex_patches.sh"
-BUILD_CODEX_DIR="$TARGET_CODEX_DIR"
-
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${MARATHON_CODEX_TARGET_DIR:-$ROOT_DIR/.marathon/codex-target-cache}}"
 
 cleanup() {
@@ -75,13 +64,12 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "${MARATHON_CODEX_RUN_TESTS:-0}" == "1" ]]; then
-  echo "-> Testing Marathon Codex patches..."
-  MARATHON_PATCHED_CODEX_DIR="$BUILD_CODEX_DIR" \
-    "$ROOT_DIR/scripts/test_codex_patches.sh"
+  echo "-> Testing Marathon's Codex changes..."
+  MARATHON_CODEX_DIR="$CODEX_DIR" "$ROOT_DIR/scripts/test_codex.sh"
 fi
 
 (
-  cd "$BUILD_CODEX_DIR/codex-rs"
+  cd "$CODEX_DIR/codex-rs"
   # Bake the boundary into shipped binaries; unsetting a launcher variable must
   # never turn Marathon back into a cloud-connected Codex client.
   MARATHON_BUILD_LOCAL_ONLY=1 cargo build --locked --profile "$BUILD_PROFILE" -p codex-cli --bin codex
@@ -125,23 +113,21 @@ fi
 mv -f "$INSTALL_TMP" "$INSTALL_BIN"
 INSTALL_TMP=""
 
-shopt -s nullglob
-patches=("$PATCH_DIR"/*.patch)
-shopt -u nullglob
-patch_manifest="$({
-  for patch in "${patches[@]}"; do
-    printf '%s %s\n' "$(basename "$patch")" "$(git hash-object "$patch")"
-  done
-} | git hash-object --stdin)"
+# Record the upstream base and the vendored tree, so a stale install is visible.
+upstream_ref="$(tr -d '[:space:]' <"$ROOT_DIR/config/codex.ref" 2>/dev/null || true)"
+source_id="$(git -C "$CODEX_DIR" rev-parse HEAD:./ 2>/dev/null || echo unknown)"
+if [[ -n "$(git -C "$CODEX_DIR" status --porcelain -- . 2>/dev/null)" ]]; then
+  source_id="$source_id-dirty"
+fi
 source_tmp="$(mktemp "$install_dir/.codex.source.XXXXXX")"
-printf '%s:%s\n' "$(git -C "$CODEX_DIR" rev-parse HEAD)" "$patch_manifest" >"$source_tmp"
+printf '%s:%s\n' "${upstream_ref:-unknown}" "$source_id" >"$source_tmp"
 mv -f "$source_tmp" "$INSTALL_BIN.source"
 
 FEATURES_TMP="$(mktemp "$install_dir/.codex.features.XXXXXX")"
-if grep -Rq 'tokens-per-second' "$BUILD_CODEX_DIR/codex-rs/tui/src"; then
+if grep -Rq 'tokens-per-second' "$CODEX_DIR/codex-rs/tui/src"; then
   printf 'tokens-per-second\n' >"$FEATURES_TMP"
 fi
-if grep -q 'MARATHON_LOCAL_ONLY' "$BUILD_CODEX_DIR/codex-rs/http-client/src/local_runtime.rs"; then
+if grep -q 'MARATHON_LOCAL_ONLY' "$CODEX_DIR/codex-rs/http-client/src/local_runtime.rs"; then
   printf 'local-runtime-security\n' >>"$FEATURES_TMP"
 fi
 mv -f "$FEATURES_TMP" "$INSTALL_BIN.features"
@@ -157,6 +143,6 @@ mv -f "$PROMPT_HASH_TMP" "$INSTALL_BIN.prompt-hash"
 PROMPT_HASH_TMP=""
 
 echo
-echo "Codex source: $BUILD_CODEX_DIR"
+echo "Codex source: $CODEX_DIR"
 echo "Codex binary: $INSTALL_BIN"
 echo "Codex build: $(cat "$INSTALL_BIN.source")"

@@ -211,8 +211,15 @@ def freeze_source(destination, revision=None):
         hashes[relative] = hashlib.sha256(content).hexdigest()
     prompt = "codex/codex-rs/models-manager/prompt.md"
     if revision:
-        codex_revision = subprocess.check_output(["git", "ls-tree", revision, "codex"], cwd=ROOT, text=True).split()[2]
-        content = subprocess.check_output(["git", "show", codex_revision + ":codex-rs/models-manager/prompt.md"], cwd=ROOT / "codex")
+        _, kind, codex_revision = subprocess.check_output(["git", "ls-tree", revision, "codex"], cwd=ROOT, text=True).split()[:3]
+        if kind == "commit":
+            # Revisions from before Codex was vendored point at a submodule commit.
+            common = Path(subprocess.check_output(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                                  cwd=ROOT, text=True).strip())
+            content = subprocess.check_output(["git", "--git-dir", str(common / "modules" / "codex"), "show",
+                                               codex_revision + ":codex-rs/models-manager/prompt.md"])
+        else:
+            content = subprocess.check_output(["git", "show", revision + ":" + prompt], cwd=ROOT)
     else:
         content = (ROOT / prompt).read_bytes()
     target = destination / prompt

@@ -41,10 +41,10 @@ Commands:
   search <sub>    Manage SearXNG (up | down | status | check | logs | url | restart | pull)
   setup-deps      Create .marathon/venv and install router Python dependencies
   build           Build patched Marathon binaries
-  build-codex     Build the patched local Codex binary
+  build-codex     Build Marathon's Codex binary from codex/
   build-llama     Build the patched local llama.cpp binaries
   setup-llama [upstream|qwen38]  Build a pinned general or optional tuned backend
-  update-codex    Fetch the pinned stable Codex, rebase patches, rebuild
+  update-codex [TAG]  Merge an upstream Codex release into codex/, rebuild
 
 Environment:
   MARATHON_AI_ROOT          Models, backends, and cache root (default: ~/AI)

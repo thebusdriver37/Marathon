@@ -114,8 +114,8 @@ class ModelIdentityTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         app["state"] = state
         app.router.add_get("/v1/models", router_module.handle_models)
-        # CI intentionally runs without the Codex submodule. Supply this test's
-        # prompt while exercising the real instruction loader and HTTP handler.
+        # Supply this test's own prompt so it does not depend on the vendored
+        # upstream prompt, while exercising the real instruction loader and handler.
         prompt = self.path.parent / "prompt.md"
         prompt.write_text("Model picker test instructions", encoding="utf-8")
         with (

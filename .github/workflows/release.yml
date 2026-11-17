@@ -15,8 +15,6 @@ jobs:
     steps:
       - name: Check out Marathon
         uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
       - name: Check release version
         run: |

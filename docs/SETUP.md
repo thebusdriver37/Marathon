@@ -17,7 +17,7 @@ Marathon defaults to full access, so tool commands can read and write anywhere, 
 Run Marathon from the project directory, or add writable directories with Codex's `--add-dir` option.
 Explicit command-line sandbox overrides remain available; for example, `--sandbox workspace-write` restores Codex's Linux PID namespaces to keep tool commands from signaling Marathon's frontend and runtime processes.
 Marathon bootstraps its own pinned, checksum-verified pip when the system Python lacks it, including on Ubuntu without `python3-venv`.
-Normal installation does not require `just`, `cargo-nextest`, or running the developer test suite.
+Normal installation does not require `cargo-nextest` or running the developer test suite.
 Backend builds omit llama.cpp's optional browser UI and its unrelated asset downloads.
 
 The general Qwen download offers several quantizations.

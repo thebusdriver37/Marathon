@@ -1,104 +1,106 @@
 #!/usr/bin/env bash
+# Bring an upstream openai/codex release into Marathon's vendored codex/ tree.
+#
+# codex/ is Marathon's own copy of upstream codex-rs, based on the tag in
+# config/codex.ref. This script takes upstream's changes between that tag and
+# the requested one and three-way merges them into codex/. Marathon's own edits
+# are kept; where both sides changed the same lines, Git leaves conflict markers.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CODEX_DIR="${MARATHON_CODEX_DIR:-$ROOT_DIR/codex}"
-PATCHES_DIR="${MARATHON_PATCH_DIR:-$ROOT_DIR/patches/codex}"
+CODEX_DIR="$ROOT_DIR/codex"
 CODEX_REF_FILE="$ROOT_DIR/config/codex.ref"
-if [[ -n "${MARATHON_CODEX_UPSTREAM:-}" ]]; then
-  UPSTREAM_REF="$MARATHON_CODEX_UPSTREAM"
-elif [[ -f "$CODEX_REF_FILE" ]]; then
-  UPSTREAM_REF="$(tr -d '[:space:]' <"$CODEX_REF_FILE")"
-else
-  echo "error: Codex ref is missing: $CODEX_REF_FILE" >&2
-  exit 1
-fi
+PRUNED_FILE="$ROOT_DIR/config/codex-pruned.txt"
+UPSTREAM_URL="${MARATHON_CODEX_UPSTREAM_URL:-https://github.com/openai/codex.git}"
+UPSTREAM_DIR="${MARATHON_CODEX_UPSTREAM_DIR:-$ROOT_DIR/.marathon/codex-upstream.git}"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 INSTALL_BIN="${MARATHON_CODEX_BIN:-$DATA_HOME/marathon/bin/codex}"
 
-if ! git -C "$CODEX_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  echo "error: Codex submodule is missing at $CODEX_DIR" >&2
-  echo "run: git submodule update --init --recursive" >&2
+if [[ ! -f "$CODEX_REF_FILE" ]]; then
+  echo "error: Codex base ref is missing: $CODEX_REF_FILE" >&2
+  exit 1
+fi
+BASE_REF="$(tr -d '[:space:]' <"$CODEX_REF_FILE")"
+
+if [[ -n "$(git -C "$ROOT_DIR" status --porcelain -- codex config/codex.ref)" ]]; then
+  echo "error: codex/ has uncommitted changes; commit or stash them before syncing." >&2
   exit 1
 fi
 
-if ! git -C "$CODEX_DIR" diff --quiet \
-  || ! git -C "$CODEX_DIR" diff --cached --quiet; then
-  echo "error: Codex submodule has uncommitted changes; commit or discard them first." >&2
+if [[ ! -d "$UPSTREAM_DIR" ]]; then
+  echo "-> Caching upstream Codex history in $UPSTREAM_DIR (file contents load on demand)..."
+  git clone --quiet --bare --filter=blob:none "$UPSTREAM_URL" "$UPSTREAM_DIR"
+fi
+if [[ "${MARATHON_CODEX_SKIP_FETCH:-0}" != "1" ]]; then
+  echo "-> Fetching upstream Codex tags..."
+  git -C "$UPSTREAM_DIR" fetch --quiet --tags origin
+fi
+
+TARGET_REF="${1:-${MARATHON_CODEX_UPSTREAM:-}}"
+if [[ -z "$TARGET_REF" ]]; then
+  TARGET_REF="$(git -C "$UPSTREAM_DIR" tag --list 'rust-v[0-9]*' --sort=-v:refname \
+    | grep -Ev 'alpha|beta|rc' | head -n1 || true)"
+fi
+if [[ -z "$TARGET_REF" ]]; then
+  echo "error: no stable upstream Codex tag found; pass one, e.g. marathon update-codex rust-v0.166.0" >&2
   exit 1
 fi
-if [[ -n "$(git -C "$CODEX_DIR" ls-files --others --exclude-standard)" ]]; then
-  echo "error: Codex submodule has untracked files; remove or commit them first." >&2
+
+BASE_SHA="$(git -C "$UPSTREAM_DIR" rev-parse --verify "$BASE_REF^{commit}")"
+TARGET_SHA="$(git -C "$UPSTREAM_DIR" rev-parse --verify "$TARGET_REF^{commit}")"
+if [[ "$BASE_SHA" == "$TARGET_SHA" ]]; then
+  echo "codex/ is already based on $TARGET_REF (${TARGET_SHA:0:8})."
+  exit 0
+fi
+if ! git -C "$UPSTREAM_DIR" merge-base --is-ancestor "$BASE_SHA" "$TARGET_SHA"; then
+  echo "error: $TARGET_REF is not newer than the current base $BASE_REF" >&2
   exit 1
 fi
 
-echo "-> Fetching upstream Codex tags..."
-git -C "$CODEX_DIR" fetch origin --tags
+excludes=(--exclude=codex/codex-rs/Cargo.lock)
+while IFS= read -r pattern; do
+  [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+  excludes+=("--exclude=codex/$pattern")
+done <"$PRUNED_FILE"
 
-LOCAL_SHA="$(git -C "$CODEX_DIR" rev-parse HEAD)"
-UPSTREAM_SHA="$(git -C "$CODEX_DIR" rev-parse "$UPSTREAM_REF^{commit}")"
+patch_file="$(mktemp "${TMPDIR:-/tmp}/marathon-codex-sync.XXXXXX")"
+trap 'rm -f -- "$patch_file"' EXIT
+git -C "$UPSTREAM_DIR" diff --binary --full-index "$BASE_SHA" "$TARGET_SHA" \
+  -- codex-rs LICENSE NOTICE .cargo .gitignore >"$patch_file"
 
-shopt -s nullglob
-patches=("$PATCHES_DIR"/*.patch)
-shopt -u nullglob
-patch_manifest="$({
-  for patch in "${patches[@]}"; do
-    printf '%s %s\n' "$(basename "$patch")" "$(git hash-object "$patch")"
-  done
-} | git hash-object --stdin)"
-expected_build="$UPSTREAM_SHA:$patch_manifest"
+echo "-> Merging upstream $BASE_REF..$TARGET_REF into codex/..."
+upstream_objects="$(git -C "$UPSTREAM_DIR" rev-parse --absolute-git-dir)/objects"
+merged=1
+# The upstream cache supplies the base file versions the three-way merge needs.
+if ! GIT_ALTERNATE_OBJECT_DIRECTORIES="$upstream_objects" \
+  git -C "$ROOT_DIR" apply --3way --directory=codex "${excludes[@]}" "$patch_file"; then
+  merged=0
+fi
+printf '%s\n' "$TARGET_REF" >"$CODEX_REF_FILE"
 
-if [[ "$LOCAL_SHA" == "$UPSTREAM_SHA" ]]; then
-  installed_build="$(cat "$INSTALL_BIN.source" 2>/dev/null || true)"
-  if [[ -x "$INSTALL_BIN" && "$installed_build" == "$expected_build" \
-    && "${MARATHON_FORCE_CODEX_REBUILD:-0}" != "1" ]]; then
-    echo "Codex source and Marathon patches are current at ${UPSTREAM_SHA:0:8}."
-    exit 0
-  fi
-  echo "Codex source is at ${UPSTREAM_SHA:0:8}; rebuilding changed Marathon patches."
-else
-  echo "-> Codex ${LOCAL_SHA:0:8} -> ${UPSTREAM_SHA:0:8}"
+conflicts="$(git -C "$ROOT_DIR" diff --name-only --diff-filter=U -- codex)"
+if [[ "$merged" != "1" || -n "$conflicts" ]]; then
+  echo
+  echo "Upstream changes overlap Marathon's edits. Resolve the conflict markers in:"
+  printf '  %s\n' ${conflicts:-"(see the git apply output above)"}
+  echo "Then refresh the lockfile and build:"
+  echo "  git -C '$UPSTREAM_DIR' show '$TARGET_SHA:codex-rs/Cargo.lock' >'$CODEX_DIR/codex-rs/Cargo.lock'"
+  echo "  (cd '$CODEX_DIR/codex-rs' && cargo metadata --format-version 1 >/dev/null)"
+  echo "  marathon build-codex"
+  exit 1
 fi
 
-# Preflight: verify every patch applies cleanly on the new upstream
-# before we mutate the submodule. Uses a throwaway worktree at the
-# target SHA so the live tree is untouched if anything fails.
-if (( ${#patches[@]} > 0 )); then
-  PREFLIGHT_PARENT="$(mktemp -d -t codex-preflight.XXXXXX)"
-  PREFLIGHT_DIR="$PREFLIGHT_PARENT/wt"
-  cleanup_preflight() {
-    if [[ -d "$PREFLIGHT_DIR" ]]; then
-      git -C "$CODEX_DIR" worktree remove --force "$PREFLIGHT_DIR" >/dev/null 2>&1 || true
-    fi
-    rm -r -- "$PREFLIGHT_PARENT"
-  }
-  trap cleanup_preflight EXIT
+# Take upstream's pinned versions, then let Cargo drop what pruned crates used.
+echo "-> Refreshing Cargo.lock from upstream $TARGET_REF..."
+git -C "$UPSTREAM_DIR" show "$TARGET_SHA:codex-rs/Cargo.lock" >"$CODEX_DIR/codex-rs/Cargo.lock"
+(cd "$CODEX_DIR/codex-rs" && cargo metadata --format-version 1 >/dev/null)
 
-  git -C "$CODEX_DIR" worktree add --detach "$PREFLIGHT_DIR" "$UPSTREAM_SHA" >/dev/null
-  for patch in "${patches[@]}"; do
-    name="$(basename "$patch")"
-    if ! git -C "$PREFLIGHT_DIR" apply --check "$patch" >/dev/null 2>&1; then
-      echo "error: $name does not apply cleanly on ${UPSTREAM_SHA:0:8}" >&2
-      echo "  reproduce: git -C '$PREFLIGHT_DIR' apply --check '$patch'" >&2
-      echo "  resolve by rebasing the patch against current upstream." >&2
-      exit 1
-    fi
-    git -C "$PREFLIGHT_DIR" apply "$patch"
-  done
-
-  cleanup_preflight
-  trap - EXIT
+if [[ "${MARATHON_CODEX_SKIP_BUILD:-0}" != "1" ]]; then
+  echo "-> Building Marathon Codex..."
+  bash "$ROOT_DIR/scripts/build_codex.sh"
 fi
-
-if [[ "$LOCAL_SHA" != "$UPSTREAM_SHA" ]]; then
-  echo "-> Updating Codex submodule to ${UPSTREAM_SHA:0:8}..."
-  git -C "$CODEX_DIR" switch --detach "$UPSTREAM_SHA"
-fi
-
-echo "-> Building patched Codex..."
-bash "$ROOT_DIR/scripts/build_codex.sh"
 
 echo
-echo "Codex $UPSTREAM_REF synced and tested at ${UPSTREAM_SHA:0:8} with ${#patches[@]} Marathon patch(es)."
-echo "Commit the submodule bump in the parent repo:"
-echo "  git -C '$ROOT_DIR' add codex && git -C '$ROOT_DIR' commit -m 'codex: sync to ${UPSTREAM_SHA:0:8}'"
+echo "codex/ now follows upstream $TARGET_REF (${TARGET_SHA:0:8}); installed binary: $INSTALL_BIN"
+echo "Review and commit the sync:"
+echo "  git -C '$ROOT_DIR' add codex config/codex.ref && git -C '$ROOT_DIR' commit -m 'Sync vendored Codex to $TARGET_REF'"
