@@ -52,8 +52,9 @@ if [[ "$BASE_SHA" == "$TARGET_SHA" ]]; then
   echo "codex/ is already based on $TARGET_REF (${TARGET_SHA:0:8})."
   exit 0
 fi
-if ! git -C "$UPSTREAM_DIR" merge-base --is-ancestor "$BASE_SHA" "$TARGET_SHA"; then
-  echo "error: $TARGET_REF is not newer than the current base $BASE_REF" >&2
+# Upstream tags each release on its own branch, so compare versions, not ancestry.
+if [[ "$(printf '%s\n%s\n' "$BASE_REF" "$TARGET_REF" | sort -V | tail -n1)" != "$TARGET_REF" ]]; then
+  echo "error: $TARGET_REF is older than the current base $BASE_REF" >&2
   exit 1
 fi
 
