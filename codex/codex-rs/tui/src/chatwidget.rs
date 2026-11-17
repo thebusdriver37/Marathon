@@ -407,6 +407,8 @@ use self::transcript::TranscriptState;
 mod turn_lifecycle;
 mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;
+mod turn_throughput;
+use self::turn_throughput::TurnThroughput;
 mod usage;
 mod user_messages;
 mod working_directory;
@@ -467,7 +469,8 @@ const ASK_FOR_APPROVAL_LABEL: &str = "Ask for approval";
 const APPROVE_FOR_ME_LABEL: &str = "Approve for me";
 const AUTO_REVIEW_DESCRIPTION: &str = "Only ask for actions detected as potentially unsafe";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_STATUS_LINE_ITEMS: [&str; 3] = ["model-with-reasoning", "current-dir", "thread-name"];
+const DEFAULT_STATUS_LINE_ITEMS: [&str; 3] =
+    ["model-with-reasoning", "current-dir", "tokens-per-second"];
 
 /// Common initialization parameters shared by all `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
@@ -622,6 +625,7 @@ pub(crate) struct ChatWidget {
     turn_lifecycle: TurnLifecycleState,
     realtime_conversation: RealtimeConversationUiState,
     realtime_conversation_available_for_thread: bool,
+    turn_throughput: TurnThroughput,
     safety_buffering: SafetyBufferingState,
     task_complete_pending: bool,
     unified_exec_processes: Vec<UnifiedExecProcessSummary>,

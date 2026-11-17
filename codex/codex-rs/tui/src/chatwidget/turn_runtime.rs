@@ -82,6 +82,7 @@ impl ChatWidget {
         self.input_queue.user_turn_pending_start = false;
         self.reset_safety_buffering_for_turn_start();
         self.turn_lifecycle.start(Instant::now());
+        self.turn_throughput.start_turn();
         self.transcript.reset_turn_flags();
         self.adaptive_chunking.reset();
         if self.plan_stream_controller.take().is_some() {
@@ -126,6 +127,16 @@ impl ChatWidget {
         }
     }
 
+    pub(super) fn record_turn_output_delta(&mut self, delta: &str) {
+        self.turn_throughput.record_output_delta(delta, Instant::now());
+        self.refresh_status_line();
+    }
+
+    pub(super) fn complete_turn_response(&mut self, output_tokens: Option<i64>) {
+        self.turn_throughput.complete_response(output_tokens, Instant::now());
+        self.refresh_status_line();
+    }
+
     pub(super) fn on_task_complete(
         &mut self,
         last_agent_message: Option<String>,
@@ -162,6 +173,8 @@ impl ChatWidget {
         self.flush_completed_tool_activity();
         if !from_replay {
             self.collect_runtime_metrics_delta();
+            self.turn_throughput.finish_turn(Instant::now());
+            self.refresh_status_line();
         }
         let runtime_metrics = (!from_replay && !self.turn_runtime_metrics.is_empty())
             .then_some(self.turn_runtime_metrics);
@@ -330,6 +343,8 @@ impl ChatWidget {
     /// This does not clear MCP startup tracking, because MCP startup can overlap with turn cleanup
     /// and should continue to drive the bottom-pane running indicator while it is in progress.
     pub(super) fn finalize_turn(&mut self) {
+        self.turn_throughput.finish_turn(Instant::now());
+        self.refresh_status_line();
         self.flush_answer_and_plan_streams();
         self.flush_interrupt_activity();
         self.finish_dynamic_activity();

@@ -454,6 +454,13 @@ impl ChatWidget {
             .unwrap_or_default()
     }
 
+    pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
+        self.turn_throughput.sample(Instant::now()).map(|sample| {
+            let prefix = if sample.estimated { "~" } else { "" };
+            format!("{prefix}{:.1} tok/s", sample.tokens_per_second)
+        })
+    }
+
     pub(super) fn status_line_limit_display(
         &self,
         window: Option<&RateLimitWindowDisplay>,

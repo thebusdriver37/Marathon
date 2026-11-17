@@ -59,6 +59,9 @@ impl ChatWidget {
                 }
             }
             ServerNotification::ThreadTokenUsageUpdated(notification) => {
+                if !from_replay {
+                    self.complete_turn_response(Some(notification.token_usage.last.output_tokens));
+                }
                 self.set_token_info(Some(token_usage_info_from_app_server(
                     notification.token_usage,
                 )));
@@ -120,6 +123,9 @@ impl ChatWidget {
                 self.handle_item_completed_notification(notification, replay_kind);
             }
             ServerNotification::AgentMessageDelta(notification) => {
+                if !from_replay {
+                    self.record_turn_output_delta(&notification.delta);
+                }
                 self.restore_realtime_transcripts_before_turn(&notification.turn_id);
                 if !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
                     && (from_replay
@@ -134,10 +140,16 @@ impl ChatWidget {
                 }
             }
             ServerNotification::PlanDelta(notification) => {
+                if !from_replay {
+                    self.record_turn_output_delta(&notification.delta);
+                }
                 self.restore_realtime_transcripts_before_turn(&notification.turn_id);
                 self.on_plan_delta(notification.delta);
             }
             ServerNotification::ReasoningSummaryTextDelta(notification) => {
+                if !from_replay {
+                    self.record_turn_output_delta(&notification.delta);
+                }
                 if !self.is_realtime_delegated_reasoning_item(
                     &notification.turn_id,
                     &notification.item_id,
@@ -148,6 +160,9 @@ impl ChatWidget {
                 }
             }
             ServerNotification::ReasoningTextDelta(notification) => {
+                if !from_replay {
+                    self.record_turn_output_delta(&notification.delta);
+                }
                 if self.config.show_raw_agent_reasoning
                     && !self.is_realtime_delegated_reasoning_item(
                         &notification.turn_id,
@@ -374,7 +389,6 @@ impl ChatWidget {
             | ServerNotification::ThreadUnarchived(_)
             | ServerNotification::ThreadAttachmentUpdated(_)
             | ServerNotification::RawResponseItemCompleted(_)
-            | ServerNotification::RawResponseCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)
             | ServerNotification::ProcessOutputDelta(_)
             | ServerNotification::ProcessExited(_)
@@ -402,6 +416,13 @@ impl ChatWidget {
             | ServerNotification::ProjectChanged(_)
             | ServerNotification::ThreadProjectUpdated(_) => {}
             ServerNotification::ContextCompacted(_) => {}
+            ServerNotification::RawResponseCompleted(notification) => {
+                if !from_replay {
+                    self.complete_turn_response(
+                        notification.usage.map(|usage| usage.output_tokens),
+                    );
+                }
+            }
         }
         // Tool and hook activity can recreate a hidden row with its default
         // heading. Restore the selected status before that row is rendered.

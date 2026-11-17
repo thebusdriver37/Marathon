@@ -3093,6 +3093,49 @@ async fn status_line_context_tokens_renders_live_context_count() {
 }
 
 #[tokio::test]
+async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
+    use std::time::Duration;
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.show_welcome_banner = false;
+    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
+    let started_at = Instant::now() - Duration::from_secs(200);
+    chat.turn_throughput.start_turn();
+    chat.turn_throughput
+        .record_output_delta("streamed response", started_at);
+    let response_usage = TokenUsage {
+        total_tokens: 4_200,
+        output_tokens: 4_200,
+        ..TokenUsage::default()
+    };
+    handle_token_count(
+        &mut chat,
+        Some(TokenUsageInfo {
+            total_token_usage: response_usage.clone(),
+            last_token_usage: response_usage,
+            model_context_window: Some(131_072),
+        }),
+    );
+    chat.refresh_status_line();
+
+    assert_eq!(status_line_text(&chat), Some("21.0 tok/s".to_string()));
+
+    let width = 48;
+    let height = chat.desired_height(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    terminal
+        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+        .expect("draw tokens-per-second footer");
+    assert_chatwidget_snapshot!(
+        "status_line_tokens_per_second_footer",
+        normalized_backend_snapshot(terminal.backend())
+    );
+}
+
+#[tokio::test]
 async fn status_line_legacy_context_usage_renders_context_used_percent() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
