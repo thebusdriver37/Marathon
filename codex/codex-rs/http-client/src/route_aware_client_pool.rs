@@ -141,7 +141,8 @@ impl RouteAwareRequestError {
             Self::Route(RouteAwareClientPoolError::Resolve(_)) => {
                 Some(RouteFailureClass::ProxyResolutionUnavailable)
             }
-            Self::Route(RouteAwareClientPoolError::BuildTask(_))
+            Self::Route(RouteAwareClientPoolError::Build(BuildRouteAwareHttpClientError::LocalRuntime(_)))
+            | Self::Route(RouteAwareClientPoolError::BuildTask(_))
             | Self::Request(_)
             | Self::Policy(_)
             | Self::Build(_)
@@ -521,7 +522,7 @@ impl RouteAwareClientPool {
             let _build_permit = build_permit;
             let client = match (
                 pool.http_client_factory.outbound_proxy_policy(),
-                pool.custom_ca_fallback,
+                if crate::local_runtime_enabled() { CustomCaFallback::Disabled } else { pool.custom_ca_fallback },
             ) {
                 (_, CustomCaFallback::LegacyDirect) => {
                     Ok(client_builder.build_with_custom_ca_fallback(ProxyRouting::Direct))
@@ -564,6 +565,7 @@ impl RouteAwareClientPool {
             && (self.http_client_factory.outbound_proxy_policy()
                 == OutboundProxyPolicy::RespectSystemProxy
                 || self.http_client_factory.network_policy().is_managed()
+                || crate::local_runtime_enabled()
                 || self.rustls_clients.is_some())
     }
 

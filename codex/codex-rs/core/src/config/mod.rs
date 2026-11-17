@@ -165,6 +165,7 @@ use toml_edit::DocumentMut;
 
 mod auth_keyring;
 pub mod edit;
+mod local_runtime;
 mod managed_features;
 mod metrics;
 mod network_config;
@@ -4796,6 +4797,9 @@ impl Config {
         if let Some(message) = config.credential_masking_warning(config.permissions.permission_profile()) {
             tracing::warn!("{message}");
             config.startup_warnings.push(message.to_string());
+        }
+        if codex_http_client::local_runtime_enabled() {
+            local_runtime::enforce(&mut config)?;
         }
         Ok(config)
         })

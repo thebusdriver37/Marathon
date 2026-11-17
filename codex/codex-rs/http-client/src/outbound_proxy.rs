@@ -281,6 +281,10 @@ impl HttpClientFactory {
         &self,
         request_url: String,
     ) -> io::Result<OutboundProxyRoute> {
+        if crate::local_runtime_enabled() {
+            crate::validate_local_runtime_url(&request_url)?;
+            return Ok(OutboundProxyRoute::Direct);
+        }
         if matches!(
             self.outbound_proxy_policy,
             OutboundProxyPolicy::ReqwestDefault
@@ -424,6 +428,8 @@ fn proxy_resolution_url(request_url: &str) -> Cow<'_, str> {
 #[derive(Debug, Error)]
 pub enum BuildRouteAwareHttpClientError {
     #[error(transparent)]
+    LocalRuntime(io::Error),
+    #[error(transparent)]
     CustomCa(#[from] BuildCustomCaTransportError),
 
     #[error("Failed to build HTTP client with explicit TLS configuration: {0}")]
@@ -436,6 +442,7 @@ pub enum BuildRouteAwareHttpClientError {
 impl From<BuildRouteAwareHttpClientError> for io::Error {
     fn from(error: BuildRouteAwareHttpClientError) -> Self {
         match error {
+            BuildRouteAwareHttpClientError::LocalRuntime(error) => error,
             BuildRouteAwareHttpClientError::CustomCa(error) => error.into(),
             BuildRouteAwareHttpClientError::InvalidProxyConfig { .. }
             | BuildRouteAwareHttpClientError::ExplicitTls(_) => io::Error::other(error),
