@@ -3198,6 +3198,13 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
         "reasoning delta should identify thinking"
     );
 
+    handle_agent_reasoning_final(&mut chat);
+    assert!(
+        status_line_text(&chat)
+            .is_some_and(|status| status.starts_with("Preparing next action · total ")),
+        "completed reasoning should show progress while the next item is generated"
+    );
+
     handle_agent_message_delta(&mut chat, "answering");
     assert!(
         status_line_text(&chat).is_some_and(|status| status == "Answering"),

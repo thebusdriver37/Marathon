@@ -456,6 +456,15 @@ impl ChatWidget {
 
     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
         if let Some(stage) = self.turn_throughput.generation_stage() {
+            if stage == GenerationStage::PreparingAction {
+                let elapsed = self.turn_throughput.elapsed(Instant::now());
+                return Some(match elapsed {
+                    Some(elapsed) => {
+                        format!("{} · total {}", stage.label(), format_latency(elapsed))
+                    }
+                    None => stage.label().to_string(),
+                });
+            }
             if matches!(
                 stage,
                 GenerationStage::DraftingCode | GenerationStage::ApplyingChanges

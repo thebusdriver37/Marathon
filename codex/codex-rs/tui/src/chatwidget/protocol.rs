@@ -145,9 +145,21 @@ impl ChatWidget {
                 self.handle_item_started_notification(notification, replay_kind);
             }
             ServerNotification::ItemCompleted(notification) => {
-                if !from_replay && let ThreadItem::FileChange { id, .. } = &notification.item {
-                    self.turn_throughput.finish_patch_apply(id);
-                    self.refresh_status_line();
+                if !from_replay {
+                    match &notification.item {
+                        ThreadItem::FileChange { id, .. } => {
+                            self.turn_throughput.finish_patch_apply(id);
+                            self.refresh_status_line();
+                        }
+                        ThreadItem::Reasoning { .. }
+                        | ThreadItem::AgentMessage { .. }
+                        | ThreadItem::Plan { .. } => {
+                            self.turn_throughput
+                                .set_generation_stage(GenerationStage::PreparingAction);
+                            self.refresh_status_line();
+                        }
+                        _ => {}
+                    }
                 }
                 self.handle_item_completed_notification(notification, replay_kind);
             }

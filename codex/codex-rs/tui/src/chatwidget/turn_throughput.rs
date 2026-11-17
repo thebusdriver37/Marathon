@@ -10,6 +10,7 @@ pub(super) enum GenerationStage {
     Prefill,
     Thinking,
     Answering,
+    PreparingAction,
     DraftingCode,
     ApplyingChanges,
 }
@@ -20,6 +21,7 @@ impl GenerationStage {
             Self::Prefill => "Prefill",
             Self::Thinking => "Thinking",
             Self::Answering => "Answering",
+            Self::PreparingAction => "Preparing next action",
             Self::DraftingCode => "Drafting",
             Self::ApplyingChanges => "Applying",
         }
