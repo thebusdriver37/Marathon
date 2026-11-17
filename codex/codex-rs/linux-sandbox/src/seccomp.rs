@@ -208,7 +208,10 @@ fn install_network_seccomp_filter_on_current_thread(
             deny_syscall(&mut rules, libc::SYS_bind);
             deny_syscall(&mut rules, libc::SYS_listen);
             deny_syscall(&mut rules, libc::SYS_getpeername);
-            deny_syscall(&mut rules, libc::SYS_getsockname);
+            // Permit read-only descriptor inspection. libuv uses getsockname
+            // to identify socketpair-backed child stdout/stderr; denying it
+            // silently drops Node test-runner diagnostics. This cannot open
+            // connections; socket creation and connect/bind remain restricted.
             deny_syscall(&mut rules, libc::SYS_shutdown);
             deny_syscall(&mut rules, libc::SYS_sendto);
             deny_syscall(&mut rules, libc::SYS_sendmmsg);
@@ -217,7 +220,25 @@ fn install_network_seccomp_filter_on_current_thread(
             // management.
             // deny_syscall(&mut rules, libc::SYS_recvfrom);
             deny_syscall(&mut rules, libc::SYS_recvmmsg);
-            deny_syscall(&mut rules, libc::SYS_getsockopt);
+            // libuv also reads SO_TYPE when classifying child output streams.
+            // Keep every other getsockopt operation denied.
+            rules.insert(
+                libc::SYS_getsockopt,
+                vec![
+                    SeccompRule::new(vec![SeccompCondition::new(
+                        1,
+                        SeccompCmpArgLen::Dword,
+                        SeccompCmpOp::Ne,
+                        libc::SOL_SOCKET as u64,
+                    )?])?,
+                    SeccompRule::new(vec![SeccompCondition::new(
+                        2,
+                        SeccompCmpArgLen::Dword,
+                        SeccompCmpOp::Ne,
+                        libc::SO_TYPE as u64,
+                    )?])?,
+                ],
+            );
             deny_syscall(&mut rules, libc::SYS_setsockopt);
 
             // For `socket` we allow AF_UNIX (arg0 == AF_UNIX) and deny
