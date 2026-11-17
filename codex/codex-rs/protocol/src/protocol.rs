@@ -2566,9 +2566,6 @@ pub struct SpendControlLimitSnapshot {
     pub resets_at: i64,
 }
 
-// Includes prompts, tools and space to call compact.
-const BASELINE_TOKENS: i64 = 12000;
-
 impl TokenUsage {
     pub fn is_zero(&self) -> bool {
         self.total_tokens == 0
@@ -2591,25 +2588,15 @@ impl TokenUsage {
         self.total_tokens
     }
 
-    /// Estimate the remaining user-controllable percentage of the model's context window.
-    ///
-    /// `context_window` is the total size of the model's context window.
-    /// `BASELINE_TOKENS` should capture tokens that are always present in
-    /// the context (e.g., system prompt and fixed tool instructions) so that
-    /// the percentage reflects the portion the user can influence.
-    ///
-    /// This normalizes both the numerator and denominator by subtracting the
-    /// baseline, so immediately after the first prompt the UI shows 100% left
-    /// and trends toward 0% as the user fills the effective window.
+    /// Return the raw percentage remaining in the model's active context window.
     pub fn percent_of_context_window_remaining(&self, context_window: i64) -> i64 {
-        if context_window <= BASELINE_TOKENS {
+        if context_window <= 0 {
             return 0;
         }
 
-        let effective_window = context_window - BASELINE_TOKENS;
-        let used = (self.tokens_in_context_window() - BASELINE_TOKENS).max(0);
-        let remaining = (effective_window - used).max(0);
-        ((remaining as f64 / effective_window as f64) * 100.0)
+        let used = self.tokens_in_context_window().clamp(0, context_window);
+        let remaining = context_window - used;
+        ((remaining as f64 / context_window as f64) * 100.0)
             .clamp(0.0, 100.0)
             .round() as i64
     }
@@ -6593,5 +6580,22 @@ mod tests {
                 .expect("new_or_append should return info");
 
         assert_eq!(info.model_context_window, Some(258_400));
+    }
+
+    #[test]
+    fn token_usage_percentage_uses_the_full_runtime_window() {
+        for (used, window, expected) in [
+            (8_661, 65_536, 87),
+            (32_768, 131_072, 75),
+            (65_536, 262_144, 75),
+            (262_144, 262_144, 0),
+        ] {
+            let usage = TokenUsage {
+                total_tokens: used,
+                ..TokenUsage::default()
+            };
+
+            assert_eq!(usage.percent_of_context_window_remaining(window), expected);
+        }
     }
 }

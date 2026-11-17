@@ -68,7 +68,7 @@ async fn token_count_none_resets_context_indicator() {
         &mut chat,
         Some(make_token_info(pre_compact_tokens, context_window)),
     );
-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(30));
+    assert_eq!(chat.bottom_pane.context_window_percent(), Some(2));
 
     handle_token_count(&mut chat, /*info*/ None);
     assert_eq!(chat.bottom_pane.context_window_percent(), None);
@@ -116,7 +116,7 @@ async fn resumed_session_hides_unknown_token_usage_until_an_update_arrives() {
     chat.refresh_status_line();
     assert_eq!(
         status_line_text(&chat),
-        Some("Context 30% left · Context 70% used · 0 in · 0 out".to_string())
+        Some("Context 2% left · Context 98% used · 0 in · 0 out".to_string())
     );
 }
 

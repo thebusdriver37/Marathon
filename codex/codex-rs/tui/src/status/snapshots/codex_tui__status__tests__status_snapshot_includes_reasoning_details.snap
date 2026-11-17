@@ -15,6 +15,6 @@ expression: sanitized
   Agents.md:       <none>
 
   Token usage:     1.9K total  (1K input + 900 output)
-  Context window:  100% left (2.25K used / 272K)
+  Context window:  99% left (2.25K used / 272K)
   5h limit:        [██████░░░░░░░░░░░░░░] 28% left (resets 3:14 AM)
   Weekly limit:    [███████████░░░░░░░░░] 55% left (resets 3:24 AM)
