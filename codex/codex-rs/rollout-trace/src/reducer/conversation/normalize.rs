@@ -63,7 +63,7 @@ pub(super) fn token_usage_from_value(value: &Value) -> Option<TokenUsage> {
     })
 }
 
-fn normalize_model_item(
+pub(super) fn normalize_model_item(
     item: &Value,
     raw_payload: &RawPayloadRef,
 ) -> Result<NormalizedConversationItem> {
@@ -533,7 +533,7 @@ fn summarize_json(value: &Value) -> String {
     let mut summary =
         serde_json::to_string(value).unwrap_or_else(|_| "<unserializable json>".to_string());
     if summary.len() > MAX_JSON_SUMMARY_LEN {
-        summary.truncate(MAX_JSON_SUMMARY_LEN);
+        summary.truncate(summary.floor_char_boundary(MAX_JSON_SUMMARY_LEN));
         summary.push_str("...");
     }
     summary

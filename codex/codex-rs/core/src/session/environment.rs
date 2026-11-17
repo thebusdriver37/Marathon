@@ -1,3 +1,4 @@
+use crate::McpRefreshReason;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -214,11 +215,9 @@ impl Session {
                 self.services
                     .turn_environments
                     .set_active_thread_defaults(configuration.inferred_environment_config());
-                if environments != self.services.turn_environments.selections() {
-                    self.services
-                        .turn_environments
-                        .update_selections(&environments);
-                }
+                self.services
+                    .turn_environments
+                    .activate_selections(&environments);
             }
             self.services.turn_environments.snapshot()
         };
@@ -371,7 +370,7 @@ impl Session {
         state.session_configuration.environments = future;
         if update_current {
             // Invalidate MCP before installed configuration can wake a waiting turn.
-            self.mark_mcp_runtime_dirty();
+            self.mark_mcp_runtime_dirty(McpRefreshReason::CurrentEnvironmentsChanged);
             self.services.turn_environments.update_selections(&current);
         }
         Ok(())

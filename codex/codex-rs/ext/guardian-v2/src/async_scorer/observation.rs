@@ -65,8 +65,40 @@ impl GuardianV2Extension {
         let Some(score_progress) = input.thread_store.get::<GuardianV2ScoreProgress>() else {
             return;
         };
+        let is_js_execution = input.mcp_tool.is_some_and(|tool| {
+            let info = tool.tool_info();
+            is_node_repl_backed_connector(&info.server_name, info.connector_id.as_deref())
+                && if info.server_name == "codex_apps" {
+                    info.tool
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("_codex_apps"))
+                        .and_then(|meta| meta.get("resource_uri"))
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|uri| uri.trim_matches('/').rsplit('/').next())
+                        == Some("js")
+                } else {
+                    info.tool.name == "js"
+                }
+        });
+        // Count execution attempts even when policy disables background scoring.
+        if is_js_execution {
+            score_progress.observe_js_execution();
+        }
+        let Some(config) = input.turn_store.get::<codex_core::config::Config>() else {
+            score_progress.clear_score();
+            return;
+        };
+        if input.serving_assessment.is_some() {
+            let index = score_progress.observe(&input);
+            score_progress.invalidate(index);
+            return;
+        }
         let parent_model = input.thread_store.get::<ModelInfo>();
-        let policy = guardian_config.policy_for_model(parent_model.as_deref());
+        let policy = guardian_config.policy_for_model(
+            parent_model.as_deref(),
+            config.config_layer_stack.requirements(),
+        );
         if !policy.scoring_enabled() {
             input.thread_store.remove::<GuardianV2Enabled>();
         }
@@ -76,15 +108,29 @@ impl GuardianV2Extension {
                 let info = tool.tool_info();
                 GuardianScope::for_mcp_connector(&info.server_name, info.connector_id.as_deref())
             })
+            .or_else(|| {
+                if guardian_config.review_multi_agent_calls {
+                    GuardianScope::for_multi_agent_tool(
+                        input.tool_name,
+                        guardian_config.multi_agent_namespace.as_deref(),
+                    )
+                } else {
+                    None
+                }
+            })
             .or_else(|| GuardianScope::for_tool(input.tool_name));
-        // Model policies review nested actions; the Code Mode wrapper leaves their scores alone.
+        // Mandatory review constraints must not turn transparent catalog wrappers into actions.
         // The legacy all-tools policy still scores wrappers through `other_tools`.
+        let wrapper_mode = parent_model
+            .as_ref()
+            .and_then(|model| model.guardian.as_ref())
+            .map_or(policy.other_tools, |catalog| catalog.other_tools);
         if scope.is_none()
             && input.tool_name.is_default_namespace()
             && input.tool_name.name == "exec"
             && matches!(input.payload, ToolPayload::Custom { .. })
             && matches!(input.source, ToolCallSource::Direct)
-            && policy.other_tools == GuardianReviewMode::Disabled
+            && wrapper_mode == GuardianReviewMode::Disabled
         {
             return;
         }
@@ -113,35 +159,18 @@ impl GuardianV2Extension {
             }
             return;
         }
-        if input.mcp_tool.is_some_and(|tool| {
-            let info = tool.tool_info();
-            is_node_repl_backed_connector(&info.server_name, info.connector_id.as_deref())
-                && if info.server_name == "codex_apps" {
-                    info.tool
-                        .meta
-                        .as_ref()
-                        .and_then(|meta| meta.get("_codex_apps"))
-                        .and_then(|meta| meta.get("resource_uri"))
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|uri| uri.trim_matches('/').rsplit('/').next())
-                        == Some("js")
-                } else {
-                    info.tool.name == "js"
-                }
-        }) {
-            score_progress.observe_js_execution();
-        }
         let metrics = score_progress.metrics.clone();
         let context_mode = GuardianContextMode::from_history(input.conversation_history.as_ref());
         let analytics = input.session_store.get::<AnalyticsEventsClient>();
         let sampled_at = SystemTime::now();
-        let (tool_call_index, reservation) = match input.thread_store.get::<ConversationBackend>() {
-            Some(conversation) => {
-                let (index, reservation) = conversation.reserve(|| score_progress.observe(&input));
-                (index, reservation.map(Some))
-            }
-            None => (score_progress.observe(&input), Ok(None)),
+        let Some(conversation) = input.thread_store.get::<ConversationBackend>() else {
+            let index = score_progress.observe(&input);
+            score_progress.invalidate(index);
+            score_progress.fail_closed(sampled_at);
+            return;
         };
+        let (tool_call_index, reservation) =
+            conversation.reserve(|| score_progress.observe(&input));
         tracing::Span::current().record("tool_call_index", tool_call_index);
         let reservation = match reservation {
             Ok(reservation) => reservation,
@@ -181,11 +210,10 @@ impl GuardianV2Extension {
                 .get_thread(parsed_thread_id)
                 .await
                 .map_err(|error| error.to_string())?;
-            let config = thread.config().await;
-            Ok((manager, thread, config))
+            Ok((manager, thread))
         }
         .await;
-        let (manager, thread, config) = match thread_context {
+        let (manager, thread) = match thread_context {
             Ok(context) => context,
             Err(error) => {
                 score_progress.invalidate(tool_call_index);
@@ -213,15 +241,19 @@ impl GuardianV2Extension {
             score_progress.invalidate(tool_call_index);
             return;
         }
-        // A required model keeps synchronous review outside its CUA allowance.
-        if !(scope == Some(GuardianScope::ComputerUse) && policy.allows_initial_cua_call())
-            && parent_model.as_ref().is_some_and(|model| {
-                config
-                    .config_layer_stack
-                    .requirements()
-                    .auto_review_required_for_model(&model.slug)
-            })
-        {
+        // Keep live mandatory review gates without replacing the captured instructions.
+        let mut permitted = policy.clone();
+        thread
+            .config()
+            .await
+            .config_layer_stack
+            .requirements()
+            .constrain_guardian_policy(
+                &mut permitted,
+                parent_model.as_ref().map(|model| model.slug.as_str()),
+            );
+        if !scores_tool(&permitted, input.tool_name, input.payload, scope) {
+            score_progress.invalidate(tool_call_index);
             score_progress.clear_score();
             return;
         }
@@ -297,7 +329,6 @@ impl GuardianV2Extension {
             }
         };
         let parent_compaction = selected_compaction.item;
-        let parent_compaction_hash = selected_compaction.model_hash;
         let call_id = input.call_id.to_owned();
         let mcp_tool = input.mcp_tool.cloned();
         let action = GuardianAction {
@@ -336,9 +367,6 @@ impl GuardianV2Extension {
                 return;
             }
         };
-        let review_model_override = parent_model
-            .as_ref()
-            .and_then(|model| model.auto_review_model_override.clone());
         // Snapshot before spawning so a delayed sample cannot see later reviews.
         let sync_reviews = guardian_evidence.snapshot();
         let codex_core::context::GuardianUserInputSnapshot {
@@ -379,7 +407,6 @@ impl GuardianV2Extension {
         let classification = Classification {
             reservation,
             classification_started_at,
-            sampler,
             decisions_sampler: input
                 .thread_store
                 .get::<super::decisions::DecisionsSampler>(),
@@ -401,11 +428,9 @@ impl GuardianV2Extension {
             config,
             context_mode,
             parent_compaction,
-            parent_compaction_hash,
             call_id,
             mcp_tool,
             planned_action,
-            review_model_override,
             sync_reviews,
             trusted_user_inputs,
             authorization_version,

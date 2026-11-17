@@ -123,7 +123,7 @@ impl StartupDraft {
     /// Adopt the initialized terminal and apply editing policy before the first composer paint.
     pub(crate) fn new(
         mut initialized_terminal: tui::InitializedTerminal,
-        terminal_restore_guard: TerminalRestoreGuard,
+        mut terminal_restore_guard: TerminalRestoreGuard,
         initial_screen: StartupDraftInitialScreen,
         session_action: StartupDraftSessionAction,
         screen: StartupScreen,
@@ -135,6 +135,7 @@ impl StartupDraft {
             initialized_terminal.enhanced_keys_supported,
             initialized_terminal.stderr_guard,
         );
+        terminal_restore_guard.events = Some(tui.event_broker.clone());
         tui.terminal_app_over_ssh = initialized_terminal.terminal_app_over_ssh;
         tui.set_alt_screen_enabled(screen.use_alt_screen);
         let mut pump = StartupDraftPump::new(&tui, initial_screen, session_action);
@@ -449,7 +450,21 @@ impl StartupDraftPump {
         } else {
             renderable.desired_height(screen_size.width)
         };
-        tui.draw_with_resize_reflow(desired_height, screen_size, |frame| {
+        let hud = self
+            .key_chord_matcher
+            .visible_pending(&tui.frame_requester())
+            .and_then(|pending| {
+                pending.guide(&self.key_chords, |action| {
+                    let Some(key) = crate::keymap::dispatch_event(action) else {
+                        return false;
+                    };
+                    self.session_action != StartupDraftSessionAction::NewFromCommandCenter
+                        && self.bottom_pane.is_startup_submit_key(key)
+                        || !self.bottom_pane.is_startup_composer_action(key)
+                            && self.bottom_pane.is_safe_startup_editor_key(key)
+                })
+            });
+        tui.draw_with_resize_reflow(desired_height, screen_size, hud, |frame| {
             let area = frame.area();
             renderable.render(area, frame.buffer);
             if let Some((x, y)) = renderable.cursor_pos(area) {

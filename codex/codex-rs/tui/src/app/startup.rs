@@ -5,6 +5,7 @@
 //! Queued resume history replaces the provisional loading frame only when it is ready to render.
 //! Explicit local launch permissions remain runtime overrides across new sessions and reconnects.
 
+use super::backend_selection::NewBackendSession;
 use super::reconnect::ReconnectState;
 use super::startup_bootstrap::bootstrap_server_owned_start;
 use super::startup_bootstrap::uses_server_owned_fresh_bootstrap;
@@ -15,6 +16,7 @@ use crate::session_start::SessionStartOutcome;
 use crate::session_start::cancel_session_start;
 use crate::session_start::complete_session_start;
 use crate::unarchive_prompt::run_unarchive_prompt;
+use color_eyre::eyre::ContextCompat;
 
 fn spawn_startup_thread_start(
     app_server: &AppServerSession,
@@ -24,6 +26,7 @@ fn spawn_startup_thread_start(
     app_event_tx: AppEventSender,
     worktree: Option<crate::ManagedTuiWorktree>,
 ) {
+    let backend_id = app_server.backend_id();
     let request_handle = app_server.request_handle();
     let thread_params_mode = app_server.thread_params_mode();
     let remote_cwd_override = app_server.remote_cwd_override().map(Path::to_path_buf);
@@ -45,14 +48,8 @@ fn spawn_startup_thread_start(
             }
             Ok(started)
         });
-        app_event_tx.send(AppEvent::StartupThreadStarted { result });
+        app_event_tx.send(AppEvent::StartupThreadStarted { backend_id, result });
     });
-}
-
-#[derive(Default)]
-pub(super) struct FreshStartupDefaults {
-    pub(super) server_defaults_read: bool,
-    pub(super) prompt_windows_sandbox: bool,
 }
 
 pub(super) async fn prepare_fresh_startup_config(
@@ -62,66 +59,64 @@ pub(super) async fn prepare_fresh_startup_config(
     cli_kv_overrides: &[(String, TomlValue)],
     harness_overrides: &ConfigOverrides,
     environments: &EnvironmentManager,
-) -> Result<FreshStartupDefaults> {
+) -> Result<crate::projectless::AppliedDefaults> {
     let defaults_cwd = match app_server_target {
         AppServerTarget::Embedded | AppServerTarget::LocalDaemon { .. } => config.cwd.as_path(),
-        AppServerTarget::Remote { .. } => {
+        AppServerTarget::Remote { .. } | AppServerTarget::Cloud => {
             app_server.remote_cwd_override().unwrap_or(Path::new("."))
         }
     };
-    let defaults = crate::config_update::read_effective_config_if_supported(
+    let defaults = crate::config_update::read_effective_config_with_layers(
         app_server.request_handle(),
         defaults_cwd,
     )
     .await?;
-    let mut prompt_windows_sandbox = false;
-    if let Some(defaults) = defaults.as_ref() {
-        super::new_session::overlay_new_session_defaults(
-            config,
-            &defaults.config,
-            cli_kv_overrides,
-            harness_overrides,
-        );
-        prompt_windows_sandbox = crate::projectless::apply_defaults(
-            config,
-            harness_overrides,
-            app_server,
-            environments,
-            defaults,
-        );
-    }
+    super::new_session::overlay_new_session_defaults(
+        config,
+        &defaults.config,
+        cli_kv_overrides,
+        harness_overrides,
+    );
+    let projectless = crate::projectless::apply_defaults(
+        config,
+        harness_overrides,
+        app_server,
+        environments,
+        &defaults,
+    );
     apply_managed_new_thread_defaults(
         config,
         app_server.managed_new_thread_defaults(),
         cli_kv_overrides,
         harness_overrides,
     );
-    Ok(FreshStartupDefaults {
-        server_defaults_read: defaults.is_some(),
-        prompt_windows_sandbox,
-    })
+    Ok(projectless)
 }
 
 pub(super) fn startup_model(
     config: &Config,
     bootstrap: &AppServerBootstrap,
     server_defaults_read: bool,
-) -> String {
-    config.model.clone().unwrap_or_else(|| {
-        if server_defaults_read {
-            // Legacy bootstrap paths may be seeded with local config, which can differ from a
-            // cleared server model. Use the server catalog when config/read returned model: null.
-            bootstrap
-                .available_models
-                .iter()
-                .find(|model| model.is_default)
-                .or_else(|| bootstrap.available_models.first())
-                .map(|model| model.model.clone())
-                .unwrap_or_else(|| bootstrap.default_model.clone())
-        } else {
-            bootstrap.default_model.clone()
-        }
-    })
+) -> Result<String> {
+    config
+        .model
+        .clone()
+        .or_else(|| {
+            if server_defaults_read {
+                // Legacy bootstrap paths may be seeded with local config, which can differ from a
+                // cleared server model. Use the server catalog when config/read returned model: null.
+                bootstrap
+                    .available_models
+                    .iter()
+                    .find(|model| model.is_default)
+                    .or_else(|| bootstrap.available_models.first())
+                    .map(|model| model.model.clone())
+                    .or_else(|| bootstrap.default_model.clone())
+            } else {
+                bootstrap.default_model.clone()
+            }
+        })
+        .wrap_err("The initial app-server connection did not provide a startup model.")
 }
 
 impl App {
@@ -160,6 +155,26 @@ impl App {
         }
     }
 
+    pub(super) fn awaiting_side_replay(&self, tui: &tui::Tui) -> bool {
+        self.pending_thread_switch_resets != 0 && self.side_retention_enabled(tui)
+    }
+
+    /// Apply queued app events before input can cross a backend or side-chat switch.
+    pub(super) fn can_read_terminal_after_thread_switch(
+        &self,
+        tui: &tui::Tui,
+        app_event_rx: &mpsc::UnboundedReceiver<AppEvent>,
+    ) -> bool {
+        self.pending_thread_switch_resets == 0
+            && (app_event_rx.is_empty()
+                || (!self.config.features.enabled(Feature::TuiMultiBackend)
+                    && !self.side_retention_enabled(tui)
+                    && self
+                        .current_displayed_thread_id()
+                        .and_then(|id| self.side_pair_key(id))
+                        .is_none()))
+    }
+
     /// Keep the provisional loading frame until queued history reaches the owned transcript.
     /// Visible startup decisions and the agent overview must still render immediately.
     pub(super) fn render_startup_frame(
@@ -167,7 +182,10 @@ impl App {
         tui: &mut tui::Tui,
         app_event_rx: &mpsc::UnboundedReceiver<AppEvent>,
     ) -> Result<()> {
-        if tui.is_owned_screen() && !app_event_rx.is_empty() && !self.chat_widget.has_active_view()
+        if self.awaiting_side_replay(tui)
+            || (tui.is_owned_screen()
+                && !app_event_rx.is_empty()
+                && !self.chat_widget.has_active_view())
         {
             return Ok(());
         }
@@ -232,6 +250,7 @@ impl App {
         initial_backends: super::backend_sessions::InitialBackendSessions,
         mut config: Config,
         launch_cwd: PathBuf,
+        backend_preference_context: backend_selection::BackendPreferenceContext,
         cli_kv_overrides: Vec<(String, TomlValue)>,
         harness_overrides: ConfigOverrides,
         loader_overrides: LoaderOverrides,
@@ -286,7 +305,7 @@ impl App {
             exit_info
         }
 
-        let (mut app_server, mut other_backends) = initial_backends.into_parts();
+        let (mut app_server, mut other_backends, backend_settings) = initial_backends.into_parts();
         // Preserve singleton error propagation while releasing all sessions on multi-backend exits.
         macro_rules! startup_try {
             ($result:expr) => {
@@ -331,11 +350,8 @@ impl App {
             &session_selection,
             SessionSelection::StartFresh | SessionSelection::Exit
         );
-        let server_owned_fresh_bootstrap = uses_server_owned_fresh_bootstrap(
-            &app_server_target,
-            &session_selection,
-            &loader_overrides,
-        );
+        let server_owned_fresh_bootstrap =
+            uses_server_owned_fresh_bootstrap(&session_selection, &loader_overrides);
         let mut bootstrap = startup_bootstrap;
         if bootstrap.is_none() && !server_owned_fresh_bootstrap {
             bootstrap = Some(
@@ -389,7 +405,7 @@ impl App {
                 }
             }
         } else {
-            FreshStartupDefaults::default()
+            crate::projectless::AppliedDefaults::default()
         };
         let mut launch_choices = crate::app_server_session::StartupLaunchChoices::from_launch(
             &cli_kv_overrides,
@@ -405,7 +421,6 @@ impl App {
                         &mut app_server,
                         &mut config,
                         &mut launch_choices,
-                        startup_defaults.server_defaults_read,
                         &cli_kv_overrides,
                         &harness_overrides,
                     ),
@@ -418,6 +433,10 @@ impl App {
                 }
             },
         };
+        launch_choices.apply_projectless_approval_policy(
+            startup_defaults.approval_policy,
+            bootstrap.allowed_approval_policies.as_deref(),
+        );
         tracing::debug!(
             has_platform_family = app_server.app_server_platform_family().is_some(),
             has_platform_os = app_server.app_server_platform_os().is_some(),
@@ -434,7 +453,7 @@ impl App {
                 &harness_overrides,
             );
         }
-        let mut model = startup_model(&config, &bootstrap, startup_defaults.server_defaults_read);
+        let mut model = startup_try!(startup_model(&config, &bootstrap, fresh_start));
         let available_models = bootstrap.available_models;
         let mut remote_connection =
             crate::status::remote_connection::remote_connection_status_value(
@@ -510,8 +529,10 @@ impl App {
         {
             tracing::warn!(%error, "TUI task delegation is unavailable without its MCP server");
         }
+        let mut provider_writes = HashMap::new();
         let model_catalog = Arc::new(
             ModelCatalog::new(available_models.clone())
+                .for_backend(app_server.backend_id(), &mut provider_writes)
                 .with_collaboration_modes(bootstrap.collaboration_modes),
         );
         let feedback_audience = bootstrap.feedback_audience;
@@ -565,6 +586,7 @@ impl App {
         let mut start_in_agents_overview =
             matches!(&session_selection, SessionSelection::AgentsOverview);
         let mut read_only_thread = false;
+        let mut provider_error = None;
         let mut history_notice = None;
         let (mut chat_widget, initial_started_thread) = match session_selection {
             SessionSelection::StartFresh
@@ -677,7 +699,11 @@ impl App {
                     .await
                 {
                     Ok(Ok(resumed)) => Ok(resumed),
-                    Ok(Err(err)) if crate::app_server_session::is_active_writer_error(&err) => {
+                    Ok(Err(err))
+                        if crate::app_server_session::is_active_writer_error(&err)
+                            || crate::app_server_session::model_provider_error(&err).is_some() =>
+                    {
+                        provider_error = crate::app_server_session::model_provider_error(&err);
                         read_only_thread = true;
                         match startup_draft
                             .run_until(
@@ -732,7 +758,6 @@ impl App {
                             config: &config,
                             local_settings: &local_settings,
                         },
-                        &app_server_target,
                         &target_session,
                         action,
                         resumed,
@@ -837,7 +862,6 @@ impl App {
                         config: &config,
                         local_settings: &local_settings,
                     },
-                    &app_server_target,
                     &target_session,
                     action,
                     forked,
@@ -916,10 +940,6 @@ impl App {
             &app_server_target,
             environment_manager.as_ref(),
         ));
-        chat_widget.set_agents_navigation_enabled(matches!(
-            app_server_target,
-            AppServerTarget::LocalDaemon { .. }
-        ));
         let thread_and_widget_ms = thread_and_widget_started_at.elapsed().as_millis();
         chat_widget.windows_sandbox_local_server = !app_server_target.uses_remote_workspace()
             && app_server.app_server_platform_os() == Some("windows");
@@ -938,15 +958,26 @@ impl App {
                 history_cell::StartupWarningsCell::new(vec![warning]),
             )));
         }
+        // Automatic NFS detection is Linux-only; manual migration supports Unix.
+        #[cfg(target_os = "linux")]
+        if !app_server_target.uses_remote_workspace() {
+            tokio::spawn(startup_warnings::warn_about_nfs_migration(
+                config.sqlite_config().clone(),
+                app_event_tx.clone(),
+            ));
+        }
         let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
-        let runtime_keymap =
-            RuntimeKeymap::from_config(&local_settings.tui.keymap).map_err(|err| {
-                color_eyre::eyre::eyre!(
-                    "Invalid `tui.keymap` configuration: {err}\n\
+        let runtime_keymap = RuntimeKeymap::for_session(
+            &local_settings.tui.keymap,
+            local_settings.workspace_enabled(&config),
+        )
+        .map_err(|err| {
+            color_eyre::eyre::eyre!(
+                "Invalid `tui.keymap` configuration: {err}\n\
 Fix the config and retry.\n\
 See the Codex keymap documentation for supported actions and examples."
-                )
-            });
+            )
+        });
         let runtime_keymap = startup_try!(runtime_keymap);
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
@@ -954,6 +985,7 @@ See the Codex keymap documentation for supported actions and examples."
         let agents_overview =
             agents_overview::AgentsOverviewState::new(local_settings.tui.agents_overview_grouping);
         let mut app = Self {
+            provider_writes,
             feature_write_lock: Arc::default(),
             config_notification_test_generation: 0,
             config_notification_test_pending: None,
@@ -963,6 +995,7 @@ See the Codex keymap documentation for supported actions and examples."
             app_event_tx,
             chat_widget,
             workspace_command_runner: Some(workspace_command_runner),
+            backend_preference_context,
             config,
             local_settings,
             launch_cwd,
@@ -985,6 +1018,7 @@ See the Codex keymap documentation for supported actions and examples."
             native_history: Default::default(),
             turn_tips: Default::default(),
             transcript_view: Default::default(),
+            conversation_frame: Default::default(),
             last_rendered_history_tail: None,
             last_thread_usage_status_cell: None,
             pending_thread_usage_history_refresh: false,
@@ -1035,6 +1069,14 @@ See the Codex keymap documentation for supported actions and examples."
             agent_navigation: AgentNavigationState::default(),
             agents_overview,
             side_threads: HashMap::new(),
+            saved_openings: Default::default(),
+            sidebars: HashMap::new(),
+            side_companions: HashMap::new(),
+            zoomed_thread: None,
+            exact_sidebar_width: None,
+            divider_drag: None,
+            pane_resize: None,
+            passive_link_drag: None,
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -1097,7 +1139,7 @@ See the Codex keymap documentation for supported actions and examples."
         }
         if start_in_agents_overview {
             app.open_agents_overview(&app_server);
-        } else if !matches!(app.app_server_target, AppServerTarget::Embedded) {
+        } else {
             app.refresh_agents_overview_threads(&app_server);
         }
         if let Some(entry) = startup_hooks_browser {
@@ -1112,7 +1154,10 @@ See the Codex keymap documentation for supported actions and examples."
             if started.blocks_direct_input {
                 app.mark_primary_thread_parent_owned(thread_id);
             }
-            if read_only_thread {
+            if let Some(error) = provider_error.clone() {
+                app.chat_widget
+                    .show_provider_error(error, /*rejected_message_id*/ None);
+            } else if read_only_thread {
                 app.chat_widget.show_external_writer_thread();
             }
             match startup_draft
@@ -1127,13 +1172,17 @@ See the Codex keymap documentation for supported actions and examples."
                     return shutdown_on_startup_error(app_server, &mut other_backends, err).await;
                 }
             }
-            if read_only_thread {
+            app.remember_attached_host_project(&app_server);
+            if let Some(error) = provider_error {
+                app.chat_widget
+                    .show_provider_error(error, /*rejected_message_id*/ None);
+            } else if read_only_thread {
                 app.ensure_thread_channel(thread_id).mark_external_writer();
                 app.chat_widget.show_external_writer_thread();
-                if let Some(notice) = history_notice {
-                    app.chat_widget
-                        .add_info_message(notice.to_string(), /*hint*/ None);
-                }
+            }
+            if let Some(notice) = history_notice {
+                app.chat_widget
+                    .add_info_message(notice.to_string(), /*hint*/ None);
             }
             if !read_only_thread
                 && should_prompt_for_paused_goal_after_startup_resume
@@ -1261,20 +1310,44 @@ See the Codex keymap documentation for supported actions and examples."
         #[cfg(debug_assertions)]
         let pre_loop_exit_reason: Option<ExitReason> = None;
 
-        let initial_owner = app_server.backend_id();
         let mut backends =
             super::backend_sessions::BackendSessions::from_initial(app_server, other_backends);
+        if matches!(
+            app.app_server_target,
+            AppServerTarget::Embedded | AppServerTarget::LocalDaemon { .. }
+        ) {
+            backends.set_preference_key(backends.displayed_owner(), "local");
+        }
+        for (&owner, settings) in &backend_settings {
+            if settings.target == AppServerTarget::Cloud {
+                backends.set_preference_key(owner, "cloud");
+            }
+        }
+        backends.settings = backend_settings;
 
+        let mut parked_side_completions = HashMap::<_, Vec<AppEvent>>::new();
         let exit_reason_result = if let Some(exit_reason) = pre_loop_exit_reason {
             Ok(exit_reason)
         } else {
             loop {
-                let Some(displayed_session) = backends.slot(initial_owner) else {
-                    break Err(color_eyre::eyre::eyre!(
-                        "the initial backend is not registered"
-                    ));
+                let displayed_session = backends.displayed;
+                let displayed_owner = backends.displayed_owner();
+                if let Some(events) = parked_side_completions.remove(&displayed_owner) {
+                    for event in events {
+                        app.app_event_tx.send(event);
+                    }
+                }
+                backends.replay_ready_side_startup(&app);
+                let multi_backend = app.config.features.enabled(Feature::TuiMultiBackend);
+                let next_backend = if multi_backend && app.can_cycle_conversation_backend() {
+                    backends.next_listening_backend(displayed_owner)
+                } else {
+                    None
                 };
-                if !backends.is_listening(initial_owner)
+                let current_label =
+                    next_backend.and_then(|_| backends.displayed_name(&app.app_server_target));
+                app.chat_widget.set_new_backend_control(current_label);
+                if !backends.is_listening(displayed_owner)
                     && !app.pending_startup_thread_start
                     && !app.reconnect.offline
                 {
@@ -1285,18 +1358,14 @@ See the Codex keymap documentation for supported actions and examples."
                     if !tui.is_owned_screen() && tui.is_alt_screen_active() {
                         app.close_transcript_overlay(tui);
                     } else if let Err(err) =
-                        tui.set_overlay_input(crate::tui::OverlayInput::Default)
+                        tui.set_mouse_capture(app.chat_widget.mouse_capture(tui.is_owned_screen()))
                     {
                         break Err(err.into());
                     }
                 }
                 if app.pending_open_resume_picker {
                     app.pending_open_resume_picker = false;
-                    match Box::pin(
-                        app.open_resume_picker(tui, backends.session_at_mut(displayed_session)),
-                    )
-                    .await
-                    {
+                    match Box::pin(app.open_resume_picker_for_backends(tui, &mut backends)).await {
                         Ok(AppRunControl::Continue) => {}
                         Ok(AppRunControl::Exit(reason)) => break Ok(reason),
                         Err(err) if app.recover_transport_error(&err) => {}
@@ -1351,9 +1420,9 @@ See the Codex keymap documentation for supported actions and examples."
                 if app.reconnect.offline && !app.reconnect.failed && reconnect.is_none() {
                     let presentation = app.reconnect.presentation;
                     let wait_for_drain =
-                        app.pending_startup_thread_start && backends.is_listening(initial_owner);
+                        app.pending_startup_thread_start && backends.is_listening(displayed_owner);
                     let attempt = reconnect::reconnect(
-                        initial_owner,
+                        displayed_owner,
                         app.app_server_target.clone(),
                         app.config.clone(),
                         app.local_settings.clone(),
@@ -1367,23 +1436,27 @@ See the Codex keymap documentation for supported actions and examples."
                             .thread_tool_transport(),
                         presentation,
                     );
-                    reconnect = Some(Box::pin(async move {
+                    let future = Box::pin(async move {
                         if let reconnect::ReconnectPresentation::Startup(deadline) = presentation
                             && wait_for_drain
                         {
                             tokio::time::sleep_until(deadline).await;
-                            color_eyre::eyre::bail!("Server connection could not be restored");
+                            color_eyre::eyre::bail!(
+                                "Automatic reconnect timed out waiting for the server to finish shutting down."
+                            );
                         }
                         attempt.await
-                    }));
+                    });
+                    reconnect = Some((displayed_owner, future));
                 }
                 // Replay queues history and operations. A buffered closure must not switch
                 // widgets before those app events have been applied.
                 let has_pending_app_events = !app_event_rx.is_empty();
                 let paused_backend = ((app.reconnect.offline && !app.pending_startup_thread_start)
+                    || (app.awaiting_side_replay(tui) && has_pending_app_events)
                     || (!matches!(app.app_server_target, AppServerTarget::Embedded)
                         && has_pending_app_events))
-                    .then_some(initial_owner);
+                    .then_some(displayed_owner);
                 let initial_session_header_pending = waiting_for_initial_session_header
                     && app.primary_session_configured.is_some()
                     && has_pending_app_events;
@@ -1426,19 +1499,56 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                         AppRunControl::Continue
                     }
-                    Some(event) = app_event_rx.recv() => {
+                    Some(event) = app.saved_openings.next_event(&mut app_event_rx) => {
+                        let switch_backend = match &event {
+                            AppEvent::ChooseNewSessionCheckout { name } | AppEvent::NewSession { name }
+                                if multi_backend => app.other_new_session_backend(&backends).await
+                                    .map(|owner| (owner, NewBackendSession::Fresh { name: name.clone() })),
+                            AppEvent::CycleNewConversationBackend => {
+                                let Some(owner) = next_backend else { continue };
+                                Some((owner, NewBackendSession::CarryDraft))
+                            }
+                            _ => None,
+                        };
+                        if let Some((owner, session)) = switch_backend {
+                            if let Err(message) = Box::pin(app.start_new_session_on_other_backend(tui, &mut backends, owner, session)).await {
+                                app.chat_widget.add_error_message(message);
+                            }
+                            continue;
+                        }
+                        if let AppEvent::ResumeBackendSession(target) = event {
+                            match app.resume_backend_session(tui, &mut backends, target).await {
+                                Ok(AppRunControl::Continue) => continue,
+                                Ok(AppRunControl::Exit(reason)) => break Ok(reason),
+                                Err(error) => break Err(error),
+                            }
+                        }
                         let is_initial_session_header = matches!(
                             &event,
                             AppEvent::InsertHistoryCell(cell)
                                 if cell.as_any().is::<history_cell::SessionInfoCell>()
                         );
-                        let had_active_modal = app.chat_widget.has_active_modal();
-                        match Box::pin(app.handle_event(tui, backends.session_at_mut(displayed_session), event)).await {
+                        let event_session = match &event {
+                            AppEvent::SideCreated { backend_id, .. } if *backend_id != displayed_owner => {
+                                parked_side_completions.entry(*backend_id).or_default().push(event);
+                                continue;
+                            }
+                            AppEvent::SavedSideChatsLoaded { backend_id, .. }
+                            | AppEvent::StartupThreadStarted { backend_id, .. } => {
+                                backends.slot(*backend_id).unwrap_or(displayed_session)
+                            }
+                            _ => displayed_session,
+                        };
+                        // A modal deferred behind a snapshot reset still needs its first frame
+                        // and protected-input drain when replay completes.
+                        let had_visible_modal = app.chat_widget.has_active_modal()
+                            && !app.awaiting_side_replay(tui);
+                        match Box::pin(app.handle_event(tui, backends.session_at_mut(event_session), event)).await {
                             Ok(AppRunControl::Continue) => {
                                 if is_initial_session_header {
                                     waiting_for_initial_session_header = false;
                                 }
-                                if !had_active_modal
+                                if !had_visible_modal
                                     && app.chat_widget.has_active_modal()
                                     && let Err(err) = app.render_startup_frame(tui, &app_event_rx)
                                 {
@@ -1470,7 +1580,7 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                         AppRunControl::Continue
                     }
-                    event = tui_events.next(), if app.pending_thread_switch_resets == 0
+                    event = tui_events.next(), if app.can_read_terminal_after_thread_switch(tui, &app_event_rx)
                         && (app.reconnect.offline || !block_terminal_input_for_pending_startup_events) => {
                         if let Some(event) = event {
                             if (matches!(
@@ -1505,14 +1615,17 @@ See the Codex keymap documentation for supported actions and examples."
                     }
                     (owner, app_server_event) = backends.next_event(paused_backend) => {
                         match app_server_event {
-                            Some(event) if owner != initial_owner || !app.reconnect.offline => {
+                            Some(event) if app.defer_side_startup_notification(&event, displayed_owner) => {
+                                backends.defer_side_startup(event);
+                            }
+                            Some(event) if owner != displayed_owner || !app.reconnect.offline => {
                                 if let Some(session) = backends.session(owner) {
-                                    app.handle_polled_backend_event(session, initial_owner, event).await;
+                                    app.handle_polled_backend_event(session, displayed_owner, event).await;
                                 }
                             }
                             Some(_) => {}
                             None => {
-                                if owner == initial_owner {
+                                if owner == displayed_owner {
                                     if app.reconnect.offline && app.pending_startup_thread_start {
                                         reconnect = None;
                                     } else if !app.pending_startup_thread_start {
@@ -1524,14 +1637,18 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                         AppRunControl::Continue
                     }
-                    result = async { match reconnect.as_mut() { Some(future) => future.await, None => std::future::pending().await } }, if reconnect.is_some() && !has_pending_app_events => {
+                    (reconnect_owner, result) = async { match reconnect.as_mut() { Some((owner, future)) => (*owner, future.await), None => std::future::pending().await } }, if reconnect.is_some() && !has_pending_app_events => {
                         reconnect = None;
                         match result {
+                            Ok(connected) if reconnect_owner != displayed_owner => {
+                                let _ = connected.session.shutdown().await;
+                            }
+                            Err(_) if reconnect_owner != displayed_owner => {}
                             Ok(connected) => {
                                 if let Err(err) = app.finish_reconnect(tui, backends.session_at_mut(displayed_session), &mut app_event_rx, connected, CODEX_CLI_VERSION).await {
                                     break Err(err);
                                 }
-                                backends.resume_events(initial_owner);
+                                backends.resume_events(displayed_owner);
                                 waiting_for_initial_session_configured = app.pending_startup_thread_start;
                                 if app.pending_startup_thread_start {
                                     spawn_startup_thread_start(
@@ -1597,7 +1714,7 @@ See the Codex keymap documentation for supported actions and examples."
                             }
                             None => std::future::pending().await,
                         }
-                    }, if backends.is_listening(initial_owner) => {
+                    }, if backends.is_listening(displayed_owner) => {
                         app.refresh_rate_limits(backends.session_at(displayed_session), RateLimitRefreshOrigin::Periodic);
                         AppRunControl::Continue
                     }
@@ -1666,12 +1783,15 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
         };
+        // Let the pending terminal poll unwind while the app server shuts down.
+        tui.pause_events();
         app.chat_widget.mention_usage_mut().flush().await;
         if let Err(err) = backends.shutdown().await {
             tracing::warn!(error = %err, "failed to shut down embedded app server");
         }
         let clear_pet_result = tui.clear_ambient_pet_image();
-        let clear_result = tui.terminal.clear();
+        let clear_images = tui.terminal.clear_frame_images(&mut tui.retained_images);
+        let clear_result = clear_images.and(tui.terminal.clear());
         if let Some(task) = app.daemon_restart.take()
             && let Err(err) = task.await.unwrap_or_else(|err| Err(err.into()))
         {

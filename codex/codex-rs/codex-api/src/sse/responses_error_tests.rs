@@ -16,48 +16,160 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::time::Duration;
 
-/// Flex failures remain terminal even with retry headers and a later completed event.
-#[tokio::test(start_paused = true)]
-async fn flex_failure_with_retry_header_ends_stream_immediately() {
-    let error = json!({
-        "code": "flex_unavailable",
-        "plan_type": 42,
-        "headers": {"retry-after": "300"}
-    });
-    for failure in [
-        json!({"type": "error", "error": error}),
-        json!({"type": "response.failed", "response": {"error": error}}),
+#[test]
+fn audio_validation_codes_map_to_non_retryable_audio_input_errors_on_all_transports() {
+    for code in [
+        "audio_too_large",
+        "audio_too_short",
+        "invalid_audio",
+        "invalid_audio_data",
+        "invalid_audio_format",
+        "missing_audio_sample_rate",
     ] {
-        let completed = json!({"type": "response.completed", "response": {"id": "later"}});
-        let bytes = stream::iter([Ok(Bytes::from(format!(
-            "data: {failure}\n\ndata: {completed}\n\n"
-        )))])
-        .chain(stream::pending());
-        let mut stream = spawn_response_stream(
-            StreamResponse {
-                status: StatusCode::OK,
-                headers: HeaderMap::new(),
-                bytes: Box::pin(bytes),
+        let detail = json!({"code": code, "message": "Invalid recording."});
+        let http_error = map_api_error(crate::error::ApiError::Transport(
+            crate::TransportError::Http {
+                status: StatusCode::BAD_REQUEST,
+                url: None,
+                headers: None,
+                body: Some(json!({"error": detail}).to_string()),
+                retry_after: None,
             },
-            Duration::from_secs(60),
-            /*telemetry*/ None,
-            /*turn_state*/ None,
-        );
-        let error = loop {
-            match stream.next().await {
-                Some(Ok(ResponseEvent::RateLimits(_))) => {}
-                Some(Err(error)) => break map_api_error(error),
-                event => panic!("expected a Flex error, got {event:?}"),
-            }
-        };
-        assert_eq!(
-            (
-                error.to_codex_protocol_error(),
-                error.retry_delay(/*retry_count*/ 1)
-            ),
-            (CodexErrorInfo::FlexUnavailable, None)
-        );
-        assert!(stream.next().await.is_none());
+        ));
+        let mut errors = vec![http_error];
+        for failure in [
+            json!({"type": "error", "error": detail}),
+            json!({"type": "response.failed", "response": {"error": detail}}),
+        ] {
+            let event = serde_json::from_value(failure).unwrap();
+            errors.push(map_api_error(
+                process_responses_event(event).unwrap_err().into_api_error(),
+            ));
+        }
+        for error in errors {
+            assert_eq!(error.retry_delay(/*retry_count*/ 1), None);
+            assert!(matches!(
+                error.details(),
+                codex_protocol::error::CodexErrorDetails::InvalidAudioInput { .. }
+            ));
+            assert_eq!(error.to_string(), "Invalid recording.");
+        }
+    }
+}
+
+/// Only the explicit policy capacity code changes overload attribution.
+#[tokio::test(start_paused = true)]
+async fn policy_capacity_classification_preserves_overload_retry_behavior() {
+    for (code, error_type, expected) in [
+        (
+            "policy_capacity_unavailable",
+            None,
+            CodexErrorInfo::PolicyCapacityUnavailable,
+        ),
+        (
+            "server_is_overloaded",
+            Some("policy_error"),
+            CodexErrorInfo::ServerOverloaded,
+        ),
+        (
+            "server_is_overloaded",
+            None,
+            CodexErrorInfo::ServerOverloaded,
+        ),
+    ] {
+        for retry_after in [Some("3"), None] {
+            let event = serde_json::from_value(json!({
+                "type": "response.failed",
+                "response": {"error": {
+                    "type": error_type,
+                    "code": code,
+                    "headers": {"Retry-After": retry_after},
+                }},
+            }))
+            .unwrap();
+            let error = map_api_error(process_responses_event(event).unwrap_err().into_api_error());
+            assert_eq!(
+                (
+                    error.to_codex_protocol_error(),
+                    error.retry_delay(/*retry_count*/ 1),
+                    error.to_string()
+                ),
+                (
+                    expected.clone(),
+                    retry_after.map(|_| Duration::from_secs(3)),
+                    if expected == CodexErrorInfo::PolicyCapacityUnavailable {
+                        "Policy-restricted capacity is unavailable. Please try again later."
+                    } else {
+                        "Selected model is at capacity. Please try a different model."
+                    }
+                    .to_string()
+                )
+            );
+        }
+    }
+}
+
+/// Terminal provider failures ignore retry headers and stop before a later completed event.
+#[tokio::test(start_paused = true)]
+async fn terminal_failure_with_retry_header_ends_stream_immediately() {
+    for (code, expected) in [
+        ("flex_unavailable", CodexErrorInfo::FlexUnavailable),
+        ("budget_reached", CodexErrorInfo::SessionBudgetExceeded),
+        ("inference_hook_denied", CodexErrorInfo::InferenceHookDenied),
+        (
+            "context_length_exceeded",
+            CodexErrorInfo::ContextWindowExceeded,
+        ),
+        ("invalid_access_program", CodexErrorInfo::Other),
+        ("unsupported_access_program", CodexErrorInfo::Other),
+        ("content_policy_violation", CodexErrorInfo::InvalidPrompt),
+        (
+            "access_program_not_enabled",
+            CodexErrorInfo::HttpConnectionFailed {
+                http_status_code: None,
+            },
+        ),
+    ] {
+        let error = json!({
+            "code": code,
+            "plan_type": 42,
+            "headers": {"retry-after": "300"}
+        });
+        for failure in [
+            json!({"type": "error", "error": error}),
+            json!({"type": "response.failed", "response": {"error": error}}),
+        ] {
+            let completed = json!({"type": "response.completed", "response": {"id": "later"}});
+            let bytes = stream::iter([Ok(Bytes::from(format!(
+                "data: {failure}\n\ndata: {completed}\n\n"
+            )))])
+            .chain(stream::pending());
+            let mut stream = spawn_response_stream(
+                StreamResponse {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    bytes: Box::pin(bytes),
+                },
+                Duration::from_secs(60),
+                /*telemetry*/ None,
+                /*turn_state*/ None,
+            );
+            let error = loop {
+                match stream.next().await {
+                    Some(Ok(ResponseEvent::RateLimits(_))) => {}
+                    Some(Err(error)) => break map_api_error(error),
+                    event => panic!("expected a terminal error for {code}, got {event:?}"),
+                }
+            };
+            assert_eq!(
+                (
+                    error.to_codex_protocol_error(),
+                    error.retry_delay(/*retry_count*/ 1)
+                ),
+                (expected.clone(), None)
+            );
+            assert!(stream.next().await.is_none());
+        }
     }
 }
 
@@ -137,6 +249,7 @@ async fn streamed_retry_after_uses_http_header_validation() {
 async fn retry_header_survives_other_failed_responses() {
     for (code, expected_code) in [
         ("server_is_overloaded", CodexErrorInfo::ServerOverloaded),
+        ("safety_violation", CodexErrorInfo::Other),
         ("unknown_failure", CodexErrorInfo::Other),
     ] {
         let event = serde_json::from_value(json!({

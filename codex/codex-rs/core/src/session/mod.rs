@@ -1,8 +1,11 @@
 pub(crate) mod startup;
 
+use crate::McpRefreshReason;
 use crate::PromptCacheKey;
 use crate::WithTurnExtensionData;
-use std::borrow::Cow;
+use crate::runtime_auth::RuntimeAuthSlot;
+use codex_login::AuthOwner;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -12,6 +15,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use crate::RestrictRootCapabilities;
 use crate::agent::AgentStatus;
 use crate::agent::agent_status_from_event;
 use crate::agent::api::AgentConfigUpdate;
@@ -95,6 +99,7 @@ use codex_mcp::McpResourceClient;
 use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::McpRuntimeInput;
+use codex_models_manager::manager::ModelsManager;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_network_proxy::NetworkProxy;
@@ -138,6 +143,7 @@ use codex_protocol::models::ImageReference;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
+use codex_protocol::openai_models::CatalogModel;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
@@ -169,7 +175,6 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
-use codex_protocol::request_permissions::RequestPermissionsArgs;
 use codex_protocol::request_permissions::RequestPermissionsEvent;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputArgs;
@@ -203,6 +208,7 @@ use futures::prelude::*;
 use rmcp::model::RequestId;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio::sync::MutexGuard;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -235,7 +241,6 @@ use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
 use codex_config::types::McpServerConfig;
-use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
@@ -245,6 +250,10 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::exec_output::StreamOutput;
 
 pub(crate) mod async_compaction;
+pub(crate) mod file_audio;
+pub(crate) use file_audio::FileAudioDurations;
+
+mod approved_plan;
 mod code_mode_warning;
 mod config_refresh;
 pub(crate) mod context_window;
@@ -254,7 +263,7 @@ mod extension_interruption;
 pub(crate) mod extension_metrics;
 mod guardian_checkpoint;
 mod handlers;
-mod inject;
+pub(crate) mod inject;
 mod reasoning_effort;
 mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
@@ -264,6 +273,7 @@ mod mcp;
 mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
+mod model_catalog_settings;
 pub(crate) mod multi_agents;
 mod plugin_selection;
 mod realtime_history;
@@ -316,13 +326,13 @@ use crate::guardian::GuardianReviewSessionManager;
 use crate::mcp::McpEnvironmentScope;
 use crate::mcp::McpManager;
 use crate::mcp::McpThreadIdentity;
-use crate::network_policy_decision::execpolicy_network_rule_amendment;
 use crate::rollout::map_session_init_error;
 use crate::session::startup_prewarm::SessionStartupPrewarmHandle;
 use crate::shell;
 use crate::state::AcceptedUserInputResponse;
 use crate::state::AutoCompactWindowIds;
 use crate::state::AutoCompactWindowSnapshot;
+use crate::state::PendingApproval;
 use crate::state::PendingRequestPermissions;
 use crate::state::ReasoningEffortPin;
 use crate::state::SessionServices;
@@ -334,12 +344,12 @@ use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::handle_output_item_done;
 use crate::tasks::ReviewTask;
 use crate::tools::ApprovalContext;
+use crate::tools::handlers::PreparedPermissionRequest;
 use crate::tools::network_approval::NetworkApprovalService;
 use crate::tools::network_approval::build_blocked_request_observer;
 use crate::tools::network_approval::build_network_policy_decider;
 #[cfg(test)]
 use crate::tools::parallel::ToolCallRuntime;
-use crate::tools::sandboxing::ApprovalAction;
 use crate::tools::sandboxing::ApprovalStore;
 use crate::turn_timing::TurnTimingState;
 use crate::turn_timing::record_turn_ttfm_metric;
@@ -354,6 +364,7 @@ use codex_git_utils::get_git_repo_root;
 use codex_history::CodexHarnessMetadata;
 use codex_history::CompactedItem;
 use codex_history::CompactionResumeMetadata;
+use codex_history::DynamicToolsSnapshot;
 use codex_history::InitialHistory;
 pub(crate) use codex_history::PreviousTurnSettings;
 use codex_history::ResponseItemEnvelope;
@@ -362,6 +373,7 @@ use codex_mcp::effective_mcp_servers;
 use codex_otel::SessionTelemetry;
 use codex_otel::THREAD_STARTED_METRIC;
 use codex_otel::TelemetryAuthMode;
+use codex_protocol::ContextWindowId;
 use codex_protocol::ResponseItemId;
 use codex_protocol::approvals::ExecApprovalKind;
 use codex_protocol::config_types::CollaborationMode;
@@ -371,6 +383,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
 use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -417,8 +430,19 @@ use codex_utils_stream_parser::ProposedPlanSegment;
 /// Whether reported usage updates the installed context baseline or only spending.
 #[derive(Clone, Copy)]
 pub(crate) enum TokenUsageContext {
-    Sampling,
+    Sampling {
+        includes_reasoning: bool,
+        /// Input history length before the response, including requests with no output items.
+        input_item_count: usize,
+    },
     SpendingOnly,
+}
+
+/// Which active turn can service a network approval.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetworkApprovalTurn {
+    Originating,
+    AnyActive,
 }
 
 /// Queue and lifecycle endpoints for a running [`Session`].
@@ -457,11 +481,11 @@ pub(crate) enum ForkPersistence {
 }
 
 /// Normal appends keep this generation; compaction and rollback start a new one.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct CompactionPrefix {
     pub(crate) generation: u64,
     pub(crate) len: usize,
-    pub(crate) auth_owner_generation: Option<u64>,
+    pub(crate) auth_owner: Option<AuthOwner>,
 }
 
 pub(crate) enum CompactedHistoryInstallation<'a> {
@@ -470,6 +494,7 @@ pub(crate) enum CompactedHistoryInstallation<'a> {
         prefix: CompactionPrefix,
         prefix_context: Vec<ResponseItem>,
         initial_context: Vec<ResponseItemEnvelope>,
+        reset_world_state_sections: Vec<&'static str>,
         model_info: &'a ModelInfo,
         compaction_response_id: String,
         reviewer_compaction_hash: Option<String>,
@@ -493,6 +518,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) instructions: SessionInstructions,
     pub(crate) installation_id: String,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) runtime_auth: RuntimeAuthSlot,
     pub(crate) models_manager: SharedModelsManager,
     pub(crate) git_root_discovery: Arc<GitRootDiscovery>,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
@@ -563,7 +589,55 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
 
+pub(crate) fn assign_missing_item_id(
+    item: &mut ResponseItem,
+    item_id_generator: &codex_protocol::ItemIdGenerator,
+) {
+    if item.id().is_none_or(|id| id.is_empty())
+        && let Some(prefix) = item.id_prefix()
+    {
+        item.set_id(Some(item_id_generator(prefix)));
+    }
+}
+
 impl Session {
+    pub(crate) async fn resolve_startup_model(
+        models_manager: &dyn ModelsManager,
+        config: &Config,
+        session_source: &SessionSource,
+        allow_provider_model_fallback: bool,
+    ) -> CodexResult<(String, CatalogModel)> {
+        // Child catalogs are initialized by their selector. Reading only memory here
+        // preserves the loaded snapshot shared with the parent.
+        let refresh_strategy = if session_source.is_non_root_agent() {
+            RefreshStrategy::InMemory
+        } else {
+            RefreshStrategy::OnlineIfUncached
+        };
+        if !session_source.is_non_root_agent() {
+            let _ = models_manager
+                .list_models(refresh_strategy, config.http_client_factory())
+                .await;
+        }
+        let model = models_manager
+            .get_default_model(
+                &config.model,
+                allow_provider_model_fallback,
+                refresh_strategy,
+                config.http_client_factory(),
+            )
+            .await;
+        if model.trim().is_empty() {
+            return Err(CodexErr::InvalidRequest(
+                "No models are available. Set `model` explicitly or check your model catalog configuration.".to_string(),
+            ));
+        }
+        let model_info = models_manager
+            .get_model_info(model.as_str(), &config.to_models_manager_config())
+            .await;
+        Ok((model, model_info))
+    }
+
     /// Spawn and initialize a new session.
     /// Hide the concrete startup future from callers while keeping initialization lazy.
     #[inline(never)]
@@ -614,6 +688,7 @@ impl Session {
             instructions,
             installation_id,
             auth_manager,
+            runtime_auth,
             models_manager,
             git_root_discovery,
             environment_manager,
@@ -699,15 +774,22 @@ impl Session {
             instructions
         };
         let exec_policy = if isolation == codex_extension_api::SessionIsolation::Isolated {
-            let managed_policy = config
+            let source_requirements = config
                 .config_layer_stack
                 .requirements()
                 .exec_policy
                 .as_deref()
+                .cloned()
+                .map(Arc::new);
+            let managed_policy = source_requirements
+                .as_deref()
                 .map_or_else(codex_execpolicy::Policy::empty, |policy| {
                     policy.as_ref().clone()
                 });
-            Arc::new(ExecPolicyManager::new(Arc::new(managed_policy)))
+            Arc::new(ExecPolicyManager::from_snapshot(
+                Arc::new(managed_policy),
+                source_requirements,
+            ))
         } else if let Some(exec_policy) = &inherited_exec_policy {
             Arc::clone(exec_policy)
         } else {
@@ -735,34 +817,22 @@ impl Session {
         };
 
         let mut config = Arc::new(config);
-        let refresh_strategy = if session_source.is_non_root_agent() {
-            codex_models_manager::manager::RefreshStrategy::Offline
-        } else {
-            codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
-        };
-        if config.model.is_none()
-            || !matches!(
-                refresh_strategy,
-                codex_models_manager::manager::RefreshStrategy::Offline
-            )
-        {
-            let _ = models_manager
-                .list_models(refresh_strategy, config.http_client_factory())
-                .await;
-        }
-        let model = models_manager
-            .get_default_model(
-                &config.model,
-                allow_provider_model_fallback,
-                refresh_strategy,
-                config.http_client_factory(),
-            )
-            .await;
-        if model.trim().is_empty() {
-            return Err(CodexErr::InvalidRequest(
-                "No models are available. Set `model` explicitly or check your model catalog configuration.".to_string(),
-            ));
-        }
+        let configured_runtime = crate::runtime_auth::runtime_for_config(
+            &runtime_auth,
+            config.as_ref(),
+            Arc::clone(&auth_manager),
+            &installation_id,
+        );
+        let (model, model_info) = Self::resolve_startup_model(
+            models_manager.as_ref(),
+            &config,
+            &session_source,
+            allow_provider_model_fallback,
+        )
+        .await?;
+        let requested_approvals_reviewer = config
+            .requested_approvals_reviewer
+            .unwrap_or(config.approvals_reviewer);
         let trusted_guardian_reviewer = crate::guardian::is_basic_session_source(&session_source)
             && !matches!(conversation_history, InitialHistory::Resumed(_));
         if config
@@ -771,11 +841,14 @@ impl Session {
             .auto_review_required_for_model(&model)
             && !trusted_guardian_reviewer
         {
-            let config = Arc::make_mut(&mut config);
-            if matches!(
-                config.legacy_sandbox_policy(),
-                SandboxPolicy::DangerFullAccess
-            ) {
+            let permission_profile = config.permissions.effective_permission_profile();
+            if permission_profile.enforcement() != SandboxEnforcement::External
+                && permission_profile.network_sandbox_policy().is_enabled()
+                && permission_profile
+                    .file_system_sandbox_policy()
+                    .has_legacy_full_disk_write_access()
+            {
+                let config = Arc::make_mut(&mut config);
                 let permission_profile = PermissionProfile::workspace_write();
                 config
                     .permissions
@@ -789,13 +862,17 @@ impl Session {
                     );
                 }
             }
-            config
-                .config_layer_stack
-                .requirements()
-                .approvals_reviewer
-                .can_set(&ApprovalsReviewer::AutoReview)
-                .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
-            config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+        }
+        let reviewer = crate::config::resolve_guardian_reviewer(
+            requested_approvals_reviewer,
+            (!trusted_guardian_reviewer).then_some(model.as_str()),
+            config.config_layer_stack.requirements(),
+        )
+        .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
+        {
+            let config = Arc::make_mut(&mut config);
+            config.requested_approvals_reviewer = Some(requested_approvals_reviewer);
+            config.approvals_reviewer = reviewer;
         }
         if allow_provider_model_fallback
             && let Some(requested_model) = config.model.as_ref()
@@ -809,13 +886,6 @@ impl Session {
             );
         }
 
-        // Resolve base instructions for the session. Priority order:
-        // 1. config.base_instructions override
-        // 2. conversation history => session_meta.base_instructions
-        // 3. rendered instructions_template for current model
-        let model_info = models_manager
-            .get_model_info(model.as_str(), &config.to_models_manager_config())
-            .await;
         let auth = auth_manager.auth_cached();
         // Forked subagents keep their parent's activation with the copied history.
         // Fresh children restore configured preferences before applying startup defaults.
@@ -846,8 +916,10 @@ impl Session {
             .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
             .unwrap_or_else(|| render_model_instructions(&model_info));
 
-        // Dynamic tools are defined at thread start and persisted in rollout session metadata.
-        let dynamic_tools = if dynamic_tools.is_empty() {
+        // A fork records its initial catalog in the new thread's creation metadata.
+        let dynamic_tools = if dynamic_tools.is_empty()
+            && matches!(conversation_history, InitialHistory::Forked(_))
+        {
             conversation_history.get_dynamic_tools().unwrap_or_default()
         } else {
             dynamic_tools
@@ -919,12 +991,22 @@ impl Session {
             &model_info,
         );
         let storage_originator = AuthStorageOriginator::from_client_name(&originator);
+        let root_capabilities_restricted = session_source.is_non_root_agent()
+            || thread_extension_init
+                .get::<RestrictRootCapabilities>()
+                .is_some();
+        let enable_full_access_form_input = !root_capabilities_restricted
+            && matches!(thread_source.as_ref(), Some(ThreadSource::User))
+            && client_mcp_extensions.contains(OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID);
+        let provider_auth = codex_model_provider::ProviderAuthContext {
+            credentials: Arc::clone(&auth_manager),
+            runtime_auth: configured_runtime.map(|runtime| (runtime, config.runtime_auth_mode)),
+        };
+        // Replace any inherited context before startup hooks see this thread's effective auth.
+        thread_extension_init.insert(provider_auth.clone());
         let session_configuration = SessionConfiguration {
             turn_extension_init,
-            provider: create_model_provider(
-                config.model_provider.clone(),
-                Some(Arc::clone(&auth_manager)),
-            ),
+            provider: provider_auth.model_provider(config.model_provider.clone()),
             step_settings: Arc::new(StepSettings {
                 collaboration_mode,
                 reasoning_summary: config.model_reasoning_summary,
@@ -954,6 +1036,7 @@ impl Session {
             app_server_client_version: None,
             trusted_guardian_reviewer,
             session_source,
+            root_capabilities_restricted,
             history_mode,
             forked_from_thread_id,
             parent_thread_id,
@@ -981,6 +1064,7 @@ impl Session {
             instructions,
             installation_id,
             auth_manager.clone(),
+            runtime_auth,
             models_manager.clone(),
             git_root_discovery,
             model_info,
@@ -1054,6 +1138,10 @@ impl Session {
         if let Some(startup) = startup {
             let _ = startup.io.set(io.clone());
             startup.persistence.lock().await.commit();
+        }
+        // A required MCP server must not block startup waiting for form input.
+        if enable_full_access_form_input {
+            session.services.mcp_runtime.enable_full_access_form_input();
         }
         Ok((session, io))
     }
@@ -1567,7 +1655,7 @@ impl Session {
 
     pub(crate) async fn get_total_token_usage(&self) -> i64 {
         let state = self.state.lock().await;
-        state.get_total_token_usage(state.server_reasoning_included())
+        state.get_total_token_usage()
     }
 
     pub(crate) async fn auto_compact_window_snapshot(&self) -> AutoCompactWindowSnapshot {
@@ -1575,11 +1663,9 @@ impl Session {
         state.auto_compact_window_snapshot()
     }
 
-    pub(crate) async fn estimated_tokens_after_last_model_generated_item(&self) -> i64 {
+    pub(crate) async fn estimated_tokens_since_last_usage(&self) -> i64 {
         let state = self.state.lock().await;
-        state
-            .history
-            .estimated_tokens_after_last_model_generated_item()
+        state.history.estimated_tokens_since_last_usage()
     }
 
     pub(crate) async fn total_token_usage(&self) -> Option<TokenUsage> {
@@ -1763,7 +1849,11 @@ impl Session {
             }
             InitialHistory::Forked(mut rollout_items) => {
                 let turn_context = self.new_default_turn().await;
-                Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
+                for record in &mut rollout_items {
+                    if let RolloutItem::ResponseItem(envelope) = record {
+                        self.assign_missing_response_item_id(&mut envelope.item);
+                    }
+                }
                 self.apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
 
@@ -1861,6 +1951,7 @@ impl Session {
     ) -> Option<PreviousTurnSettings> {
         let rollout_reconstruction::RolloutReconstruction {
             mut history,
+            rejected_audio_file_ids,
             retained_context,
             guardian_history,
             last_started_turn_id,
@@ -1875,6 +1966,23 @@ impl Session {
         } = self
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
+        // An automatic turn can have a persisted routing override without establishing the
+        // user-turn context baseline. Recover its own latest context by surviving turn ID.
+        let restored_turn_routing = turn_attribution.as_ref().and_then(|turn| {
+            rollout_items
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    RolloutItem::TurnContext(context)
+                        if context.turn_id.as_deref() == Some(turn.turn_id.as_str()) =>
+                    {
+                        Some(context)
+                    }
+                    _ => None,
+                })
+                .and_then(|context| context.direct_only_tool_namespaces.clone())
+                .map(|namespaces| (turn.turn_id.clone(), namespaces))
+        });
         // Keep the recorded rollout unchanged. Prepare its reconstructed history before
         // installing it, so legacy media is processed once for this resume or fork and
         // will be processed again if the rollout is reconstructed in a future session.
@@ -1907,9 +2015,22 @@ impl Session {
             .zip(metadata)
             .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
             .collect();
-        let context = crate::guardian::GuardianReviewContext::from(turn_context);
-        let (_, reviewer) = crate::guardian::resolve_review_model(self, &context).await;
-        let reviewer_compaction_hash = reviewer.comp_hash.clone();
+        file_audio::resolve(self, file_audio::file_ids(&history).cloned().collect()).await;
+        // Ordinary replay needs no reviewer refresh. Only an opaque
+        // checkpoint can make reconstruction depend on reviewer compatibility.
+        let reviewer_compaction_hash = if codex_history::CompactionCheckpoint::latest(&history)
+            .is_some_and(codex_history::CompactionCheckpoint::is_usable)
+            && turn_context
+                .config
+                .features
+                .enabled(Feature::GuardianReuseParentCompaction)
+        {
+            let context = crate::guardian::GuardianReviewContext::from(turn_context);
+            let (_, reviewer) = crate::guardian::resolve_review_model(self, &context).await;
+            reviewer.comp_hash.clone()
+        } else {
+            None
+        };
         {
             let mut state = self.state.lock().await;
             state.replace_annotated_history(
@@ -1917,6 +2038,10 @@ impl Session {
                 reference_context_item,
                 HistoryReplacement::Reset,
             );
+            state.history.restored_through_sequence = state.history.input_sequence();
+            state
+                .history
+                .restore_rejected_audio_file_ids(rejected_audio_file_ids);
             state.history.restore_review_context(
                 Some(&retained_context),
                 guardian_history.as_ref(),
@@ -1924,15 +2049,18 @@ impl Session {
             );
             state.last_started_turn_id = last_started_turn_id;
             state.turn_attribution = turn_attribution;
-            if let Some(world_state) = world_state_baseline {
+            state.restored_turn_routing = restored_turn_routing;
+            if let Some(mut world_state) = world_state_baseline {
+                // Handles belong to this runtime; a saved checkpoint can also lag its fragment.
+                world_state.invalidate_section("command_sessions");
                 state.history.set_world_state_baseline(world_state);
             }
             let fallback_ids = state.auto_compact_window_ids();
-            let window_id = window_id.unwrap_or(fallback_ids.window_id);
+            let window_id = window_id.unwrap_or_else(|| fallback_ids.window_id.clone());
             state.restore_auto_compact_window(
                 window_number,
                 AutoCompactWindowIds {
-                    first_window_id: first_window_id.unwrap_or(window_id),
+                    first_window_id: first_window_id.unwrap_or_else(|| window_id.clone()),
                     previous_window_id,
                     window_id,
                 },
@@ -2025,6 +2153,8 @@ impl Session {
     ///
     /// The predicate must be fast and side-effect-free. It must not block, acquire
     /// other locks, or call back into `Session`.
+    ///
+    /// Returns any host receipt for the caller to await when it needs acknowledgment.
     async fn update_settings_if(
         &self,
         updates: SessionSettingsUpdate,
@@ -2041,14 +2171,18 @@ impl Session {
             credential_masking_warning,
         ) = {
             let mut state = self.state.lock().await;
-            let updated = match self.apply_session_settings(&state.session_configuration, &updates)
-            {
-                Ok(updated) => updated,
-                Err(err) => {
-                    warn!("rejected session settings update: {err}");
-                    return Err(err);
-                }
-            };
+            let mut updated =
+                match self.apply_session_settings(&state.session_configuration, &updates) {
+                    Ok(updated) => updated,
+                    Err(err) => {
+                        warn!("rejected session settings update: {err}");
+                        return Err(err);
+                    }
+                };
+
+            if let Some(catalog) = self.services.models_manager.refreshed_model_catalog() {
+                model_catalog_settings::normalize(&mut updated.step_settings, &catalog);
+            }
 
             if !should_commit(&state.session_configuration, &updated) {
                 return Ok(None);
@@ -2077,7 +2211,7 @@ impl Session {
                     != updated.step_settings.service_tier;
             let mcp_inputs_changed = self.mcp_inputs_differ(&state.session_configuration, &updated);
             if mcp_inputs_changed {
-                self.mark_mcp_runtime_dirty();
+                self.mark_mcp_runtime_dirty(McpRefreshReason::SessionMcpInputsChanged);
             }
             // Save new environment defaults for future turns. The running turn keeps its own.
             windows_sandbox_changed =
@@ -2091,8 +2225,19 @@ impl Session {
                     .update_configured_selections(&updated.environments);
             }
             state.session_configuration = updated;
-            if root_service_tier_changed {
-                self.services.agent_control.propagate_config_update(
+            let explicit_service_tier = updates.step_settings.service_tier.is_some();
+            let retry_failed_handoff = updates.host_acceptance_in_reply
+                && explicit_service_tier
+                && state
+                    .service_tier_acceptance
+                    .as_ref()
+                    .and_then(futures::future::Shared::peek)
+                    .is_some_and(Result::is_err);
+            if (root_service_tier_changed || retry_failed_handoff)
+                && !state.shared_service_tier_pending
+            {
+                state.service_tier_acceptance = crate::agent::host::propagate_config_update(
+                    self,
                     AgentConfigUpdate::ServiceTier(
                         state
                             .session_configuration
@@ -2102,6 +2247,11 @@ impl Session {
                     ),
                 );
             }
+            let host_acceptance = if root_service_tier_changed || explicit_service_tier {
+                state.service_tier_acceptance.clone()
+            } else {
+                None
+            };
             let new_config = notify_config_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));
             let commit = SessionSettingsCommit {
@@ -2109,6 +2259,7 @@ impl Session {
                 snapshot: state
                     .session_configuration
                     .thread_settings_snapshot(&state.session_configuration.environments),
+                host_acceptance,
             };
             (
                 commit,
@@ -2160,6 +2311,21 @@ impl Session {
             .await)
     }
 
+    pub(crate) async fn selected_model_info(&self) -> Arc<ModelInfo> {
+        let (settings, overrides) = {
+            let state = self.state.lock().await;
+            let config = &state.session_configuration;
+            (
+                Arc::clone(&config.step_settings),
+                config.model_info_overrides.clone(),
+            )
+        };
+        settings
+            .resolve_model_info(self.services.models_manager.as_ref(), &overrides)
+            .await
+            .model
+    }
+
     pub(crate) async fn thread_config_snapshot(&self) -> ThreadConfigSnapshot {
         self.resume_config_snapshot().await.0
     }
@@ -2197,6 +2363,25 @@ impl Session {
             .thread_settings_snapshot(&state.session_configuration.environments)
     }
 
+    /// Keep this guard through registration and publication to order the initial tier
+    /// with settings commits from the already-running submission loop.
+    pub(crate) async fn lock_pending_service_tier(
+        &self,
+    ) -> Option<(MutexGuard<'_, SessionState>, AgentConfigUpdate)> {
+        let state = self.state.lock().await;
+        if !state.shared_service_tier_pending {
+            return None;
+        }
+        let update = AgentConfigUpdate::ServiceTier(
+            state
+                .session_configuration
+                .step_settings
+                .service_tier
+                .clone(),
+        );
+        Some((state, update))
+    }
+
     pub(crate) async fn restorable_thread_settings(&self) -> CodexThreadSettingsOverrides {
         let state = self.state.lock().await;
         state
@@ -2208,7 +2393,6 @@ impl Session {
         &self,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
-        mcp_elicitations_auto_deny: bool,
     ) -> ConstraintResult<()> {
         self.update_settings(SessionSettingsUpdate {
             app_server_client_name,
@@ -2216,9 +2400,6 @@ impl Session {
             ..Default::default()
         })
         .await?;
-        self.services
-            .mcp_runtime
-            .set_elicitations_auto_deny(mcp_elicitations_auto_deny);
         Ok(())
     }
 
@@ -2290,6 +2471,18 @@ impl Session {
             configuration.windows_sandbox_level,
             environments,
             reasoning_effort_pin,
+        )
+    }
+
+    pub(crate) async fn thread_ready_config(
+        &self,
+    ) -> (Arc<Config>, HistoryInitialization, ThreadHistoryMode) {
+        let state = self.state.lock().await;
+        let config = &state.session_configuration;
+        (
+            Arc::clone(&config.original_config_do_not_use),
+            self.history_initialization,
+            config.history_mode,
         )
     }
 
@@ -2497,6 +2690,13 @@ impl Session {
     }
 
     pub(crate) async fn emit_turn_started(&self, turn_context: &TurnContext, task_kind: TaskKind) {
+        if turn_context
+            .extension_data
+            .get::<crate::tasks::HostTurnStarted>()
+            .is_some()
+        {
+            return;
+        }
         let event = TurnStartedEvent {
             turn_attribution: (task_kind == TaskKind::Regular).then(|| turn_context.attribution()),
             turn_id: turn_context.sub_id.clone(),
@@ -2511,20 +2711,41 @@ impl Session {
     }
 
     /// Persist the event to rollout and send it to clients.
-    pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
-        let legacy_source = msg.clone();
-        if let EventMsg::Error(error) = &legacy_source
+    pub(crate) async fn send_event(&self, turn_context: &TurnContext, mut msg: EventMsg) {
+        if let Some((item_id, started_at_ms)) = msg.command_approval_start() {
+            // The client can see the command before execution. Keep its first start
+            // for the canonical lifecycle events that will be saved in history.
+            turn_context
+                .turn_timing_state
+                .record_item_started(item_id.to_owned(), started_at_ms)
+                .await;
+        }
+        if let EventMsg::TurnComplete(completed) = &msg
+            && completed.error.is_some()
+        {
+            self.state
+                .lock()
+                .await
+                .history
+                .record_rejected_file_audio(completed);
+        }
+        if let EventMsg::Error(error) = &mut msg
             && error
                 .codex_error_info
                 .as_ref()
                 .is_some_and(CodexErrorInfo::affects_turn_status)
         {
-            turn_context
-                .terminal_error
-                .lock()
-                .await
-                .replace(error.clone());
+            let mut terminal_error = turn_context.terminal_error.lock().await;
+            if let Some(previous) = terminal_error.as_ref() {
+                for file_id in &previous.rejected_audio_file_ids {
+                    if !error.rejected_audio_file_ids.contains(file_id) {
+                        error.rejected_audio_file_ids.push(file_id.clone());
+                    }
+                }
+            }
+            terminal_error.replace(error.clone());
         }
+        let legacy_source = msg.clone();
         self.services
             .rollout_thread_trace
             .record_codex_turn_event(&turn_context.sub_id, &legacy_source);
@@ -2554,7 +2775,7 @@ impl Session {
                 .track_guardian_session_event(self.thread_id, &event);
         }
         self.send_event_raw(event).await;
-        self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
+        self.maybe_publish_terminal_agent_result(turn_context, &legacy_source)
             .await;
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
             .await;
@@ -2574,33 +2795,47 @@ impl Session {
         }
     }
 
-    /// Forwards terminal turn events from spawned MultiAgentV2 children to their direct parent.
-    async fn maybe_notify_parent_of_terminal_turn(
+    /// Classifies terminal results for native parent delivery and opted-in hosts.
+    async fn maybe_publish_terminal_agent_result(
         &self,
         turn_context: &TurnContext,
         msg: &EventMsg,
     ) {
-        if turn_context.multi_agent_version != MultiAgentVersion::V2 {
-            return;
-        }
-
         if !matches!(msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) {
             return;
         }
 
-        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            agent_path: Some(_),
-            ..
-        }) = &turn_context.session_source
-        else {
+        let notify_native_parent = turn_context.multi_agent_version == MultiAgentVersion::V2
+            && matches!(
+                &turn_context.session_source,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    agent_path: Some(_),
+                    ..
+                })
+            );
+        let reporter = self
+            .outcome_reporting
+            .as_ref()
+            .map(|reporting| &reporting.reporter);
+        if !notify_native_parent && reporter.is_none() {
             return;
-        };
+        }
 
+        let terminal_error_message = {
+            let mut terminal_error = turn_context.terminal_error.lock().await;
+            if notify_native_parent {
+                terminal_error.take().map(|error| error.message)
+            } else {
+                terminal_error.as_ref().map(|error| error.message.clone())
+            }
+        };
         let mut error_info = None;
-        let status = match turn_context.terminal_error.lock().await.take() {
-            Some(error) => {
-                let status = AgentStatus::Errored(error.message);
-                self.agent_status.send_replace(status.clone());
+        let status = match terminal_error_message {
+            Some(message) => {
+                let status = AgentStatus::Errored(message);
+                if notify_native_parent {
+                    self.agent_status.send_replace(status.clone());
+                }
                 status
             }
             None => {
@@ -2625,24 +2860,31 @@ impl Session {
             return;
         }
 
-        self.services
-            .agent_control
-            .turn_finished(
-                AgentTurnOutcome {
-                    thread_id: self.thread_id,
-                    turn_id: turn_context.sub_id.clone(),
-                    source: turn_context.session_source.clone(),
-                    parent_turn_id: turn_context.turn_metadata_state.parent_turn_id(),
-                    initiating_agent_path: turn_context
-                        .turn_metadata_state
-                        .initiating_agent_path()
-                        .cloned(),
-                    status,
-                    error_info,
-                },
-                &self.services.rollout_thread_trace,
-            )
-            .await;
+        let outcome = AgentTurnOutcome {
+            thread_id: self.thread_id,
+            turn_id: turn_context.sub_id.clone(),
+            source: turn_context.session_source.clone(),
+            parent_turn_id: turn_context.turn_metadata_state.parent_turn_id(),
+            initiating_agent_path: turn_context
+                .turn_metadata_state
+                .initiating_agent_path()
+                .cloned(),
+            status,
+            error_info,
+        };
+        let host_outcome = if notify_native_parent {
+            let host_outcome = reporter.is_some().then(|| outcome.clone());
+            self.services
+                .agent_control
+                .turn_finished(outcome, &self.services.rollout_thread_trace)
+                .await;
+            host_outcome
+        } else {
+            Some(outcome)
+        };
+        if let Some((reporter, outcome)) = reporter.zip(host_outcome) {
+            reporter.report(outcome).await;
+        }
     }
 
     async fn maybe_mirror_event_text_to_realtime(&self, msg: &EventMsg) {
@@ -2809,6 +3051,24 @@ impl Session {
     }
 
     pub(crate) async fn emit_turn_item_started(&self, turn_context: &TurnContext, item: &TurnItem) {
+        if matches!(
+            item,
+            TurnItem::WebSearch(_)
+                | TurnItem::Extension(codex_extension_items::ExtensionItem::WebSearch(_))
+        ) && let Some(usage) = turn_context
+            .extension_data
+            .get::<crate::model_search::SearchTurnUsage>()
+        {
+            // This turn selected Search MCP. Pin native only when a fallback call starts.
+            crate::model_search::SearchOwner::admit(
+                &self.services.thread_extension_data,
+                codex_protocol::openai_models::WebSearchProvider::Standalone,
+            );
+            usage.record(
+                turn_context,
+                codex_protocol::openai_models::WebSearchProvider::Standalone,
+            );
+        }
         let started_at_ms = turn_context
             .turn_timing_state
             .record_item_started(item.id(), now_unix_timestamp_ms())
@@ -2830,13 +3090,30 @@ impl Session {
         turn_context: &TurnContext,
         item: TurnItem,
     ) {
+        self.emit_turn_item_completed_with_metadata(
+            turn_context,
+            item,
+            /*content_token_count*/ None,
+            /*user_input_extension_data*/ None,
+        )
+        .await;
+    }
+
+    pub(crate) async fn emit_turn_item_completed_with_metadata(
+        &self,
+        turn_context: &TurnContext,
+        item: TurnItem,
+        content_token_count: Option<u64>,
+        user_input_extension_data: Option<&BTreeMap<String, Value>>,
+    ) {
         record_turn_ttfm_metric(turn_context, &item).await;
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor
-                .on_item_completed(
+                .on_item_completed_with_metadata(
                     &self.services.thread_extension_data,
                     turn_context.extension_data.as_ref(),
                     &item,
+                    user_input_extension_data,
                 )
                 .await;
         }
@@ -2861,6 +3138,7 @@ impl Session {
                 thread_id: self.thread_id,
                 turn_id: turn_context.sub_id.clone(),
                 item,
+                content_token_count,
                 started_at_ms: Some(started_at_ms),
                 completed_at_ms,
             }),
@@ -2930,49 +3208,19 @@ impl Session {
             .session_configuration
             .codex_home()
             .clone();
-        let execpolicy_amendment =
-            execpolicy_network_rule_amendment(amendment, network_approval_context, &host);
-        let mut on_policy_applied = Some(on_policy_applied);
-
-        if let Some(started_network_proxy) = self.services.network_proxy.load_full() {
-            let proxy = started_network_proxy.proxy();
-            match amendment.action {
-                NetworkPolicyRuleAction::Allow => proxy
-                    .add_allowed_domain(&host)
-                    .await
-                    .map_err(|err| anyhow::anyhow!("failed to update runtime allowlist: {err}"))?,
-                NetworkPolicyRuleAction::Deny => proxy
-                    .add_denied_domain(&host)
-                    .await
-                    .map_err(|err| anyhow::anyhow!("failed to update runtime denylist: {err}"))?,
-            }
-            // Active enforcement changed successfully. Notify the owner before
-            // the next fallible await so cancellation cannot contradict it.
-            if let Some(on_policy_applied) = on_policy_applied.take() {
-                on_policy_applied();
-            }
-        }
-
+        let started_proxy = self.services.network_proxy.load_full();
+        let proxy = started_proxy.as_deref().map(StartedNetworkProxy::proxy);
         self.services
             .exec_policy
-            .append_network_rule_and_update(
+            .apply_network_rule_and_persist(
                 &codex_home,
                 &host,
-                execpolicy_amendment.protocol,
-                execpolicy_amendment.decision,
-                Some(execpolicy_amendment.justification),
+                amendment,
+                network_approval_context,
+                proxy.as_ref(),
+                on_policy_applied,
             )
             .await
-            .map_err(|err| {
-                anyhow::anyhow!("failed to persist network policy amendment to execpolicy: {err}")
-            })?;
-
-        // Without a running proxy, persistence is the first effective policy change.
-        if let Some(on_policy_applied) = on_policy_applied {
-            on_policy_applied();
-        }
-
-        Ok(())
     }
 
     fn validated_network_policy_amendment_host(
@@ -3002,6 +3250,60 @@ impl Session {
             .await;
     }
 
+    fn user_wait_timing_owner(
+        &self,
+        turn_context: &TurnContext,
+        call_id: Option<&str>,
+    ) -> Option<Arc<codex_direct_tool_timing::ToolTimingGuard>> {
+        if !turn_context
+            .config
+            .features
+            .enabled(Feature::CriticalPathTiming)
+        {
+            return None;
+        }
+        // Retain the invocation identity before request preparation can suspend.
+        call_id.and_then(|call_id| {
+            turn_context
+                .turn_timing_state
+                .direct_tool_timings
+                .owner_for_turn(call_id, &turn_context.sub_id)
+        })
+    }
+
+    fn start_user_wait_timing(
+        &self,
+        turn_context: &TurnContext,
+        owner: Option<&codex_direct_tool_timing::ToolTimingGuard>,
+    ) -> Option<codex_direct_tool_timing::ToolBlockingTimingGuard> {
+        let timing = owner.and_then(codex_direct_tool_timing::ToolTimingGuard::start_user_wait);
+        if timing.is_none()
+            && turn_context
+                .config
+                .features
+                .enabled(Feature::CriticalPathTiming)
+        {
+            turn_context.turn_timing_state.invalidate_critical_path();
+        }
+        timing
+    }
+
+    /// Keep tool results paused and attribute a queued network prompt to its triggering call.
+    pub(crate) fn hold_queued_network_approval(
+        &self,
+        turn: &TurnContext,
+        call_id: Option<&str>,
+    ) -> (
+        crate::elicitation::ElicitationRegistration,
+        Option<codex_direct_tool_timing::ToolBlockingTimingGuard>,
+    ) {
+        let owner = self.user_wait_timing_owner(turn, call_id);
+        (
+            self.services.elicitations.register(),
+            self.start_user_wait_timing(turn, owner.as_deref()),
+        )
+    }
+
     /// Emit an exec approval request event and await the user's decision.
     ///
     /// The request is keyed by `call_id` + `approval_id` so matching responses
@@ -3023,31 +3325,60 @@ impl Session {
         kind: ExecApprovalKind,
         model_context: ModelInvocationContext,
         call_id: String,
+        timing_call_id: Option<&str>,
         approval_id: Option<String>,
         environment_id: Option<String>,
         command: Vec<String>,
         cwd: PathUri,
         reason: Option<String>,
-        network_approval_context: Option<NetworkApprovalContext>,
+        network_approval: Option<(NetworkApprovalContext, NetworkApprovalTurn)>,
         proposed_execpolicy_amendment: Option<ExecPolicyAmendment>,
         additional_permissions: Option<AdditionalPermissionProfile>,
         available_decisions: Option<Vec<ReviewDecision>>,
         plugin_attribution_override: Option<PluginCommandAttribution>,
     ) -> ReviewDecision {
+        let (network_approval_context, turn_binding) = network_approval.unzip();
+        let user_wait_owner = self.user_wait_timing_owner(turn_context, timing_call_id);
         let _elicitation = self.services.elicitations.register();
         //  command-level approvals use `call_id`.
         // `approval_id` identifies subcommand callbacks and stdin writes.
         let effective_approval_id = approval_id.clone().unwrap_or_else(|| call_id.clone());
         // Add the tx_approve callback to the map before sending the request.
         let (tx_approve, rx_approve) = oneshot::channel();
-        let prev_entry = {
+        let (prev_entry, _network_prompt) = {
             let mut active = self.active_turn.lock().await;
+            // The proxy reviews with the active turn's settings. A sandbox retry
+            // keeps its originating step's settings even after a background cell yields.
+            if let Some(binding) = turn_binding
+                && active
+                    .as_ref()
+                    .and_then(|turn| turn.task.as_ref())
+                    .is_none_or(|task| {
+                        binding == NetworkApprovalTurn::Originating
+                            && task.turn_context.sub_id != turn_context.sub_id
+                    })
+            {
+                return ReviewDecision::Abort;
+            }
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
+                    let prev = ts.insert_pending_approval(
+                        effective_approval_id.clone(),
+                        tx_approve,
+                        kind,
+                        turn_context.sub_id.clone(),
+                    );
+                    let prompt = network_approval_context.as_ref().map(|_| {
+                        ts.track_network_prompt(
+                            &self.tx_event,
+                            &turn_context.sub_id,
+                            &effective_approval_id,
+                        )
+                    });
+                    (prev, prompt)
                 }
-                None => None,
+                None => (None, None),
             }
         };
         if prev_entry.is_some() {
@@ -3104,6 +3435,7 @@ impl Session {
             available_decisions: Some(available_decisions),
             parsed_cmd,
         });
+        let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
         self.send_event(turn_context, event).await;
         rx_approve.await.unwrap_or(ReviewDecision::Abort)
     }
@@ -3120,6 +3452,7 @@ impl Session {
         reason: Option<String>,
         grant_root: Option<PathBuf>,
     ) -> ReviewDecision {
+        let user_wait_owner = self.user_wait_timing_owner(turn_context, Some(&call_id));
         let _elicitation = self.services.elicitations.register();
         // Add the tx_approve callback to the map before sending the request.
         let (tx_approve, rx_approve) = oneshot::channel();
@@ -3129,7 +3462,12 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(approval_id.clone(), tx_approve)
+                    ts.insert_pending_approval(
+                        approval_id.clone(),
+                        tx_approve,
+                        ExecApprovalKind::Command,
+                        turn_context.sub_id.clone(),
+                    )
                 }
                 None => None,
             }
@@ -3146,6 +3484,7 @@ impl Session {
             reason,
             grant_root,
         });
+        let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
         self.send_event(turn_context, event).await;
         rx_approve.await.unwrap_or(ReviewDecision::Abort)
     }
@@ -3158,18 +3497,16 @@ impl Session {
         self: &Arc<Self>,
         step_context: &Arc<StepContext>,
         call_id: String,
-        args: RequestPermissionsArgs,
-        environment_selection: TurnEnvironmentSelection,
+        request: PreparedPermissionRequest,
         cancellation_token: CancellationToken,
     ) -> Option<RequestPermissionsResponse> {
         let turn_context = &step_context.turn;
+        let user_wait_owner = self.user_wait_timing_owner(turn_context, Some(&call_id));
         let approval_policy = step_context.settings.approval_policy();
         let Some(environment) = step_context
             .environments
             .turn_environments()
-            .find(|candidate| {
-                candidate.selection.environment_id == environment_selection.environment_id
-            })
+            .find(|candidate| candidate.selection.environment_id == request.environment_id)
             .cloned()
         else {
             return Some(RequestPermissionsResponse {
@@ -3201,18 +3538,13 @@ impl Session {
             | AskForApproval::Granular(_) => {}
         }
 
-        let requested_permissions = args.permissions;
+        let action = request.approval_action(&call_id, &turn_context.sub_id);
+        let requested_permissions = request.permissions;
         let sandbox_context = environment.sandbox_context(/*additional_permissions*/ None);
         let context = sandbox_context.policy_context();
         {
-            let action = ApprovalAction::RequestPermissions {
-                id: call_id.clone(),
-                environment_id: environment_selection.environment_id.clone(),
-                turn_id: turn_context.sub_id.clone(),
-                reason: args.reason.clone(),
-                permissions: requested_permissions.clone(),
-            };
             let approval_context = ApprovalContext {
+                exec_requirement: None,
                 review_context: crate::guardian::GuardianReviewContext::from(step_context),
                 cancellation_token: Some(cancellation_token.clone()),
                 call_id: call_id.clone(),
@@ -3307,14 +3639,16 @@ impl Session {
             turn_id: turn_context.sub_id.clone(),
             environment_id: Some(environment.selection.environment_id.clone()),
             started_at_ms: now_unix_timestamp_ms(),
-            reason: args.reason,
+            reason: request.reason,
             permissions: requested_permissions,
             cwd: Some(cwd.clone().into()),
         });
+        let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
         self.send_event(turn_context.as_ref(), event).await;
         tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
+                drop(_user_wait);
                 let mut active = self.active_turn.lock().await;
                 if let Some(at) = active.as_mut() {
                     let mut ts = at.turn_state.lock().await;
@@ -3336,6 +3670,7 @@ impl Session {
         call_id: String,
         args: RequestUserInputArgs,
     ) -> Option<AcceptedUserInputResponse> {
+        let user_wait_owner = self.user_wait_timing_owner(turn_context, Some(&call_id));
         let _elicitation = self.services.elicitations.register();
         let sub_id = turn_context.sub_id.clone();
         let (tx_response, rx_response) = oneshot::channel();
@@ -3364,6 +3699,7 @@ impl Session {
         turn_context
             .turn_metadata_state
             .mark_user_input_requested_during_turn();
+        let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
         self.send_event(turn_context, event).await;
         rx_response.await.ok()
     }
@@ -3499,6 +3835,7 @@ impl Session {
                     environment_id,
                     response.permissions.clone().into(),
                 );
+                self.mark_mcp_runtime_dirty(McpRefreshReason::SessionPermissionsGranted);
             }
         }
     }
@@ -3550,24 +3887,32 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
+    async fn take_pending_approval(
+        &self,
+        approval_id: &str,
+        expected_turn_id: Option<&str>,
+    ) -> Option<(PendingApproval, Option<String>)> {
+        let active = self.active_turn.lock().await;
+        let turn = active.as_ref()?;
+        // A live Cancel interrupts the turn servicing the prompt, which can differ from its origin.
+        let turn_id = turn.task.as_ref().map(|task| &task.turn_context.sub_id);
+        let pending = turn
+            .turn_state
+            .lock()
+            .await
+            .remove_pending_approval(approval_id, expected_turn_id)?;
+        (!pending.sender.is_closed()).then(|| (pending, turn_id.cloned()))
+    }
+
     pub async fn notify_approval(&self, approval_id: &str, decision: ReviewDecision) {
-        let entry = {
-            let mut active = self.active_turn.lock().await;
-            match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    ts.remove_pending_approval(approval_id)
-                }
-                None => None,
-            }
-        };
-        match entry {
-            Some(tx_approve) => {
-                tx_approve.send(decision).ok();
-            }
-            None => {
-                warn!("No pending approval found for call_id: {approval_id}");
-            }
+        if let Some((pending, _)) = self
+            .take_pending_approval(approval_id, /*expected_turn_id*/ None)
+            .await
+        {
+            let decision = pending.validate(decision);
+            let _ = pending.sender.send(decision);
+        } else {
+            warn!("No pending approval found for call_id: {approval_id}");
         }
     }
 
@@ -3586,12 +3931,12 @@ impl Session {
     }
 
     /// Prepares media using the originating model and preserves existing item identity.
-    pub(crate) async fn prepare_conversation_items_for_history<'a>(
+    pub(crate) async fn prepare_conversation_items_for_history(
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
-        items: &'a [ResponseItem],
-    ) -> (Cow<'a, [ResponseItem]>, Vec<ImagePreparationMetadata>) {
+        items: &[ResponseItem],
+    ) -> (Vec<ResponseItem>, Vec<ImagePreparationMetadata>) {
         let mut items = items.to_vec();
         let image_preparation_mode =
             if unified_image_budget_enabled(&turn_context.config.features, model_info) {
@@ -3622,44 +3967,13 @@ impl Session {
         // Most response items get their passthrough turn ID at the durable history boundary.
         for item in &mut items {
             Self::stamp_response_item_for_history(item, &turn_context.sub_id);
+            self.assign_missing_response_item_id(item);
         }
-        let items = Cow::Owned(items);
-        (
-            Self::assign_missing_response_item_ids(items),
-            image_preparations,
-        )
+        (items, image_preparations)
     }
 
-    fn assign_missing_response_item_ids(items: Cow<'_, [ResponseItem]>) -> Cow<'_, [ResponseItem]> {
-        if items
-            .iter()
-            .all(|item| item.id().is_some_and(|id| !id.is_empty()))
-        {
-            return items;
-        }
-        let mut items = items;
-        for item in items.to_mut() {
-            Self::assign_missing_response_item_id(item);
-        }
-        items
-    }
-
-    pub(crate) fn assign_missing_response_item_id(item: &mut ResponseItem) {
-        if item.id().is_some_and(|id| !id.is_empty()) {
-            return;
-        }
-        let Some(prefix) = item.id_prefix() else {
-            return;
-        };
-        item.set_id(Some(ResponseItemId::new(prefix)));
-    }
-
-    fn assign_missing_rollout_response_item_ids(items: &mut [RolloutItem]) {
-        for item in items {
-            if let RolloutItem::ResponseItem(response_item) = item {
-                Self::assign_missing_response_item_id(&mut response_item.item);
-            }
-        }
+    pub(crate) fn assign_missing_response_item_id(&self, item: &mut ResponseItem) {
+        assign_missing_item_id(item, &self.item_id_generator);
     }
 
     pub(crate) fn response_item_from_user_input(&self, input: Vec<UserInput>) -> ResponseItem {
@@ -3719,11 +4033,7 @@ impl Session {
         let (items, image_preparations) = self
             .prepare_conversation_items_for_history(turn_context, model_info, items)
             .await;
-        let items = items
-            .into_owned()
-            .into_iter()
-            .map(ResponseItemEnvelope::new)
-            .collect();
+        let items = items.into_iter().map(ResponseItemEnvelope::new).collect();
         self.record_prepared_conversation_items(
             turn_context,
             model_info,
@@ -3744,6 +4054,10 @@ impl Session {
         // Preserve any existing tool-specific override.
         let policy: codex_utils_output_truncation::TruncationPolicy =
             model_info.truncation_policy.into();
+        crate::model_search::SearchOwner::checkpoint(
+            &self.services.thread_extension_data,
+            &mut items,
+        );
         for envelope in &mut items {
             if matches!(
                 envelope.item,
@@ -3825,6 +4139,9 @@ impl Session {
                 }
             }
             state
+                .pending_audio_duration_ids
+                .extend(file_audio::file_ids(&items).cloned());
+            state
                 .history
                 .record_annotated_items(&mut items, model_info.truncation_policy.into());
         }
@@ -3882,12 +4199,13 @@ impl Session {
         let world_state = self
             .build_world_state_for_step(step_context, /*new_window*/ false)
             .await?;
-        let (world_state_snapshot, fragments, world_state_item) = self
+        let (world_state_snapshot, mut fragments, world_state_item) = self
             .state
             .lock()
             .await
             .history
             .render_step_world_state(&world_state);
+        world_state.resolve_host_roster(&mut fragments).await;
         let items = crate::context_manager::updates::merge_world_state_updates(fragments);
         if !items.is_empty() {
             self.record_conversation_items(turn_context, &step_context.settings.model_info, &items)
@@ -3965,7 +4283,7 @@ impl Session {
 
     /// Prepares a candidate step without replacing the active turn's retained context.
     /// The caller must retain it explicitly if it is selected for execution.
-    async fn capture_speculative_step_context(
+    pub(crate) async fn capture_speculative_step_context(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
         cancellation_token: &CancellationToken,
@@ -3977,6 +4295,18 @@ impl Session {
             /*required_plugins*/ &HashSet::new(),
         )
         .await
+    }
+
+    fn inherits_root_service_tier(&self, session_source: &SessionSource) -> bool {
+        match &self.agent_runtime {
+            crate::agent::host::AgentRuntimeServices::Controller => matches!(
+                session_source,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+            ),
+            crate::agent::host::AgentRuntimeServices::Host(_) => {
+                crate::agent::host::host_child_uses_shared_service_tier(self)
+            }
+        }
     }
 
     #[expect(
@@ -4009,11 +4339,12 @@ impl Session {
                     .then(|| self.services.turn_environments.configured_snapshot_now()),
             )
         };
-        if matches!(
-            turn_context.session_source,
-            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-        ) {
-            let root_service_tier = self.services.agent_control.service_tier();
+        if self.inherits_root_service_tier(&turn_context.session_source) {
+            let root_service_tier = tokio::select! {
+                biased;
+                tier = crate::agent::host::service_tier(self, settings.selected().service_tier.clone()) => tier,
+                _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+            };
             if settings.selected().service_tier != root_service_tier {
                 let mut selected = settings.selected().clone();
                 selected.service_tier = root_service_tier;
@@ -4027,6 +4358,7 @@ impl Session {
                 settings = Arc::new(inherited_settings);
             }
         }
+        let dynamic_tools = self.dynamic_tools().await;
         let token_budget = token_budget::resolve_token_budget(
             turn_context.configured_token_budget.as_ref(),
             turn_context.use_model_token_budget_defaults,
@@ -4053,7 +4385,11 @@ impl Session {
             let ready_selected_capability_roots =
                 Self::ready_selected_capability_roots(&selected_capability_roots);
             let (executor_capability_discovery_v2, inventory_changed) = self
-                .executor_capability_discovery_for_step_v2(&turn_context.config, &environments)
+                .executor_capability_discovery_for_step_v2(
+                    &turn_context.config,
+                    &environments,
+                    /*skill_turn*/ None,
+                )
                 .await;
             let v2_snapshots = executor_capability_discovery_v2.as_ref();
             let (executor_capability_discovery, discovery_recovered) = if v2_snapshots.is_some() {
@@ -4063,14 +4399,58 @@ impl Session {
                     &turn_context.config,
                     &selected_capability_roots,
                     &environments,
+                    executor_capability_discovery_v2.as_deref(),
+                    /*skill_turn*/ None,
                 )
                 .await
             };
-            if inventory_changed || discovery_recovered {
-                self.mark_mcp_runtime_dirty();
+            if inventory_changed {
+                self.mark_mcp_runtime_dirty(McpRefreshReason::ExecutorCapabilityInventoryChanged);
+            }
+            if discovery_recovered {
+                self.mark_mcp_runtime_dirty(McpRefreshReason::ExecutorCapabilityDiscoveryRecovered);
             }
             let extension_data =
                 codex_extension_api::ExtensionData::new(turn_context.sub_id.clone());
+            extension_data.insert(extension_metrics::from_session_telemetry(
+                session_telemetry.clone(),
+            ));
+            extension_data.insert_arc(Arc::clone(&settings.model_info.model));
+            extension_data.insert_arc(
+                self.host_skills_for_step(&turn_context, &environments)
+                    .await,
+            );
+            // Only skill discovery may use a turn's temporary file access. Plugin servers and
+            // hooks use the session inventory above because they can outlive the step.
+            let turn_skill_discovery =
+                if let Some(grants) = turn_context.turn_skill_filesystem_grants(&environments) {
+                    if turn_context
+                        .config
+                        .features
+                        .enabled(Feature::SkillCatalogDeltas)
+                    {
+                        extension_data.insert(grants);
+                    }
+                    let (v2, _) = self
+                        .executor_capability_discovery_for_step_v2(
+                            &turn_context.config,
+                            &environments,
+                            Some(&turn_context),
+                        )
+                        .await;
+                    let (v1, _) = self
+                        .executor_capability_discovery_for_step(
+                            &turn_context.config,
+                            &selected_capability_roots,
+                            &environments,
+                            v2.as_deref(),
+                            Some(&turn_context),
+                        )
+                        .await;
+                    Some((v1, v2))
+                } else {
+                    None
+                };
             if let Some(messages) = settings
                 .model_info
                 .model_messages
@@ -4087,47 +4467,125 @@ impl Session {
             if let Some(messages) = model_messages.notes() {
                 extension_data.insert(messages.clone());
             }
+            let mut required_servers = required_servers.to_vec();
+            if settings.model_info.web_search_provider
+                == Some(codex_protocol::openai_models::WebSearchProvider::SearchMcp)
+                && turn_context.apps_enabled()
+                && !turn_context.config.requires_native_search()
+                && (turn_context.config.web_search_mode.value()
+                    != codex_protocol::config_types::WebSearchMode::Disabled
+                    || turn_context
+                        .config
+                        .features
+                        .enabled(codex_features::Feature::HostedSearchPolicy))
+            {
+                required_servers.push(codex_mcp::CODEX_APPS_MCP_SERVER_NAME.to_owned());
+            }
             let (mcp, prepared_recommendations) = tokio::join!(
                 // MCP refresh can be large; keep it off the sampling request's stack.
                 Box::pin(self.mcp_runtime_for_step(
                     turn_context.as_ref(),
                     &selected_capability_roots,
-                    required_servers,
+                    &required_servers,
                     required_plugins,
                 )),
                 turn::prepare_tool_recommendations(self.as_ref(), turn_context.as_ref()),
             );
+            let search = crate::model_search::resolve(
+                turn_context.as_ref(),
+                &settings,
+                &mcp,
+                &self.services,
+            )
+            .await;
+            extension_data.insert(match &search {
+                Some(crate::model_search::ModelSearch::Native { mode, .. }) => *mode,
+                _ => turn_context.config.web_search_mode.value(),
+            });
+            let mcp = if let Some(search) = search {
+                let binding = match &search {
+                    crate::model_search::ModelSearch::Hosted { binding, .. } => Arc::clone(binding),
+                    _ => mcp,
+                };
+                extension_data.insert(search);
+                binding
+            } else {
+                mcp
+            };
             extension_data.insert(selected_capability_roots);
-            // A step keeps the plugins from the environments it captured, even if shared MCP
-            // moves on to another environment. Its skill tools and the model use this same copy.
-            // Policy follows this step's MCP binding, which may have refreshed mid-turn.
-            let selected_plugins = self
-                .services
-                .mcp_manager
-                .selected_plugins_for_step(
+            let selected_environments = environments.all_selections();
+            let select_plugins = |discovery, discovery_v2| {
+                self.services.mcp_manager.selected_plugins_for_step(
                     codex_extension_api::McpServerContributionContext::for_step(
                         turn_context.config.as_ref(),
                         &self.services.mcp_thread_init,
                         &self.services.thread_extension_data,
                         &turn_context.originator,
                         &ready_selected_capability_roots,
-                        executor_capability_discovery.as_deref(),
-                        executor_capability_discovery_v2.as_deref(),
+                        discovery,
+                        discovery_v2,
                     )
                     .with_session_source(&turn_context.session_source)
-                    .with_selected_environments(&environments.all_selections()),
+                    .with_selected_environments(&selected_environments),
                     &mcp.config().plugins,
                     &turn_context.disabled_plugin_ids,
                 )
-                .await;
+            };
+            // Resolve skill ownership from the same inventory as skill discovery.
+            let (skill_discovery, skill_discovery_v2) = match &turn_skill_discovery {
+                Some((v1, v2)) => (v1.as_deref(), v2.as_deref()),
+                None => (
+                    executor_capability_discovery.as_deref(),
+                    executor_capability_discovery_v2.as_deref(),
+                ),
+            };
+            let selected_plugins = select_plugins(skill_discovery, skill_discovery_v2).await;
+            // V2 hooks match accepted installations from the session inventory. V1 hooks
+            // only need the explicit disabled IDs, already present in selected_plugins.
+            let session_plugins =
+                if turn_skill_discovery.is_some() && executor_capability_discovery_v2.is_some() {
+                    Some(
+                        select_plugins(
+                            executor_capability_discovery.as_deref(),
+                            executor_capability_discovery_v2.as_deref(),
+                        )
+                        .await,
+                    )
+                } else {
+                    None
+                };
+            let executor_hook_sources = crate::hook_runtime::prepare_executor_hook_sources(
+                &mcp,
+                session_plugins.as_ref().unwrap_or(&selected_plugins),
+                executor_capability_discovery.as_deref(),
+                executor_capability_discovery_v2.as_deref(),
+            );
+            let mut filesystem_access = HashMap::new();
+            for environment in environments.turn_environments() {
+                let environment_id = &environment.selection.environment_id;
+                let grants = turn_context.granted_permissions(environment_id);
+                filesystem_access.insert(environment_id, environment.fs_accessor(grants));
+            }
+            let accessed_roots = ready_selected_capability_roots
+                .iter()
+                .filter_map(|root| {
+                    let codex_protocol::capabilities::CapabilityRootLocation::Environment {
+                        environment_id,
+                        ..
+                    } = &root.location;
+                    Some(codex_extension_api::AccessedSelectedCapabilityRoot {
+                        root,
+                        fs: filesystem_access.get(environment_id)?,
+                    })
+                })
+                .collect::<Vec<_>>();
             for contributor in self.services.extensions.tool_contributors() {
                 contributor
                     .prepare_for_step(codex_extension_api::StepPreparationInput {
                         turn_id: &turn_context.sub_id,
-                        ready_selected_capability_roots: &ready_selected_capability_roots,
-                        executor_capability_discovery: executor_capability_discovery.as_deref(),
-                        executor_capability_discovery_v2: executor_capability_discovery_v2
-                            .as_deref(),
+                        ready_selected_capability_roots: &accessed_roots,
+                        executor_capability_discovery: skill_discovery,
+                        executor_capability_discovery_v2: skill_discovery_v2,
                         selected_plugins: &selected_plugins,
                         session_store: &self.services.session_extension_data,
                         thread_store: &self.services.thread_extension_data,
@@ -4137,12 +4595,6 @@ impl Session {
                     .or_cancel(cancellation_token)
                     .await?;
             }
-            let executor_hook_sources = crate::hook_runtime::prepare_executor_hook_sources(
-                &mcp,
-                &selected_plugins,
-                executor_capability_discovery.as_deref(),
-                executor_capability_discovery_v2.as_deref(),
-            );
             extension_data.insert(selected_plugins);
             let tool_router = turn::built_tools(
                 self.as_ref(),
@@ -4152,6 +4604,7 @@ impl Session {
                 &mcp,
                 &extension_data,
                 prepared_recommendations,
+                &dynamic_tools,
             )
             .await?;
             Ok::<_, CodexErr>((executor_hook_sources, mcp, tool_router, extension_data))
@@ -4165,6 +4618,8 @@ impl Session {
         }
         let (executor_hook_sources, mcp, tool_router, extension_data) = prepared_tools??;
         Ok(Arc::new(StepContext {
+            sampled_through_sequence: None,
+            serving_assessment: None,
             preempt: turn_context
                 .config
                 .features
@@ -4175,7 +4630,7 @@ impl Session {
             token_budget,
             session_telemetry,
             turn: turn_context,
-            extension_data,
+            extension_data: Arc::new(extension_data),
             environments,
             inherited_environments,
             executor_hook_sources,
@@ -4224,7 +4679,6 @@ impl Session {
                 std::slice::from_ref(&response_item),
             )
             .await;
-        let items = items.as_ref();
         let mut response_item = ResponseItemEnvelope::new(items[0].clone());
         // A send confirmed after the pending snapshot must not reach the rollout
         // before this boundary; older readers assign deliveries by physical order.
@@ -4252,7 +4706,7 @@ impl Session {
         }
         {
             let mut state = self.state.lock().await;
-            state.current_time_reminder.note_recorded_items(items);
+            state.current_time_reminder.note_recorded_items(&items);
             state.history.record_annotated_items(
                 std::slice::from_mut(&mut response_item),
                 model_info.truncation_policy.into(),
@@ -4269,7 +4723,7 @@ impl Session {
         ])
         .await;
         drop(boundary);
-        self.send_raw_response_items(turn_context, items).await;
+        self.send_raw_response_items(turn_context, &items).await;
     }
 
     async fn maybe_warn_on_server_model_mismatch(
@@ -4348,6 +4802,7 @@ impl Session {
         mut items: Vec<ResponseItemEnvelope>,
         reference_context_item: TurnContextItem,
         mut world_state_baseline: WorldStateSnapshot,
+        rejected_audio_file_ids: std::collections::BTreeSet<String>,
         installation: impl Into<CompactedHistoryInstallation<'a>>,
     ) -> bool {
         let installation = installation.into();
@@ -4355,6 +4810,10 @@ impl Session {
             CompactedHistoryInstallation::Complete(metadata) => &metadata.compaction_model_hash,
             CompactedHistoryInstallation::Prefix { model_info, .. } => &model_info.comp_hash,
         };
+        crate::model_search::SearchOwner::checkpoint(
+            &self.services.thread_extension_data,
+            &mut items,
+        );
         let mcp_revision = self
             .services
             .executed_tool_calls
@@ -4389,6 +4848,7 @@ impl Session {
                     prefix,
                     prefix_context,
                     initial_context,
+                    reset_world_state_sections,
                     model_info,
                     compaction_response_id,
                     reviewer_compaction_hash,
@@ -4398,8 +4858,7 @@ impl Session {
                     // Validate immediately before slicing and replacing the captured prefix.
                     if state.history.history_version() != prefix.generation
                         || state.history.annotated_items().len() < prefix.len
-                        || self.services.model_client.auth_owner_generation()
-                            != prefix.auth_owner_generation
+                        || self.services.model_client.auth_owner() != prefix.auth_owner
                     {
                         return false;
                     }
@@ -4425,6 +4884,11 @@ impl Session {
                     if let Some(checkpoint) = state.history.world_state_checkpoint() {
                         world_state_baseline = WorldStateSnapshot::from(&checkpoint.state);
                     }
+                    // Volatile sections must refresh in the new window even if their
+                    // previous messages and comparison state survived in the suffix.
+                    for section_id in reset_world_state_sections {
+                        world_state_baseline.remove_section(section_id);
+                    }
                     // Prefix replacement already retains all edits in the live suffix.
                     let input_goal_ids = Default::default();
                     let (window_number, window_ids) = state.advance_auto_compact_window();
@@ -4443,7 +4907,7 @@ impl Session {
                 }
             };
             for envelope in &mut items {
-                Self::assign_missing_response_item_id(&mut envelope.item);
+                self.assign_missing_response_item_id(&mut envelope.item);
             }
             // Goal edits are published outside the running task. Keep edits accepted after
             // the compaction input snapshot, in their original order, after its replacement.
@@ -4466,7 +4930,11 @@ impl Session {
                         .cloned(),
                 );
             }
+            state.history.checkpoint_sampling(&mut items);
             let replacement_history = items.clone();
+            state
+                .history
+                .extend_rejected_audio_file_ids(rejected_audio_file_ids);
             state.replace_annotated_history(
                 items,
                 Some(reference_context_item.clone()),
@@ -4485,15 +4953,17 @@ impl Session {
                 retained_context: Some(state.history.retained_context().clone()),
                 mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
                 window_number: Some(metadata.window_number),
-                first_window_id: Some(metadata.window_ids.first_window_id.to_string()),
-                previous_window_id: metadata
-                    .window_ids
-                    .previous_window_id
-                    .map(|id| id.to_string()),
-                window_id: Some(metadata.window_ids.window_id.to_string()),
+                first_window_id: Some(metadata.window_ids.first_window_id),
+                previous_window_id: metadata.window_ids.previous_window_id,
+                window_id: Some(metadata.window_ids.window_id),
                 compaction_response_id: metadata.compaction_response_id,
                 latest_token_usage_record: state.latest_token_usage_record.clone(),
                 resume_metadata: Some(CompactionResumeMetadata {
+                    rejected_audio_file_ids: state.history.rejected_audio_file_ids(),
+                    dynamic_tools: Some(Box::new(DynamicToolsSnapshot {
+                        thread_id: self.thread_id(),
+                        tools: state.persisted_dynamic_tools.to_vec(),
+                    })),
                     multi_agent_version: self.multi_agent_version(),
                     last_started_turn_id: state.last_started_turn_id.clone(),
                     turn_attribution: state.turn_attribution.clone(),
@@ -4629,6 +5099,15 @@ impl Session {
         step_context: &StepContext,
         world_state: &WorldState,
     ) -> (Vec<WorldStateUpdate>, WorldStateSnapshot) {
+        let rendered = world_state.render_full_with_host_roster().await;
+        self.assemble_initial_context(step_context, rendered).await
+    }
+
+    pub(crate) async fn assemble_initial_context(
+        &self,
+        step_context: &StepContext,
+        (snapshot, updates): (WorldStateSnapshot, Vec<WorldStateUpdate>),
+    ) -> (Vec<WorldStateUpdate>, WorldStateSnapshot) {
         let turn_context = step_context.turn.as_ref();
         let mut developer_sections = Vec::<RenderedFragment>::with_capacity(8);
         let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
@@ -4638,7 +5117,7 @@ impl Session {
             let state = self.state.lock().await;
             (
                 state.session_configuration.session_source.clone(),
-                state.auto_compact_window_ids(),
+                state.auto_compact_window_ids().clone(),
             )
         };
         let separate_guardian_developer_message =
@@ -4775,7 +5254,6 @@ impl Session {
                 .render_with_hints(context_window_hints),
             );
         }
-        let (snapshot, updates) = world_state.render_full();
         let (mut prefix, context) = split_prefix_updates(updates);
         let mut items = Vec::with_capacity(4);
         let mut context = context.into_iter();
@@ -4786,9 +5264,9 @@ impl Session {
             let mut initial_multi_agent_mode = None;
             let mut managed_developer_instructions = None;
             for update in context.by_ref() {
-                let fragment = match update.content {
-                    WorldStateUpdateContent::Fragment(fragment) => fragment,
-                    WorldStateUpdateContent::Item(item) => {
+                let fragment = match update.content.into_fragment() {
+                    Ok(fragment) => fragment,
+                    Err(item) => {
                         next_item = Some(*item);
                         break;
                     }
@@ -4829,7 +5307,13 @@ impl Session {
             if next_item.is_none()
                 && let Some(recommended_plugins) = recommended_plugin_candidates
                     .as_deref()
-                    .and_then(RecommendedPluginsInstructions::from_plugins)
+                    .and_then(|plugins| {
+                        RecommendedPluginsInstructions::from_plugins(
+                            plugins,
+                            &ResolvedModelMessages::from_model(&step_context.settings.model_info)
+                                .plugin_recommendations(),
+                        )
+                    })
             {
                 developer_sections.push(recommended_plugins.render_fragment());
             }
@@ -4934,15 +5418,18 @@ impl Session {
         self.current_window().await.0
     }
 
-    pub(crate) async fn current_window(&self) -> (String, u64, Uuid) {
+    pub(crate) async fn current_window(&self) -> (String, u64, ContextWindowId) {
         let state = self.state.lock().await;
         self.current_window_from_state(&state)
     }
 
-    pub(crate) fn current_window_from_state(&self, state: &SessionState) -> (String, u64, Uuid) {
+    pub(crate) fn current_window_from_state(
+        &self,
+        state: &SessionState,
+    ) -> (String, u64, ContextWindowId) {
         let thread_id = self.thread_id;
         let window_number = state.auto_compact_window_number();
-        let context_window_id = state.auto_compact_window_ids().window_id;
+        let context_window_id = state.auto_compact_window_ids().window_id.clone();
         (
             format!("{thread_id}:{window_number}"),
             window_number,
@@ -4989,15 +5476,13 @@ impl Session {
                     .cloned()
                     .collect(),
                 crate::compact_remote_v2::RETAINED_MESSAGE_TOKEN_BUDGET,
+                &history.file_audio_durations,
             );
-        let window = {
-            let mut state = self.state.lock().await;
-            state.start_new_context_window()
-        };
-        let (window_number, window_ids) = window;
-        let (context_updates, world_state_snapshot) = self
-            .build_initial_context_with_world_state(step_context, world_state.as_ref())
-            .await;
+        // Resolve the roster before allocating a new context window.
+        let rendered = world_state.render_full_with_host_roster().await;
+        let (window_number, window_ids) = self.state.lock().await.start_new_context_window();
+        let (context_updates, world_state_snapshot) =
+            self.assemble_initial_context(step_context, rendered).await;
         let context_items =
             crate::context_manager::updates::merge_world_state_updates(context_updates)
                 .into_iter()
@@ -5009,6 +5494,7 @@ impl Session {
             context_items,
             turn_context_item,
             world_state_snapshot,
+            /*rejected_audio_file_ids*/ Default::default(),
             CompactedHistoryMetadata {
                 input_goal_ids,
                 message: String::new(),
@@ -5074,15 +5560,20 @@ impl Session {
                 Some(WorldStateItem::full(snapshot.into_object())),
             )
         } else {
-            let (world_state_items, world_state_item) = {
-                let mut state = self.state.lock().await;
-                let (fragments, rollout_item) = state.history.update_world_state(&world_state);
-                (
-                    crate::context_manager::updates::merge_world_state_updates(fragments),
-                    rollout_item,
-                )
-            };
-            (world_state_items, world_state_item)
+            let (snapshot, mut fragments, world_state_item) = self
+                .state
+                .lock()
+                .await
+                .history
+                .render_step_world_state(&world_state);
+            world_state.resolve_host_roster(&mut fragments).await;
+            let items = crate::context_manager::updates::merge_world_state_updates(fragments);
+            self.state
+                .lock()
+                .await
+                .history
+                .set_world_state_baseline(snapshot);
+            (items, world_state_item)
         };
         if !should_inject_full_context && turn_context_changed {
             context_items.extend(
@@ -5167,13 +5658,17 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
+        includes_reasoning: bool,
     ) -> CodexResult<()> {
         let result = self
             .record_token_usage_info(
                 turn_context,
                 &turn_context.initial_settings,
                 token_usage,
-                TokenUsageContext::Sampling,
+                TokenUsageContext::Sampling {
+                    includes_reasoning,
+                    input_item_count: 0,
+                },
             )
             .await;
         self.send_token_count_event(turn_context).await;
@@ -5253,10 +5748,15 @@ impl Session {
             let token_info = {
                 let mut state = self.state.lock().await;
                 match context {
-                    TokenUsageContext::Sampling => {
+                    TokenUsageContext::Sampling {
+                        includes_reasoning,
+                        input_item_count,
+                    } => {
                         state.update_token_info_from_usage(
                             token_usage,
                             turn_context.model_context_window(),
+                            includes_reasoning,
+                            input_item_count,
                         );
                         // A router-managed tool loop has cumulative usage but only its
                         // final model call describes the currently occupied context.
@@ -5279,6 +5779,7 @@ impl Session {
                     TokenUsageContext::SpendingOnly => {
                         let mut info = state.token_info().unwrap_or(TokenUsageInfo {
                             total_token_usage: TokenUsage::default(),
+                            last_usage_includes_reasoning: None,
                             last_token_usage: TokenUsage::default(),
                             model_context_window: turn_context.model_context_window(),
                         });
@@ -5287,6 +5788,7 @@ impl Session {
 
                         // Contributors receive the reported usage; stored context stays unchanged.
                         info.last_token_usage = token_usage.clone();
+                        info.last_usage_includes_reasoning = None;
                         info.model_context_window = turn_context
                             .model_context_window()
                             .or(info.model_context_window);
@@ -5305,7 +5807,9 @@ impl Session {
                     token_usage,
                 );
             }
-            let budget_result = self.record_rollout_budget_usage(token_usage).await;
+            let budget_result = self
+                .record_rollout_budget_usage(&turn_context.sub_id, token_usage)
+                .await;
             if let Some(token_info) = token_info.as_ref() {
                 for contributor in self.services.extensions.token_usage_contributors() {
                     contributor
@@ -5335,6 +5839,7 @@ impl Session {
             let mut state = self.state.lock().await;
             let mut info = state.token_info().unwrap_or(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
+                last_usage_includes_reasoning: None,
                 last_token_usage: TokenUsage::default(),
                 model_context_window: None,
             });
@@ -5353,9 +5858,11 @@ impl Session {
                 info.model_context_window = Some(model_context_window);
             }
 
-            state.set_token_info(Some(info));
             // The local estimate already includes every retained reasoning item.
-            state.set_server_reasoning_included(/*included*/ true);
+            info.last_usage_includes_reasoning = Some(true);
+            state
+                .history
+                .set_token_info_with_boundary(Some(info), history.raw_items().len());
         }
         self.set_auto_compact_window_estimated_prefill_for_scope(
             turn_context,
@@ -5392,11 +5899,6 @@ impl Session {
     {
         let mut state = self.state.lock().await;
         state.record_mcp_dependency_prompted(names);
-    }
-
-    pub(crate) async fn set_server_reasoning_included(&self, included: bool) {
-        let mut state = self.state.lock().await;
-        state.set_server_reasoning_included(included);
     }
 
     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
@@ -5454,6 +5956,9 @@ impl Session {
             input.to_vec(),
             &mut user_image_content_indices,
         );
+        if let Some(uuid) = metadata.response_item_uuid {
+            response_item.set_id(Some(ResponseItemId::for_admitted_user_input(uuid)));
+        }
         if metadata.origin == codex_history::UserInputOrigin::Heartbeat
             && let ResponseItem::Message {
                 content,
@@ -5495,7 +6000,13 @@ impl Session {
         user_message_item.client_id = client_id;
         let turn_item = TurnItem::UserMessage(user_message_item);
         self.emit_turn_item_started(turn_context, &turn_item).await;
-        self.emit_turn_item_completed(turn_context, turn_item).await;
+        self.emit_turn_item_completed_with_metadata(
+            turn_context,
+            turn_item,
+            /*content_token_count*/ None,
+            Some(&metadata.extension_data),
+        )
+        .await;
         self.ensure_rollout_materialized(persist_context).await;
     }
 

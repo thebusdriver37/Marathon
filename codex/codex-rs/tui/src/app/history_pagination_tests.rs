@@ -5,6 +5,7 @@ use crate::app::test_support::make_test_app;
 use crate::history_cell::ComputerActivityCell;
 use crate::history_cell::FinalMessageSeparator;
 use crate::history_cell::ForkedThreadHistoryCell;
+use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::UserInput;
 use pretty_assertions::assert_eq;
@@ -15,11 +16,12 @@ fn turn(id: &str, status: TurnStatus, item_ids: &[&str]) -> Turn {
         root_turn_id: None,
         items: item_ids
             .iter()
-            .map(|id| ThreadItem::UserMessage {
+            .map(|id| ThreadItemPayload::UserMessage {
                 id: id.to_string(),
                 client_id: None,
                 content: Vec::new(),
             })
+            .map(ThreadItem::untimed)
             .collect(),
         items_view: TurnItemsView::Full,
         status,
@@ -53,7 +55,7 @@ fn overlapping_history_keeps_live_turn_state_and_newer_items() {
 
 fn user_cell(message: &str) -> Arc<dyn HistoryCell> {
     Arc::new(UserHistoryCell {
-        spoken: false,
+        presentation: Default::default(),
         message: message.to_string(),
         text_elements: Vec::new(),
         local_image_paths: Vec::new(),
@@ -116,6 +118,62 @@ fn repeated_prompt_matching_removes_only_the_hidden_occurrence() {
 }
 
 #[tokio::test]
+async fn resume_places_interruption_before_searches_split_across_pages() {
+    let (mut app, mut events, _) = crate::app::tests::make_test_app_with_channels().await;
+    let mut canceled = turn("canceled", TurnStatus::Interrupted, &[]);
+    canceled.items_view = TurnItemsView::NotLoaded;
+    let search = |query: &str| {
+        serde_json::from_value(serde_json::json!({
+            "type": "webSearch", "id": query, "query": query,
+        }))
+        .expect("valid search")
+    };
+    let mut audit = turn("audit", TurnStatus::Completed, &[]);
+    audit.items = vec![search("newer")];
+    app.chat_widget.replay_thread_turns(
+        vec![canceled.clone(), audit.clone()],
+        ReplayKind::ResumeInitialMessages,
+    );
+    let mut cells: Vec<Arc<dyn HistoryCell>> = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            cells.push(Arc::from(cell));
+        }
+    }
+
+    canceled.items.push(search("canceled"));
+    audit.items.insert(/*index*/ 0, search("older"));
+    let page = vec![
+        canceled.items[0].payload.clone(),
+        audit.items[0].payload.clone(),
+    ];
+    let cwd = app.config.cwd.clone();
+    let older = app.project_older_history_cells(
+        page,
+        &[canceled, audit],
+        &HashSet::new(),
+        ThreadId::new(),
+        &cwd,
+        RawReasoningVisibility::Hidden,
+    );
+    cells.splice(0..0, older);
+    let rows = cells
+        .iter()
+        .flat_map(|cell| cell.display_lines(/*width*/ 100))
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [
+            "• Searched the web for canceled",
+            "■ Conversation interrupted - use /feedback if something went wrong",
+            "• Searched the web for older",
+            "• Searched the web for newer",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn hidden_last_item_keeps_turn_groups_and_completion_boundaries() {
     let computer = |id: &str| {
         serde_json::from_value(serde_json::json!({
@@ -138,19 +196,19 @@ async fn hidden_last_item_keeps_turn_groups_and_completion_boundaries() {
         let expected_completions = usize::from(status == TurnStatus::Completed);
         let mut first = turn("first", status, &[]);
         first.items = vec![
-            ThreadItem::EnteredReviewMode {
+            ThreadItem::untimed(ThreadItemPayload::EnteredReviewMode {
                 id: "enter-review".to_string(),
                 review: "current changes".to_string(),
-            },
+            }),
             computer("older-call"),
-            ThreadItem::UserMessage {
+            ThreadItem::untimed(ThreadItemPayload::UserMessage {
                 id: "hidden".to_string(),
                 client_id: None,
                 content: vec![UserInput::Text {
                     text: "internal review prompt".to_string(),
                     text_elements: Vec::new(),
                 }],
-            },
+            }),
         ];
         first.completed_at = Some(1_700_000_000);
         first.duration_ms = Some(125_000);
@@ -161,7 +219,8 @@ async fn hidden_last_item_keeps_turn_groups_and_completion_boundaries() {
         assert_eq!(hidden, HashSet::from(["hidden"]));
         let items = turns
             .iter()
-            .flat_map(|turn| turn.items.clone())
+            .flat_map(Turn::item_payloads)
+            .cloned()
             .collect::<Vec<_>>();
 
         let cells = app.project_older_history_cells(
@@ -261,7 +320,7 @@ async fn browsing_waits_for_a_prompt_outside_the_initial_history_window() -> Res
         &["older prompt", "latest prompt"],
     );
     for item in &mut review_turn.items {
-        if let ThreadItem::UserMessage { id, content, .. } = item {
+        if let ThreadItemPayload::UserMessage { id, content, .. } = &mut item.payload {
             *content = vec![UserInput::Text {
                 text: id.clone(),
                 text_elements: Vec::new(),
@@ -270,17 +329,17 @@ async fn browsing_waits_for_a_prompt_outside_the_initial_history_window() -> Res
     }
     review_turn.items.insert(
         /*index*/ 0,
-        ThreadItem::EnteredReviewMode {
+        ThreadItem::untimed(ThreadItemPayload::EnteredReviewMode {
             id: "enter".to_string(),
             review: "review".to_string(),
-        },
+        }),
     );
     review_turn.items.insert(
         /*index*/ 2,
-        ThreadItem::ExitedReviewMode {
+        ThreadItem::untimed(ThreadItemPayload::ExitedReviewMode {
             id: "exit".to_string(),
             review: "review".to_string(),
-        },
+        }),
     );
     let turns = [review_turn];
     app.remove_hidden_review_cells(

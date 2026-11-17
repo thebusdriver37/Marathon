@@ -4,7 +4,7 @@ use super::connection_handling_websocket::DEFAULT_READ_TIMEOUT;
 use super::connection_handling_websocket::create_config_toml;
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
+use app_test_support::DEFAULT_APP_SERVER_TEST_ARGS;
 use app_test_support::create_final_assistant_message_sse_response;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -53,6 +53,7 @@ async fn managed_restart_resumes_loaded_threads_and_goal_without_client() -> Res
     let mut client = connect_daemon_client(
         &socket_path,
         InitializeCapabilities {
+            required_human_approval: false,
             experimental_api: true,
             extensions: Some(std::collections::HashMap::from([(
                 "io.modelcontextprotocol/ui".into(),
@@ -132,6 +133,7 @@ async fn managed_restart_resumes_loaded_threads_and_goal_without_client() -> Res
     let mut reconnected = connect_daemon_client(
         &socket_path,
         InitializeCapabilities {
+            required_human_approval: false,
             experimental_api: true,
             extensions: Some(std::collections::HashMap::from([(
                 "io.modelcontextprotocol/ui".into(),
@@ -812,7 +814,7 @@ pub(super) fn spawn_server(home: &Path, socket_path: &Path) -> Result<Child> {
     let binary = codex_utils_cargo_bin::cargo_bin("codex-app-server")?;
     Ok(Command::new(binary)
         .args(["--listen", &format!("unix://{}", socket_path.display())])
-        .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
+        .args(DEFAULT_APP_SERVER_TEST_ARGS)
         .env("CODEX_HOME", home)
         // Match TestAppServer's isolation from the host's managed configuration.
         .env(

@@ -41,7 +41,7 @@ use logical::logical_lines;
 use ratatui::text::Line;
 
 /// One cell's logical text and its width-dependent display rows.
-pub(super) struct TextLayout {
+pub(crate) struct TextLayout {
     pub(super) image: Option<std::sync::Arc<crate::transcript_image::TranscriptImage>>,
     logical: Vec<LogicalLine>,
     text: String,
@@ -53,9 +53,15 @@ pub(super) struct TextLayout {
     disclosure_control: Option<DisclosureControl>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum DisclosureAnchor {
+    Activity(usize),
+    Turn,
+}
+
 struct DisclosureControl {
+    anchor: DisclosureAnchor,
     label: String,
-    source_offset: usize,
     row: usize,
 }
 
@@ -127,17 +133,40 @@ impl TextLayout {
         ranges
     }
 
-    pub(super) fn new(lines: Vec<HyperlinkLine>, width: u16) -> Self {
+    pub(crate) fn new(lines: Vec<HyperlinkLine>, width: u16) -> Self {
         let logical = logical_lines(&lines);
         Self::from_logical(logical, width)
+    }
+
+    /// Freeze the exact painted rows of a plain-text viewport, including tab stops.
+    /// Trim the selectable source so word and keyboard selection stay inside the viewport.
+    pub(crate) fn visible_plaintext(mut self, start: usize, height: u16) -> Self {
+        if start == 0 && self.rows.len() <= usize::from(height) {
+            return self;
+        }
+        self.rows.truncate(start + usize::from(height));
+        self.rows.drain(..start.min(self.rows.len()));
+        let from = self.rows.first().map_or(0, |row| row.source.start);
+        let to = self.rows.last().map_or(from, |row| row.source.end);
+        self.text = self.text[from..to].to_owned();
+        let lines = self
+            .text
+            .split('\n')
+            .map(|line| line.to_owned().into())
+            .collect::<Vec<_>>();
+        self.logical = logical_lines(&lines);
+        for row in &mut self.rows {
+            row.source = row.source.start - from..row.source.end - from;
+            row.line_end = row.line_end.map(|end| end.min(to) - from);
+        }
+        self
     }
 
     /// Reflow the same displayed content revision, retaining styles, links and disclosure label.
     pub(super) fn rewrap(&self, width: u16) -> Self {
         let mut layout = Self::from_logical(self.logical.clone(), width);
         if let Some(control) = &self.disclosure_control {
-            layout =
-                layout.with_disclosure_control_at(control.label.clone(), control.source_offset);
+            layout = layout.with_control(control.label.clone(), control.anchor);
         }
         layout.image = self.image.clone();
         if self.leading_blank_hidden {
@@ -157,46 +186,63 @@ impl TextLayout {
     }
 
     /// Place a control after an activity, before any following auxiliary source text.
-    pub(super) fn with_disclosure_control_at(
-        mut self,
-        label: String,
-        source_offset: usize,
-    ) -> Self {
-        if self.text.is_empty() || label.is_empty() {
+    pub(super) fn with_disclosure_control_at(self, label: String, source_offset: usize) -> Self {
+        self.with_control(label, DisclosureAnchor::Activity(source_offset))
+    }
+
+    pub(super) fn with_turn_disclosure(self, label: String) -> Self {
+        self.with_control(label, DisclosureAnchor::Turn)
+    }
+
+    pub(super) fn is_turn_disclosure(&self) -> bool {
+        self.disclosure_control
+            .as_ref()
+            .is_some_and(|control| control.anchor == DisclosureAnchor::Turn)
+    }
+
+    fn with_control(mut self, label: String, anchor: DisclosureAnchor) -> Self {
+        if label.is_empty() {
             return self;
         }
         if let Some(control) = self.disclosure_control.take() {
             self.rows.remove(control.row);
+            if control.anchor == DisclosureAnchor::Turn {
+                self.rows.remove(control.row - 1);
+            }
         }
-        let source_offset = self
-            .text
-            .floor_char_boundary(source_offset.min(self.text.len()));
-        let control_row = self
+        let source_offset = match anchor {
+            DisclosureAnchor::Activity(offset) => {
+                self.text.floor_char_boundary(offset.min(self.text.len()))
+            }
+            DisclosureAnchor::Turn => self.text.len(),
+        };
+        let mut control_row = self
             .rows
             .iter()
             .rposition(|row| row.source.end <= source_offset)
             .map_or(/*default*/ 0, |row| row + 1);
-        let indent = usize::from(self.width / 4).min(/*other*/ 4);
+        let indent = match anchor {
+            DisclosureAnchor::Activity(_) => usize::from(self.width / 4).min(/*other*/ 4),
+            DisclosureAnchor::Turn => {
+                self.insert_presentation_row(
+                    control_row,
+                    source_offset,
+                    /*indent*/ 0,
+                    Line::default(),
+                );
+                control_row += 1;
+                0
+            }
+        };
         let line = truncate_line_to_width(
             Line::from(format!("{}{label}", " ".repeat(indent))).dim(),
             usize::from(self.width),
         );
-        self.rows.insert(
-            control_row,
-            TextRow {
-                line: HyperlinkLine::from(line),
-                source: source_offset..source_offset,
-                line_end: None,
-                content_width: self.width,
-                first_column: indent,
-                prefix_columns: indent,
-                tabs: tabs::TabStops::default(),
-            },
-        );
+        self.insert_presentation_row(control_row, source_offset, indent, line);
         self.disclosure = true;
         self.disclosure_control = Some(DisclosureControl {
+            anchor,
             label,
-            source_offset,
             row: control_row,
         });
         self
@@ -230,23 +276,38 @@ impl TextLayout {
     /// Reserve one presentation-only row before existing spacing and source text.
     pub(super) fn with_leading_spacer(mut self) -> Self {
         if !self.rows.is_empty() {
-            self.rows.insert(
+            self.insert_presentation_row(
                 /*index*/ 0,
-                TextRow {
-                    line: HyperlinkLine::from(""),
-                    source: 0..0,
-                    line_end: None,
-                    content_width: self.width,
-                    first_column: 0,
-                    prefix_columns: 0,
-                    tabs: tabs::TabStops::default(),
-                },
+                /*offset*/ 0,
+                /*indent*/ 0,
+                Line::default(),
             );
             if let Some(control) = &mut self.disclosure_control {
                 control.row += 1;
             }
         }
         self
+    }
+
+    fn insert_presentation_row(
+        &mut self,
+        index: usize,
+        offset: usize,
+        indent: usize,
+        line: Line<'static>,
+    ) {
+        self.rows.insert(
+            index,
+            TextRow {
+                line: HyperlinkLine::from(line),
+                source: offset..offset,
+                line_end: None,
+                content_width: self.width,
+                first_column: indent,
+                prefix_columns: indent,
+                tabs: tabs::TabStops::default(),
+            },
+        );
     }
 
     /// Source text between adjacent retained fragments; distinct logical lines have a hard break.
@@ -292,7 +353,7 @@ impl TextLayout {
         &self.text
     }
 
-    pub(super) fn row_count(&self) -> usize {
+    pub(crate) fn row_count(&self) -> usize {
         // Images occupy visual space, but have no searchable or selectable text rows.
         self.text_row_count()
             + self
@@ -315,6 +376,16 @@ impl TextLayout {
         })
     }
 
+    /// A control label is visible activity even when its selectable source is empty.
+    pub(super) fn activity_content(&self) -> (&str, Option<&str>) {
+        (
+            self.text(),
+            self.disclosure_control
+                .as_ref()
+                .map(|control| control.label.as_str()),
+        )
+    }
+
     pub(super) fn disclosure_row(&self) -> Option<usize> {
         self.disclosure_control.as_ref().map(|control| control.row)
     }
@@ -327,7 +398,7 @@ impl TextLayout {
     }
 
     /// Paint visible rows, including inherited styles on empty rows and trailing columns.
-    pub(super) fn render(&self, area: Rect, buf: &mut Buffer, start_row: usize) {
+    pub(crate) fn render(&self, area: Rect, buf: &mut Buffer, start_row: usize) {
         for (screen_row, row) in self.visible_rows(area, start_row) {
             let mut row_area =
                 Rect::new(area.x, area.y + screen_row, area.width, /*height*/ 1);

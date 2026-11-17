@@ -10,6 +10,7 @@ use crate::app_event::AppEvent;
 use crate::app_event::RecapTrigger;
 use crate::app_event_sender::AppEventSender;
 use crate::app_server_session::AppServerSession;
+use crate::app_server_session::ThreadSettingsOwner;
 use crate::history_cell::ThreadRecapHistoryCell;
 use crate::history_cell::ThreadRecapLoadingCell;
 use crate::pager_overlay::Overlay;
@@ -39,6 +40,8 @@ const RECAP_RETRY_DELAY: Duration = Duration::from_secs(/*secs*/ 30);
 const MANUAL_RECAP_FAILURE_MESSAGE: &str = "Could not generate a recap. Please try again.";
 const MANUAL_RECAP_IN_PROGRESS_MESSAGE: &str = "A recap is already being generated.";
 const MANUAL_RECAP_EMPTY_HISTORY_MESSAGE: &str = "There is no conversation history to recap.";
+const CLOUD_RECAP_UNAVAILABLE_MESSAGE: &str =
+    "Conversation recaps are not available for cloud conversations.";
 #[cfg(test)]
 pub(super) const RECAP_PROMPT_MAX_BYTES: usize = RecapPrompt::MAX_BYTES;
 
@@ -184,6 +187,13 @@ impl App {
         thread_id: ThreadId,
         trigger: RecapTrigger,
     ) {
+        if app_server.thread_params_mode().settings_owner() == ThreadSettingsOwner::Server {
+            if matches!(trigger, RecapTrigger::Manual) {
+                self.chat_widget
+                    .add_error_message(CLOUD_RECAP_UNAVAILABLE_MESSAGE.to_string());
+            }
+            return;
+        }
         if !self.recap_trigger_enabled(trigger) {
             return;
         }
@@ -235,7 +245,6 @@ impl App {
                 .permissions
                 .active_permission_profile()
                 .map(|profile| profile.id),
-            mcp_server_names: config.mcp_servers.get().keys().cloned().collect(),
         };
         let event_sender = self.app_event_tx.clone();
         let task = tokio::spawn(async move {

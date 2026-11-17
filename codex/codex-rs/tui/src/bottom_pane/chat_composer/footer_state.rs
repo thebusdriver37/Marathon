@@ -16,10 +16,11 @@ use std::time::Instant;
 
 use super::super::footer::footer_height;
 use super::super::footer::reset_mode_after_activity;
-use super::super::footer::shows_passive_footer_line;
 use super::ActivePopup;
+use super::warning_notice;
 use crate::bottom_pane::footer::FooterKeyHints;
 use crate::bottom_pane::footer::FooterProps;
+use crate::bottom_pane::footer_content::FooterContent;
 use crate::key_hint;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
@@ -43,6 +44,7 @@ pub(super) struct ComposerLayout {
     pub(super) status: Rect,
     pub(super) composer: Rect,
     pub(super) remote_images: Rect,
+    pub(super) thumbnails: Rect,
     pub(super) textarea: Rect,
     pub(super) popup: Rect,
     pub(super) footer: Rect,
@@ -70,6 +72,7 @@ pub(crate) enum CommandPopupPlacement {
 pub(crate) struct ComposerRenderOptions<'a> {
     /// Fullscreen limits the composer independently of activity and modal views.
     pub(crate) max_height: Option<u16>,
+    pub(crate) image_previews: Option<&'a crate::transcript_image::composer::ComposerImages>,
     pub(crate) rendered_selection:
         Option<&'a std::cell::RefCell<crate::rendered_selection::RenderedSelection>>,
     /// Reserve a shared hint row independently of whether it currently contains a notice.
@@ -77,8 +80,15 @@ pub(crate) struct ComposerRenderOptions<'a> {
     pub(crate) working_tip: Option<&'a crate::turn_tip::TurnTip>,
     pub(crate) warning_count: usize,
     pub(crate) textarea_right_reserve: u16,
-    /// Keep configured status below the composer while hints occupy the final row.
+    /// Fullscreen scales the footer cap with the composer budget. Inline scrollback allows two rows.
     pub(crate) separate_status_line: bool,
+    /// A centered dialog owns input while the composer is painted behind it.
+    pub(crate) is_dialog_backdrop: bool,
+    /// Topmost frame row available for suggestions overlaying the transcript.
+    pub(crate) overlay_top: u16,
+    /// The workspace paints the open Presets menu over the completed frame.
+    pub(crate) floating_shortcuts: bool,
+    pub(crate) unfocused: bool,
     pub(crate) command_popup_placement: CommandPopupPlacement,
     pub(crate) footer: Option<&'a TranscriptFooter>,
 }
@@ -260,7 +270,7 @@ impl super::ChatComposer {
             {
                 return false;
             }
-            footer.is_interactive || shows_passive_footer_line(&self.footer_props())
+            footer.is_interactive || self.footer_mode().shows_passive_line(self.is_task_running)
         });
         options
     }
@@ -276,41 +286,45 @@ impl super::ChatComposer {
     }
 
     pub(super) fn footer_hint_height(&self, width: u16, options: ComposerRenderOptions<'_>) -> u16 {
-        if self.show_warning_notice(options) || self.shortcuts_above_composer(options) {
+        if options.is_dialog_backdrop {
+            return 0;
+        }
+        // The inactive pane keeps its bottom hints row blank.
+        if options.unfocused || self.shortcuts_above_composer(options) {
             return 1;
         }
-        options
-            .footer
-            .map_or_else(
-                || {
-                    self.custom_footer_height()
-                        .unwrap_or_else(|| footer_height(&self.hint_footer_props(options), width))
-                },
-                |footer| footer.text.height().try_into().unwrap_or(u16::MAX),
-            )
-            .max(u16::from(options.separate_status_line))
+        if let Some(hints) = self.passive_hints(options) {
+            return hints
+                .desired_rows(super::passive_hints::hint_area(Rect::new(0, 0, width, 1)).width);
+        }
+        options.footer.map_or_else(
+            || {
+                self.custom_footer_height()
+                    .unwrap_or_else(|| footer_height(&self.hint_footer_props(), width))
+            },
+            |footer| footer.text.height().try_into().unwrap_or(u16::MAX),
+        )
     }
 
     pub(super) fn render_transcript_footer(
         &self,
-        mut hint_area: Rect,
+        hint_area: Rect,
         buf: &mut Buffer,
         footer: &TranscriptFooter,
         warning_area: Option<Rect>,
     ) {
+        let hint_area = warning_notice::before_warning(hint_area, warning_area);
+        if hint_area.is_empty() {
+            return;
+        }
         let mut text = footer.text.clone();
+        text.lines.truncate(usize::from(hint_area.height));
         if footer.cursor_column.is_none()
             && self.footer.flash_visible()
             && let Some(flash) = &self.footer.flash
             && let Some(line) = text.lines.last_mut()
         {
             *line = flash.line.clone();
-        }
-        if let Some(warning_area) = warning_area {
-            hint_area.width = warning_area
-                .x
-                .saturating_sub(hint_area.x)
-                .saturating_sub(/*rhs*/ 2);
         }
         if !footer.is_interactive
             && !self.footer.flash_visible()
@@ -328,6 +342,17 @@ impl super::ChatComposer {
             if line.width() + shortcuts.width() <= usize::from(hint_area.width) {
                 line.extend(shortcuts.spans);
             }
+        }
+        if self.footer.status_line_enabled
+            && let Some(mode) = self.mode_indicator_line(/*show_cycle_hint*/ false)
+            && let Some(row) = text
+                .lines
+                .get(usize::from(hint_area.height.saturating_sub(1)))
+            && crate::line_truncation::line_width(row) + 1 + mode.width()
+                <= usize::from(hint_area.width)
+            && let Some(bottom_row) = hint_area.rows().next_back()
+        {
+            mode.right_aligned().render(bottom_row, buf);
         }
         Paragraph::new(text).render(hint_area, buf);
     }
@@ -358,8 +383,11 @@ pub(super) struct FooterState {
     pub(super) collaboration_mode_indicator: Option<CollaborationModeIndicator>,
     pub(super) goal_status_indicator: Option<GoalStatusIndicator>,
     pub(super) ide_context_active: bool,
-    pub(super) status_line_value: Option<Line<'static>>,
-    pub(super) status_line_hyperlink_url: Option<String>,
+    pub(super) status_line_value: Option<FooterContent>,
+    // Measurement bounds and occupied height, shared by layout and cursor placement.
+    pub(super) measured_status_line: std::cell::Cell<Option<(ratatui::layout::Size, u16)>>,
+    pub(super) wrapped_native_status:
+        std::cell::RefCell<Option<super::native_status::WrappedNativeStatus>>,
     pub(super) status_line_enabled: bool,
     pub(super) side_conversation_context_label: Option<String>,
     pub(super) active_agent_label: Option<String>,
@@ -397,16 +425,6 @@ impl FooterState {
             .checked_add(duration)
             .unwrap_or_else(Instant::now);
         self.flash = Some(FooterFlash { line, expires_at });
-    }
-
-    #[cfg(test)]
-    pub(super) fn status_line_text(&self) -> Option<String> {
-        self.status_line_value.as_ref().map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
     }
 }
 

@@ -95,6 +95,9 @@ fn is_unsupported_untrusted_approval_policy_error(err: &std::io::Error) -> bool 
     )
 }
 
+pub use codex_agent_message_board_host::delete_agent_message_boards;
+pub use codex_agent_message_board_host::install_agent_message_board;
+
 mod analytics_utils;
 mod app_info;
 mod app_server_tracing;
@@ -136,6 +139,7 @@ mod model_catalog;
 mod models;
 mod models_refresh_worker;
 mod notification_media;
+mod otel_config;
 mod otel_reloader;
 mod outgoing_message;
 mod plugin_config_reload;
@@ -143,6 +147,7 @@ mod request_processors;
 mod request_serialization;
 mod server_request_error;
 mod skills_watcher;
+mod startup_warnings;
 mod thread_sample;
 mod thread_state;
 mod thread_status;
@@ -568,7 +573,7 @@ pub async fn run_main_with_transport_options(
         Arc::new(NoopThreadConfigLoader),
     );
     let startup = config_manager
-        .load_cloud_startup_config(startup_cwd.clone())
+        .load_managed_startup_config(startup_cwd.clone())
         .await?;
     let mut config_warnings = Vec::new();
     let mut plugin_startup_config = PluginStartupConfig::Current;
@@ -599,11 +604,7 @@ pub async fn run_main_with_transport_options(
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
             .await
             .map_err(std::io::Error::other)?;
-    config_manager.replace_cloud_config_bundle_loader(
-        auth_manager.clone(),
-        config.chatgpt_base_url.clone(),
-        config.http_client_factory(),
-    );
+    config_manager.update_managed_config_loader(auth_manager.clone(), &config);
     config_manager
         .sync_default_client_residency_requirement()
         .await;
@@ -675,7 +676,7 @@ pub async fn run_main_with_transport_options(
         Ok(state_db_init) => state_db_init,
         Err(err) => {
             return Err(std::io::Error::other(format!(
-                "failed to initialize sqlite state runtime under {}: {err}",
+                "failed to initialize sqlite state runtime under {}: {err:#}",
                 config.sqlite_config().home().display()
             )));
         }
@@ -717,8 +718,15 @@ pub async fn run_main_with_transport_options(
         });
     }
 
-    let analytics_events_client =
-        analytics_events_client_from_config(Arc::clone(&auth_manager), &config);
+    let runtime_auth_slot = config
+        .features
+        .enabled(Feature::RuntimeAgentInstances)
+        .then(codex_runtime_agent_instance::RuntimeAuthSlot::default);
+    let analytics_events_client = analytics_events_client_from_config(
+        Arc::clone(&auth_manager),
+        &config,
+        runtime_auth_slot.clone(),
+    );
     let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
         outgoing_tx,
         analytics_events_client.clone(),
@@ -766,6 +774,14 @@ pub async fn run_main_with_transport_options(
         .with(log_db_layer)
         .with(otel_layers)
         .try_init();
+    if let Some(error) = state_db.as_ref().and_then(|db| db.diagnostic_logs_error()) {
+        tracing::warn!(
+            event.name = "diagnostic_database_unavailable",
+            error,
+            "diagnostic database unavailable"
+        );
+    }
+
     #[cfg(unix)]
     if let Some(Err(err)) = nofile_limit_result {
         warn!(%err, "failed to raise managed app-server file descriptor limit");
@@ -887,6 +903,9 @@ pub async fn run_main_with_transport_options(
 
     let (remote_control_accept_handle, remote_control_handle) = start_remote_control(
         RemoteControlStartConfig {
+            runtime_auth: runtime_auth_slot
+                .clone()
+                .map(|slot| (slot, config.runtime_auth_mode)),
             remote_control_url: config.chatgpt_base_url.clone(),
             installation_id: installation_id.clone(),
             policy: remote_control_policy,
@@ -1007,6 +1026,7 @@ pub async fn run_main_with_transport_options(
         let auth_manager = Arc::clone(&auth_manager);
         let initialize_notification_sender = outgoing_message_sender.clone();
         let outbound_control_tx = outbound_control_tx;
+        let (startup_warnings_tx, mut startup_warnings_rx) = mpsc::unbounded_channel();
         let mut processor = MessageProcessor::new(MessageProcessorArgs {
             cloud_skill_provider,
             outgoing: outgoing_message_sender,
@@ -1020,11 +1040,13 @@ pub async fn run_main_with_transport_options(
             log_db,
             state_db: state_db.clone(),
             config_warnings,
+            startup_warnings_tx,
             session_source,
             user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
                 &auth_manager,
             ))),
             auth_manager,
+            runtime_auth_slot,
             installation_id,
             code_mode_session_provider,
             rpc_transport: analytics_rpc_transport(&transport),
@@ -1300,6 +1322,9 @@ pub async fn run_main_with_transport_options(
                                 }
                             }
                         }
+                    }
+                    Some(message) = startup_warnings_rx.recv(), if connections.values().any(|state| state.session.initialized()) => {
+                        startup_warnings::send_warning(&initialize_notification_sender, message).await;
                     }
                     _ = connection_cleanup_tasks.reap_next() => {}
                     result = thread_listener_tasks.join_next(), if !thread_listener_tasks.is_empty() => {

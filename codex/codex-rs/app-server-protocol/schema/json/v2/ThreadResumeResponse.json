@@ -31,6 +31,58 @@
       ],
       "type": "string"
     },
+    "AgentMessageDisplay": {
+      "description": "A presentation instruction for Chat to apply to this answer when recovering history.",
+      "properties": {
+        "action": {
+          "description": "Unknown actions must be left for the producing client to handle.",
+          "type": "string"
+        },
+        "blockType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checkTrustedContacts": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "cyberTrustedAccess": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "AgentMessageModeration": {
+      "properties": {
+        "display": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentMessageDisplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "moderated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "moderated"
+      ],
+      "type": "object"
+    },
     "AgentPath": {
       "type": "string"
     },
@@ -143,6 +195,7 @@
             "flexUnavailable",
             "serverOverloaded",
             "modelNotFound",
+            "policyCapacityUnavailable",
             "cyberPolicy",
             "misalignmentPolicyViolation",
             "tooManyDenials",
@@ -152,6 +205,13 @@
             "threadRollbackFailed",
             "sandboxError",
             "other"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The workspace's inference hook explicitly denied this request.",
+          "enum": [
+            "inferenceHookDenied"
           ],
           "type": "string"
         },
@@ -657,10 +717,34 @@
           "type": "object"
         },
         {
-          "properties": {
-            "audio_url": {
-              "type": "string"
+          "anyOf": [
+            {
+              "properties": {
+                "audio_url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "audio_url"
+              ],
+              "title": "AudioUrlFunctionCallOutputContentItem",
+              "type": "object"
             },
+            {
+              "properties": {
+                "file_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_id"
+              ],
+              "title": "FileIdFunctionCallOutputContentItem",
+              "type": "object"
+            }
+          ],
+          "description": "Inline audio data or an uploaded file loaded by the Responses API.",
+          "properties": {
             "type": {
               "enum": [
                 "input_audio"
@@ -670,7 +754,6 @@
             }
           },
           "required": [
-            "audio_url",
             "type"
           ],
           "title": "InputAudioFunctionCallOutputContentItem",
@@ -1667,6 +1750,7 @@
       "type": "string"
     },
     "ThreadItem": {
+      "description": "A thread item and its recorded lifecycle times. The payload stays flat on the wire.",
       "oneOf": [
         {
           "properties": {
@@ -1748,6 +1832,17 @@
               "anyOf": [
                 {
                   "$ref": "#/definitions/MemoryCitation"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "moderation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AgentMessageModeration"
                 },
                 {
                   "type": "null"
@@ -2449,6 +2544,14 @@
               ],
               "default": null
             },
+            "generationId": {
+              "default": null,
+              "description": "Image generation identifier for the generated image, when provided by the image backend.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "id": {
               "type": "string"
             },
@@ -2569,7 +2672,28 @@
           "title": "ContextCompactionThreadItem",
           "type": "object"
         }
-      ]
+      ],
+      "properties": {
+        "completedAtMs": {
+          "default": null,
+          "description": "Unix timestamp in milliseconds when the item completed, if recorded.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "startedAtMs": {
+          "default": null,
+          "description": "Unix timestamp in milliseconds when the item started, if recorded.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "ThreadSection": {
       "description": "An independently persisted, user-visible thread section.",
@@ -2987,6 +3111,32 @@
           "type": "object"
         },
         {
+          "anyOf": [
+            {
+              "properties": {
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "title": "UrlUserInput",
+              "type": "object"
+            },
+            {
+              "properties": {
+                "fileId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fileId"
+              ],
+              "title": "FileIdUserInput",
+              "type": "object"
+            }
+          ],
           "properties": {
             "type": {
               "enum": [
@@ -2994,14 +3144,10 @@
               ],
               "title": "AudioUserInputType",
               "type": "string"
-            },
-            "url": {
-              "type": "string"
             }
           },
           "required": [
-            "type",
-            "url"
+            "type"
           ],
           "title": "AudioUserInput",
           "type": "object"

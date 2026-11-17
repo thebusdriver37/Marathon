@@ -1,7 +1,7 @@
 use super::bedrock_auth::BedrockProviderConfig;
 use super::bedrock_auth::clear_user_model_provider_if_bedrock;
-use super::bedrock_auth::configure_bedrock_provider;
-use super::bedrock_auth::ensure_user_model_provider_can_be_bedrock;
+use super::bedrock_auth::prepare_bedrock_provider;
+use super::config_processor::map_error as map_config_error;
 use super::*;
 use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
@@ -10,6 +10,7 @@ use crate::outgoing_message::AccountNotification;
 use chrono::DateTime;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
 use codex_app_server_protocol::GetAccountRateLimitsParams;
+use codex_core::McpRefreshReason;
 use codex_login::LoginOnboardingEntrypoint;
 use codex_login::login_with_bedrock_access_keys;
 use codex_mcp::ema_auth_scope;
@@ -17,15 +18,20 @@ use codex_model_provider::is_supported_amazon_bedrock_region;
 use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_rmcp_client::EnterpriseOAuthCredentialGuard;
 
+mod backend_client;
 mod bedrock_gov_cloud;
 mod bedrock_setup;
 mod enterprise_login;
 mod gateway_oauth;
+mod gcp_setup;
 mod rate_limit_resets;
+mod security_setup;
 mod workspace_routing;
+mod workspace_switching;
 
 pub(super) use enterprise_login::EnterpriseLoginCompletion;
 pub(super) use enterprise_login::EnterpriseLoginTarget;
+pub(crate) use gcp_setup::handle_gcp_setup;
 
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -80,6 +86,11 @@ enum RefreshTokenRequestOutcome {
     FailedPermanently,
 }
 
+enum CloudLoginProvider {
+    AmazonBedrock,
+    Gcp,
+}
+
 enum BedrockLoginCredentials {
     ApiKey(String),
     AccessKeys {
@@ -108,7 +119,8 @@ pub(crate) struct AccountRequestProcessor {
     workspace_routing_fetches: Arc<Mutex<workspace_routing::WorkspaceRoutingFetches>>,
     workspace_routing_shutdown: CancellationToken,
     gateway_login: Arc<std::sync::Mutex<Option<gateway_oauth::ActiveGatewayLogin>>>,
-    gateway_client: Arc<std::sync::Mutex<Option<Arc<codex_login::GatewayAuthManager>>>>,
+    gateway_clients:
+        Arc<std::sync::Mutex<HashMap<String, Arc<codex_model_provider::GatewayAuthManager>>>>,
     _gateway_notifications: Arc<tokio_util::task::AbortOnDropHandle<()>>,
     pub(super) enterprise_login: Arc<enterprise_login::EnterpriseLoginState>,
 }
@@ -142,7 +154,7 @@ impl AccountRequestProcessor {
             model_catalog,
             active_login: Arc::new(Mutex::new(None)),
             gateway_login: Arc::new(std::sync::Mutex::new(/*t*/ None)),
-            gateway_client: Arc::new(std::sync::Mutex::new(/*t*/ None)),
+            gateway_clients: Arc::new(std::sync::Mutex::new(HashMap::new())),
             workspace_routing: Arc::new(Mutex::new(None)),
             workspace_routing_fetches: Arc::new(Mutex::new(HashMap::new())),
             workspace_routing_shutdown: CancellationToken::new(),
@@ -282,19 +294,25 @@ impl AccountRequestProcessor {
             .await
         {
             Ok(config) => {
+                let runtime_auth = thread_manager.runtime_auth_for_config(&config);
                 Self::spawn_effective_plugins_changed_task(
                     Arc::clone(thread_manager),
                     config_manager.clone(),
+                    McpRefreshReason::AccountPluginCacheChanged,
                 );
                 let plugins_config = config.plugins_config_input();
                 let refresh_thread_manager = Arc::clone(thread_manager);
                 let refresh_config_manager = config_manager.clone();
                 let on_effective_plugins_changed: Arc<
                     dyn Fn(codex_core_plugins::EffectivePluginsChange) + Send + Sync,
-                > = Arc::new(move |_change| {
+                > = Arc::new(move |change| {
                     Self::spawn_effective_plugins_changed_task(
                         Arc::clone(&refresh_thread_manager),
                         refresh_config_manager.clone(),
+                        change.metadata_change_id.map_or(
+                            McpRefreshReason::AccountPluginCacheChanged,
+                            McpRefreshReason::InstalledPluginMetadata,
+                        ),
                     );
                 });
                 thread_manager
@@ -303,6 +321,10 @@ impl AccountRequestProcessor {
                         &plugins_config,
                         Some(Arc::clone(&on_effective_plugins_changed)),
                     );
+                if let Err(err) = runtime_auth {
+                    warn!("failed to initialize runtime auth for remote plugin refresh: {err}");
+                    return;
+                }
                 thread_manager
                     .plugins_manager()
                     .maybe_start_remote_plugin_caches_refresh(
@@ -322,13 +344,14 @@ impl AccountRequestProcessor {
     fn spawn_effective_plugins_changed_task(
         thread_manager: Arc<ThreadManager>,
         config_manager: ConfigManager,
+        reason: McpRefreshReason,
     ) {
         tokio::spawn(async move {
             thread_manager.plugins_manager().clear_cache();
             thread_manager.skills_service().clear_cache();
             crate::mcp_refresh::reload_mcp_config_best_effort(&thread_manager, &config_manager)
                 .await;
-            thread_manager.invalidate_mcp_runtimes().await;
+            thread_manager.invalidate_mcp_runtimes_for(reason).await;
         });
     }
 
@@ -425,7 +448,10 @@ impl AccountRequestProcessor {
         )
     }
 
-    fn ensure_bedrock_login_allowed(&self) -> Result<(), JSONRPCErrorError> {
+    fn ensure_provider_login_allowed(
+        &self,
+        provider: CloudLoginProvider,
+    ) -> Result<(), JSONRPCErrorError> {
         if self.auth_manager.is_workload_identity_selected() {
             return Err(self.configured_auth_owned_by_host_error());
         }
@@ -436,9 +462,13 @@ impl AccountRequestProcessor {
             .auth_manager
             .is_login_method_allowed(ForcedLoginMethod::Api)
         {
-            return Err(invalid_request(
-                "Amazon Bedrock login is disabled. Use ChatGPT login instead.",
-            ));
+            let operation = match provider {
+                CloudLoginProvider::AmazonBedrock => "Amazon Bedrock login",
+                CloudLoginProvider::Gcp => "Google Cloud setup",
+            };
+            return Err(invalid_request(format!(
+                "{operation} is disabled. Use ChatGPT login instead."
+            )));
         }
         Ok(())
     }
@@ -476,7 +506,7 @@ impl AccountRequestProcessor {
         ) {
             Ok(()) => {
                 self.auth_manager.reload().await;
-                self.config_manager.clear_cloud_config_bundle_loader();
+                self.config_manager.clear_chatgpt_config_loader();
                 Ok(())
             }
             Err(err) => Err(internal_error(format!("failed to save api key: {err}"))),
@@ -507,7 +537,7 @@ impl AccountRequestProcessor {
         region: String,
     ) {
         let result = async {
-            self.ensure_bedrock_login_allowed()?;
+            self.ensure_provider_login_allowed(CloudLoginProvider::AmazonBedrock)?;
 
             match &credentials {
                 BedrockLoginCredentials::ApiKey(api_key) => {
@@ -535,8 +565,7 @@ impl AccountRequestProcessor {
             }
 
             self.cancel_active_login().await;
-            ensure_user_model_provider_can_be_bedrock(&self.config_manager).await?;
-            configure_bedrock_provider(
+            let write = prepare_bedrock_provider(
                 &self.config_manager,
                 BedrockProviderConfig {
                     region: matches!(&credentials, BedrockLoginCredentials::AccessKeys { .. })
@@ -545,6 +574,10 @@ impl AccountRequestProcessor {
                 },
             )
             .await?;
+            self.config_manager
+                .commit_provider_config(write)
+                .await
+                .map_err(map_config_error)?;
 
             match credentials {
                 BedrockLoginCredentials::ApiKey(api_key) => login_with_bedrock_api_key(
@@ -575,7 +608,7 @@ impl AccountRequestProcessor {
             }
             .map_err(|err| internal_error(format!("failed to save Amazon Bedrock auth: {err}")))?;
             self.auth_manager.reload().await;
-            self.config_manager.clear_cloud_config_bundle_loader();
+            self.config_manager.clear_chatgpt_config_loader();
             Ok(LoginAccountResponse::AmazonBedrock {})
         }
         .await;
@@ -672,6 +705,15 @@ impl AccountRequestProcessor {
         let opts = self
             .login_chatgpt_common(codex_streamlined_login, login_success_page)
             .await?;
+        let (login_id, auth_url) = self.start_browser_login(opts, /*pause*/ None).await?;
+        Ok(LoginAccountResponse::Chatgpt { login_id, auth_url })
+    }
+
+    async fn start_browser_login(
+        &self,
+        opts: LoginServerOptions,
+        pause: Option<crate::turn_admission::TurnAdmissionPause>,
+    ) -> Result<(String, String), JSONRPCErrorError> {
         let server = run_login_server(opts)
             .map_err(|err| internal_error(format!("failed to start login server: {err}")))?;
         let login_id = Uuid::new_v4();
@@ -693,6 +735,8 @@ impl AccountRequestProcessor {
         let active_login = self.active_login.clone();
         let auth_url = server.auth_url.clone();
         let task = async move {
+            // Workspace credentials may change in the callback. Resume turns after caches and clients are updated.
+            let _pause = pause;
             let (success, error_msg, onboarding_entrypoint) = match tokio::time::timeout(
                 LOGIN_CHATGPT_TIMEOUT,
                 server.block_until_done_with_callback_result(),
@@ -732,10 +776,7 @@ impl AccountRequestProcessor {
         };
         tokio::spawn(AuthStorageOriginator::current().scope(task));
 
-        Ok(LoginAccountResponse::Chatgpt {
-            login_id: login_id.to_string(),
-            auth_url,
-        })
+        Ok((login_id.to_string(), auth_url))
     }
 
     async fn login_chatgpt_device_code_v2(&self, request_id: ConnectionRequestId) {
@@ -910,11 +951,8 @@ impl AccountRequestProcessor {
             )))
             .await
             .map_err(|err| internal_error(format!("failed to set external auth: {err}")))?;
-        self.config_manager.replace_cloud_config_bundle_loader(
-            self.auth_manager.clone(),
-            self.config.chatgpt_base_url.clone(),
-            self.config.http_client_factory(),
-        );
+        self.config_manager
+            .update_managed_config_loader(self.auth_manager.clone(), &self.config);
         self.config_manager
             .sync_default_client_residency_requirement()
             .await;
@@ -923,7 +961,9 @@ impl AccountRequestProcessor {
     }
 
     async fn send_login_success_notifications(&self, login_id: Option<Uuid>) {
-        self.thread_manager.invalidate_mcp_runtimes().await;
+        self.thread_manager
+            .invalidate_mcp_runtimes_for(McpRefreshReason::AccountLoginCompleted)
+            .await;
         self.send_account_login_notifications(AccountLoginCompletedNotification {
             login_id: login_id.map(|id| id.to_string()),
             success: true,
@@ -985,12 +1025,11 @@ impl AccountRequestProcessor {
             self.auth_manager.reload().await;
             let auth_changes = self.auth_manager.auth_change_state_receiver();
             let owner_generation = auth_changes.borrow().owner_generation;
-            self.thread_manager.invalidate_mcp_runtimes().await;
-            self.config_manager.replace_cloud_config_bundle_loader(
-                self.auth_manager.clone(),
-                self.config.chatgpt_base_url.clone(),
-                self.config.http_client_factory(),
-            );
+            self.thread_manager
+                .invalidate_mcp_runtimes_for(McpRefreshReason::AccountAuthReloaded)
+                .await;
+            self.config_manager
+                .update_managed_config_loader(self.auth_manager.clone(), &self.config);
             self.config_manager
                 .sync_default_client_residency_requirement()
                 .await;
@@ -1013,7 +1052,9 @@ impl AccountRequestProcessor {
         let config =
             logout_configured_account(&self.config_manager, &self.auth_manager, &self.config)
                 .await?;
-        self.thread_manager.invalidate_mcp_runtimes().await;
+        self.thread_manager
+            .invalidate_mcp_runtimes_for(McpRefreshReason::AccountLoggedOut)
+            .await;
         clear_account_configuration(&self.config_manager, &config).await?;
 
         self.model_catalog.invalidate().await;
@@ -1165,11 +1206,7 @@ impl AccountRequestProcessor {
             ));
         }
 
-        let client = BackendClient::from_auth(
-            self.config.chatgpt_base_url.clone(),
-            &auth,
-            http_client_factory,
-        );
+        let client = self.backend_client(&auth, http_client_factory).await?;
 
         let usage_request = async {
             if params.supports_luna_reserve
@@ -1282,11 +1319,7 @@ impl AccountRequestProcessor {
             ));
         }
 
-        let client = BackendClient::from_auth(
-            self.config.chatgpt_base_url.clone(),
-            &auth,
-            http_client_factory,
-        );
+        let client = self.backend_client(&auth, http_client_factory).await?;
         if let Some(thread_id) = thread_id {
             let thread_id = thread_id.to_string();
             let usage = tokio::time::timeout(
@@ -1300,6 +1333,7 @@ impl AccountRequestProcessor {
                     thread_id: usage.thread_id,
                     estimated_usage_credits_micros: usage.estimated_usage_credits_micros,
                     estimated_usage_usd_micros: usage.estimated_usage_usd_micros,
+                    native_usage_usd_micros: usage.native_usage_usd_micros,
                     groups: usage
                         .groups
                         .into_iter()
@@ -1369,11 +1403,7 @@ impl AccountRequestProcessor {
             ));
         }
 
-        let client = BackendClient::from_auth(
-            self.config.chatgpt_base_url.clone(),
-            &auth,
-            http_client_factory,
-        );
+        let client = self.backend_client(&auth, http_client_factory).await?;
         let messages = tokio::time::timeout(
             ACCOUNT_WORKSPACE_MESSAGES_FETCH_TIMEOUT,
             client.list_workspace_messages(),
@@ -1463,11 +1493,7 @@ impl AccountRequestProcessor {
             ));
         }
 
-        let client = BackendClient::from_auth(
-            self.config.chatgpt_base_url.clone(),
-            &auth,
-            http_client_factory,
-        );
+        let client = self.backend_client(&auth, http_client_factory).await?;
 
         match client
             .send_add_credits_nudge_email(Self::backend_credit_type(params.credit_type))
@@ -1541,12 +1567,11 @@ pub(crate) async fn logout_configured_account(
 ) -> Result<Config, JSONRPCErrorError> {
     // Another process may have changed the persisted workspace. Reload both
     // account authority and its policy before selecting a grant to remove.
-    auth_manager.reload().await;
-    config_manager.replace_cloud_config_bundle_loader(
-        Arc::clone(auth_manager),
-        fallback_config.chatgpt_base_url.clone(),
-        fallback_config.http_client_factory(),
-    );
+    auth_manager
+        .reload_with_cached_auth()
+        .await
+        .map_err(|err| internal_error(format!("logout failed: {err}")))?;
+    config_manager.update_managed_config_loader(Arc::clone(auth_manager), fallback_config);
     let config = config_manager
         .load_latest_config(/*fallback_cwd*/ None)
         .await;
@@ -1602,7 +1627,7 @@ pub(crate) async fn clear_account_configuration(
     config_manager: &ConfigManager,
     config: &Config,
 ) -> Result<(), JSONRPCErrorError> {
-    config_manager.clear_cloud_config_bundle_loader();
+    config_manager.clear_chatgpt_config_loader();
     if config.model_provider.is_amazon_bedrock() {
         clear_user_model_provider_if_bedrock(config_manager, config).await?;
     }
@@ -1698,6 +1723,7 @@ mod tests {
                 status,
                 content_type: "application/json".to_string(),
                 body: "{}".to_string(),
+                identity_error_code: None,
             };
             assert_eq!(workspace_messages_feature_disabled(&err), expected);
         }

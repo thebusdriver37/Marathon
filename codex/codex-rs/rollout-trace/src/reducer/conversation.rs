@@ -4,6 +4,8 @@
 //! request inputs, compaction checkpoints, and harness acceptance events.
 //! Tool messages use the content sent to the model in subsequent requests.
 
+use std::collections::HashSet;
+
 use anyhow::Context;
 use anyhow::Ok;
 use anyhow::Result;
@@ -25,6 +27,40 @@ use crate::payload::RawPayloadRef;
 mod normalize;
 
 impl TraceReducer {
+    pub(super) fn record_agent_receipt(
+        &mut self,
+        thread_id: &str,
+        turn_id: Option<String>,
+        at_unix_ms: i64,
+        wire_id: &str,
+        payload: &RawPayloadRef,
+    ) -> Result<()> {
+        // A request can be recorded before its history notification. Its item already owns the edge.
+        if self.rollout.threads[thread_id]
+            .conversation_item_ids
+            .iter()
+            .rev()
+            .any(|id| {
+                self.rollout.conversation_items[id]
+                    .responses_item_id
+                    .as_deref()
+                    == Some(wire_id)
+            })
+        {
+            return Ok(());
+        }
+        let item = normalize::normalize_model_item(&self.read_payload_json(payload)?, payload)?;
+        if item.agent_message.is_none() || item.responses_item_id.as_deref() != Some(wire_id) {
+            bail!("accepted agent message does not match receipt {wire_id}");
+        }
+        let id = self.create_conversation_item(thread_id, turn_id, at_unix_ms, item, Vec::new());
+        self.append_thread_conversation_items(thread_id, std::slice::from_ref(&id))?;
+        self.resolve_pending_agent_edges_for_item(&id)?;
+        self.receipt_only_items
+            .insert((thread_id.to_owned(), wire_id.to_owned()), id);
+        Ok(())
+    }
+
     /// Reduces an inference request input snapshot into model-visible conversation items.
     ///
     /// Full snapshots reuse matching items even if the prompt builder reorders them.
@@ -223,16 +259,19 @@ impl TraceReducer {
             <[_]>::to_vec,
         );
         let mut item_ids = Vec::with_capacity(items.len());
+        let mut used_item_ids = HashSet::with_capacity(items.len());
 
         for (offset, item) in items.into_iter().enumerate() {
             let index = context.start_index + offset;
             let tool_link_item = item.clone();
             self.ensure_call_id_consistency(context.thread_id, &item)?;
             let item_id = if let Some(previous_item_id) = previous_snapshot.get(index) {
-                if self.item_matches(previous_item_id, &item) {
+                if !used_item_ids.contains(previous_item_id)
+                    && self.item_matches(previous_item_id, &item)
+                {
                     previous_item_id.clone()
                 } else if matches!(context.mode, ReconcileMode::FullSnapshot) {
-                    self.find_matching_snapshot_item(&previous_snapshot, &item_ids, &item)
+                    self.find_matching_snapshot_item(&previous_snapshot, &used_item_ids, &item)
                         .unwrap_or_else(|| {
                             self.create_conversation_item(
                                 context.thread_id,
@@ -252,7 +291,7 @@ impl TraceReducer {
                     );
                 }
             } else if matches!(context.mode, ReconcileMode::FullSnapshot) {
-                self.find_matching_snapshot_item(&previous_snapshot, &item_ids, &item)
+                self.find_matching_snapshot_item(&previous_snapshot, &used_item_ids, &item)
                     .unwrap_or_else(|| {
                         self.create_conversation_item(
                             context.thread_id,
@@ -287,10 +326,10 @@ impl TraceReducer {
                 &tool_link_item.kind,
             )?;
             self.resolve_pending_agent_edges_for_item(&item_id)?;
+            used_item_ids.insert(item_id.clone());
             item_ids.push(item_id);
         }
 
-        self.flush_pending_code_cell_starts()?;
         Ok(item_ids)
     }
 
@@ -382,12 +421,13 @@ impl TraceReducer {
         context: DetachedReconcileItems<'_>,
     ) -> Result<Vec<String>> {
         let mut item_ids = Vec::with_capacity(items.len());
+        let mut used_item_ids = HashSet::with_capacity(items.len());
 
         for item in items {
             let tool_link_item = item.clone();
             self.ensure_call_id_consistency(context.thread_id, &item)?;
             let item_id = self
-                .find_matching_snapshot_item(&context.candidates, &item_ids, &item)
+                .find_matching_snapshot_item(&context.candidates, &used_item_ids, &item)
                 .unwrap_or_else(|| {
                     self.create_conversation_item(
                         context.thread_id,
@@ -413,10 +453,10 @@ impl TraceReducer {
                 &tool_link_item.kind,
             )?;
             self.resolve_pending_agent_edges_for_item(&item_id)?;
+            used_item_ids.insert(item_id.clone());
             item_ids.push(item_id);
         }
 
-        self.flush_pending_code_cell_starts()?;
         Ok(item_ids)
     }
 
@@ -428,12 +468,24 @@ impl TraceReducer {
         item: NormalizedConversationItem,
         produced_by: Vec<ProducerRef>,
     ) -> String {
+        // The first request or checkpoint that sees a receipt supplies the model-visible
+        // representation (which can be trimmed). Keep the ID already used by the delivery edge.
+        if item.agent_message.is_some()
+            && let Some(wire_id) = &item.responses_item_id
+            && let Some(id) = self
+                .receipt_only_items
+                .remove(&(thread_id.to_owned(), wire_id.clone()))
+        {
+            return id;
+        }
         let item_id = self.next_conversation_item_id();
         self.rollout.conversation_items.insert(
             item_id.clone(),
             ConversationItem {
                 item_id: item_id.clone(),
                 responses_item_id: item.responses_item_id,
+                accepted_at_unix_ms: None,
+                accepted_seq: None,
                 thread_id: thread_id.to_string(),
                 codex_turn_id,
                 first_seen_at_unix_ms,
@@ -466,6 +518,10 @@ impl TraceReducer {
         if item.kind == ConversationItemKind::Reasoning {
             merge_reasoning_body(&mut item.body, &normalized.body)?;
         }
+        // A request or checkpoint may contain a trimmed version of an accepted delivery.
+        if normalized.agent_message.is_some() && item.body != normalized.body {
+            item.body.clone_from(&normalized.body);
+        }
         for producer in produced_by {
             if !item.produced_by.contains(producer) {
                 item.produced_by.push(producer.clone());
@@ -491,13 +547,13 @@ impl TraceReducer {
     fn find_matching_snapshot_item(
         &self,
         previous_snapshot: &[String],
-        used_item_ids: &[String],
+        used_item_ids: &HashSet<String>,
         normalized: &NormalizedConversationItem,
     ) -> Option<String> {
         previous_snapshot
             .iter()
             .find(|item_id| {
-                !used_item_ids.contains(item_id) && self.item_matches(item_id, normalized)
+                !used_item_ids.contains(*item_id) && self.item_matches(item_id, normalized)
             })
             .cloned()
     }
@@ -507,6 +563,15 @@ impl TraceReducer {
         thread_id: &str,
         normalized: &NormalizedConversationItem,
     ) -> Result<()> {
+        // One call can emit several outputs, and history trimming can rewrite
+        // them. Keep distinct outputs as separate items; only the invocation
+        // itself must remain consistent.
+        if !matches!(
+            normalized.kind,
+            ConversationItemKind::FunctionCall | ConversationItemKind::CustomToolCall
+        ) {
+            return Ok(());
+        }
         let Some(call_id) = normalized.call_id.as_deref() else {
             return Ok(());
         };

@@ -1,3 +1,7 @@
+mod standalone;
+
+pub use standalone::StaticNetworkProxyConfig;
+
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -317,6 +321,30 @@ impl NetworkProxyConfig {
 
     pub fn set_denied_domains(&mut self, denied_domains: Vec<String>) {
         self.set_domain_entries(denied_domains, NetworkDomainPermission::Deny);
+    }
+
+    /// Applies valid saved denials even when a malformed batch invalidates its grants.
+    pub fn apply_saved_domain_rules(&mut self, allowed: Vec<String>, denied: &[String]) {
+        let valid_denials = crate::policy::compile_denylist(denied).is_ok();
+        if valid_denials && crate::policy::compile_allowlist(&allowed).is_ok() {
+            for host in allowed {
+                self.upsert_domain_permission(host, NetworkDomainPermission::Allow, normalize_host);
+            }
+        }
+        for host in denied {
+            if !valid_denials
+                && crate::policy::compile_denylist(std::slice::from_ref(host)).is_err()
+            {
+                continue;
+            }
+            // Managed constraints compare raw selectors case-insensitively. Preserve other aliases;
+            // the native and MCP domain matchers give this denial precedence over all of them.
+            self.upsert_domain_permission(
+                host.clone(),
+                NetworkDomainPermission::Deny,
+                str::to_ascii_lowercase,
+            );
+        }
     }
 
     pub fn upsert_domain_permission(

@@ -2,17 +2,15 @@
 # `marathon update-codex` skips upstream changes to these when it syncs.
 # Patterns are matched with git apply --exclude, where * also matches /.
 codex-rs/bwrap/*
-codex-rs/cloud-client/*
 codex-rs/code-mode-host/*
 codex-rs/code-mode-runtime/*
 codex-rs/config-schema/*
 codex-rs/core-api/*
-codex-rs/direct-tool-timing/*
-codex-rs/ext/guardian-v3/*
+codex-rs/ext/agent/*
 codex-rs/otel-trace-websocket/*
-codex-rs/runtime-agent-instance/*
+codex-rs/plugin-host/*
 codex-rs/thread-manager-sample/*
-codex-rs/utils/critical-path/*
+codex-rs/utils/model-facing-id/*
 codex-rs/utils/readiness/*
 codex-rs/v8-poc/*
 codex-rs/voice-host/*

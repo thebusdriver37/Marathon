@@ -9,13 +9,15 @@ use super::thread_events::ThreadBufferedEvent;
 use crate::app_event::AppEvent;
 use crate::app_event::ThreadTitleDestination;
 use crate::app_server_session::AppServerSession;
+use crate::app_server_session::ThreadSettingsOwner;
 use crate::temporary_structured_request::TemporaryStructuredThreadOptions;
 use crate::temporary_structured_request::run_temporary_structured_turn;
 use crate::temporary_structured_request::start_temporary_thread;
 use crate::temporary_structured_request::unsubscribe_temporary_thread;
 use codex_app_server_protocol::ServerNotification;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadSource;
+use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::ThreadId;
 use codex_protocol::models::MessagePhase;
@@ -74,6 +76,13 @@ impl App {
         {
             return;
         }
+        if app_server.thread_params_mode().settings_owner() == ThreadSettingsOwner::Server {
+            if let ThreadTitleDestination::RenameSuggestion { request_id } = destination {
+                self.chat_widget
+                    .apply_thread_name_suggestion(thread_id, request_id, /*suggestion*/ None);
+            }
+            return;
+        }
         let std::collections::hash_map::Entry::Vacant(entry) =
             self.pending_thread_titles.entry((thread_id, destination))
         else {
@@ -104,7 +113,6 @@ impl App {
                 .permissions
                 .active_permission_profile()
                 .map(|profile| profile.id),
-            mcp_server_names: config.mcp_servers.get().keys().cloned().collect(),
         };
 
         let event_sender = self.app_event_tx.clone();
@@ -129,7 +137,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn on_thread_title_started(
         &mut self,
-        app_server: &AppServerSession,
+        app_server: &mut AppServerSession,
         thread_id: ThreadId,
         destination: ThreadTitleDestination,
         prompt: String,
@@ -173,6 +181,8 @@ impl App {
         self.temporary_structured_requests
             .insert(temporary_thread_id, sender);
 
+        let save_name = (destination == ThreadTitleDestination::Automatic)
+            .then(|| app_server.automatic_thread_name_writer(thread_id));
         let request_handle = app_server.request_handle();
         let event_sender = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -188,6 +198,12 @@ impl App {
             .await
             .map_err(|error| error.to_string());
 
+            if let Some(save_name) = save_name
+                && let Ok(response) = &result
+                && let Some(title) = parse_thread_title(response)
+            {
+                save_name.save(title, &cancellation).await;
+            }
             event_sender.send(AppEvent::GeneratedThreadTitle {
                 cancellation,
                 thread_id,
@@ -223,7 +239,7 @@ impl App {
                 store
                     .turns
                     .iter()
-                    .flat_map(|turn| turn.items.iter())
+                    .flat_map(Turn::item_payloads)
                     .chain(store.buffer.iter().filter_map(|event| {
                         let ThreadBufferedEvent::Notification(notification) = event else {
                             return None;
@@ -234,7 +250,7 @@ impl App {
                             return None;
                         };
 
-                        Some(&notification.item)
+                        Some(&notification.item.payload)
                     }))
                     .filter(|item| seen.insert(item.id().to_string())),
             )
@@ -301,14 +317,14 @@ pub(super) fn thread_title_prompt(user_message: &str) -> String {
 /// Format recent substantive messages chronologically without trusting their markup.
 pub(super) fn recent_conversation_messages<'a, I>(items: I) -> Option<String>
 where
-    I: IntoIterator<Item = &'a ThreadItem>,
+    I: IntoIterator<Item = &'a ThreadItemPayload>,
     I::IntoIter: DoubleEndedIterator,
 {
     let mut messages = items
         .into_iter()
         .rev()
         .filter_map(|item| match item {
-            ThreadItem::UserMessage { content, .. } => {
+            ThreadItemPayload::UserMessage { content, .. } => {
                 let text = content
                     .iter()
                     .filter_map(|input| match input {
@@ -322,7 +338,7 @@ where
 
                 (!text.trim().is_empty()).then_some(("user", text))
             }
-            ThreadItem::AgentMessage { text, phase, .. }
+            ThreadItemPayload::AgentMessage { text, phase, .. }
                 if !matches!(phase, Some(MessagePhase::Commentary)) && !text.trim().is_empty() =>
             {
                 Some(("assistant", text.clone()))

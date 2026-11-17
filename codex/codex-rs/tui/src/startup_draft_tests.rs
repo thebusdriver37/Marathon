@@ -471,7 +471,7 @@ async fn startup_draft_preserves_non_bracketed_multiline_pastes_without_submitti
     assert!(pump.app_event_rx.try_recv().is_err());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn startup_draft_preserves_deferred_paste_newlines_across_handoff() {
     let (event_tx, event_rx) = unbounded_channel();
     let mut pump = startup_test_pump(std::iter::empty());
@@ -511,7 +511,7 @@ async fn startup_draft_preserves_deferred_paste_newlines_across_handoff() {
     assert_eq!(pump.into_draft().text, "first line\ns");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn startup_draft_does_not_turn_a_standalone_enter_into_a_newline_at_handoff() {
     let (_event_tx, event_rx) = unbounded_channel();
     let mut pump = startup_test_pump(std::iter::empty());
@@ -720,6 +720,41 @@ async fn startup_draft_applies_super_editor_keymap_without_inserting_pending_new
     pump.bottom_pane.flush_composer_paste_burst();
     assert_eq!(pump.bottom_pane.composer_cursor(), 0);
     assert_eq!(pump.bottom_pane.composer_text(), "draftx");
+    settings.tui.keymap.composer.history_search_previous =
+        Some(codex_config::types::KeybindingsSpec::One(
+            codex_config::types::KeybindingSpec("f12 h".into()),
+        ));
+    settings.tui.keymap.editor.move_line_end = Some(codex_config::types::KeybindingsSpec::One(
+        codex_config::types::KeybindingSpec("f12 e".into()),
+    ));
+    pump.apply_settings(&settings, config.cwd.as_path());
+    tokio::time::pause();
+    pump.handle_event(&mut tui, TuiEvent::Key(KeyCode::F(12).into()))
+        .expect("begin startup chord");
+    tokio::time::advance(crate::keymap::CHORD_REVEAL_DELAY).await;
+    pump.handle_event(&mut tui, TuiEvent::Draw)
+        .expect("show startup-safe actions");
+    let mut panel = Buffer::empty(tui.shortcut_hud_area.expect("startup shortcut guide"));
+    for pos in panel.area.positions() {
+        panel[pos] = tui.terminal.previous_buffer()[pos].clone();
+    }
+    let text = panel
+        .content()
+        .chunks(usize::from(panel.area.width))
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("startup_draft_safe_chord_guide", text);
+    pump.handle_event(&mut tui, TuiEvent::Key(KeyCode::Char('e').into()))
+        .expect("complete startup editor chord");
+    assert_eq!(pump.bottom_pane.composer_cursor(), "draftx".len());
+    tokio::time::resume();
     pump.handle_event(&mut tui, TuiEvent::Key(KeyEvent::from(KeyCode::Enter)))
         .expect("confirm draft");
     pump.apply_settings(&settings, config.cwd.as_path());

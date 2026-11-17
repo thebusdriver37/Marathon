@@ -1,9 +1,10 @@
 use crate::AgentPath;
-use crate::ResponseItemId;
+use crate::ItemIdGenerator;
 use crate::ThreadId;
 use crate::dynamic_tools::DynamicToolCallOutputContentItem;
 use crate::mcp::CallToolResult;
 use crate::memory_citation::MemoryCitation;
+use crate::models::AudioReference;
 use crate::models::ContentItem;
 use crate::models::ContentItemMetadata;
 use crate::models::FunctionCallOutputBody;
@@ -24,6 +25,7 @@ use crate::protocol::PatchApplyStatus;
 use crate::protocol::ReviewOutputEvent;
 use crate::protocol::ReviewTarget;
 use crate::protocol::SubAgentActivityKind;
+use crate::protocol::UserMessageAudioKind;
 use crate::user_input::ByteRange;
 use crate::user_input::TextElement;
 use crate::user_input::UserInput;
@@ -149,6 +151,32 @@ pub struct AsyncUserInputQuestion {
     pub options: Option<Vec<String>>,
 }
 
+/// A presentation instruction for Chat to apply to this answer when recovering history.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AgentMessageDisplay {
+    /// Unknown actions must be left for the producing client to handle.
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub block_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cyber_trusted_access: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub check_trusted_contacts: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS, JsonSchema)]
+pub struct AgentMessageModeration {
+    pub moderated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display: Option<AgentMessageDisplay>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 /// Assistant-authored message payload used in turn-item streams.
 ///
@@ -156,6 +184,9 @@ pub struct AsyncUserInputQuestion {
 /// should use it when present, but retain legacy completion semantics when it
 /// is `None`.
 pub struct AgentMessageItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub moderation: Option<AgentMessageModeration>,
     pub id: String,
     pub content: Vec<AgentMessageContent>,
     /// Optional phase metadata carried through from `ResponseItem::Message`.
@@ -635,7 +666,52 @@ impl UserMessageItem {
         self.content
             .iter()
             .filter_map(|c| match c {
-                UserInput::Audio { audio_url } => Some(audio_url.clone()),
+                UserInput::Audio {
+                    audio: AudioReference::Inline { audio_url },
+                } => Some(audio_url.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Returns file-backed audio references when the message includes an upload.
+    /// Inline payloads remain exclusively in the legacy `audio` field.
+    pub fn audio_references(&self) -> Option<Vec<AudioReference>> {
+        let audio = self
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                UserInput::Audio {
+                    audio: audio @ AudioReference::File { .. },
+                } => Some(audio.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        (!audio.is_empty()).then_some(audio)
+    }
+
+    /// Returns the original inline/file ordering when uploaded audio is present.
+    pub fn audio_order(&self) -> Vec<UserMessageAudioKind> {
+        if !self.content.iter().any(|content| {
+            matches!(
+                content,
+                UserInput::Audio {
+                    audio: AudioReference::File { .. }
+                }
+            )
+        }) {
+            return Vec::new();
+        }
+
+        self.content
+            .iter()
+            .filter_map(|content| match content {
+                UserInput::Audio {
+                    audio: AudioReference::Inline { .. },
+                } => Some(UserMessageAudioKind::Inline),
+                UserInput::Audio {
+                    audio: AudioReference::File { .. },
+                } => Some(UserMessageAudioKind::File),
                 _ => None,
             })
             .collect()
@@ -680,7 +756,10 @@ impl HookPromptFragment {
     }
 }
 
-pub fn build_hook_prompt_message(fragments: &[HookPromptFragment]) -> Option<ResponseItem> {
+pub fn build_hook_prompt_message(
+    fragments: &[HookPromptFragment],
+    item_id_generator: &ItemIdGenerator,
+) -> Option<ResponseItem> {
     let mut content = Vec::new();
     let mut metadata = Vec::new();
     for fragment in fragments {
@@ -697,7 +776,7 @@ pub fn build_hook_prompt_message(fragments: &[HookPromptFragment]) -> Option<Res
     Some(ResponseItem::Message {
         status: None,
         encrypted_content: None,
-        id: Some(ResponseItemId::new("msg")),
+        id: Some(item_id_generator("msg")),
         role: "user".to_string(),
         content,
         phase: None,
@@ -812,7 +891,14 @@ mod tests {
                 text_elements: Vec::new(),
             },
             UserInput::Audio {
-                audio_url: "https://example.com/remote.mp3".to_string(),
+                audio: AudioReference::Inline {
+                    audio_url: "https://example.com/remote.mp3".to_string(),
+                },
+            },
+            UserInput::Audio {
+                audio: AudioReference::File {
+                    file_id: "file_audio".to_string(),
+                },
             },
             UserInput::LocalAudio {
                 path: std::path::PathBuf::from("local.wav"),
@@ -825,6 +911,16 @@ mod tests {
                 vec!["https://example.com/remote.mp3".to_string()],
                 vec![std::path::PathBuf::from("local.wav")],
             )
+        );
+        assert_eq!(
+            item.audio_references(),
+            Some(vec![AudioReference::File {
+                file_id: "file_audio".to_string(),
+            }])
+        );
+        assert_eq!(
+            item.audio_order(),
+            vec![UserMessageAudioKind::Inline, UserMessageAudioKind::File]
         );
     }
 
@@ -856,7 +952,9 @@ mod tests {
             HookPromptFragment::from_single_hook("Retry with care & joy.", "hook-run-1"),
             HookPromptFragment::from_single_hook("Then summarize cleanly.", "hook-run-2"),
         ];
-        let message = build_hook_prompt_message(&original).expect("hook prompt");
+        let message =
+            build_hook_prompt_message(&original, &crate::uuid_v7_item_id_generator_for_test())
+                .expect("hook prompt");
 
         let ResponseItem::Message { id, content, .. } = message else {
             panic!("expected hook prompt message");

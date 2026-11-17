@@ -683,7 +683,7 @@ pub fn is_managed_proxy_env_var(key: &str, value: &str) -> bool {
     if PROXY_ENV_KEYS.contains(&key) {
         return true;
     }
-    if crate::certs::CUSTOM_CA_ENV_KEYS.contains(&key) {
+    if key == crate::aws_sigv4::AWS_CA_BUNDLE || crate::certs::CUSTOM_CA_ENV_KEYS.contains(&key) {
         return crate::certs::is_managed_mitm_ca_trust_bundle_path(value);
     }
     #[cfg(target_os = "macos")]
@@ -1153,7 +1153,6 @@ impl NetworkProxy {
         &self,
         mut env: HashMap<String, String>,
         addrs: EnvironmentProxyAddrs,
-        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
         client: EnvironmentProxyClient,
         environment_id: Option<&str>,
     ) -> PreparedManagedNetwork {
@@ -1171,6 +1170,15 @@ impl NetworkProxy {
             ..addrs
         };
         let runtime_settings = self.runtime_settings();
+        if client == EnvironmentProxyClient::SandboxedProcess {
+            self.state.mask_local_aws_credentials(
+                &mut env,
+                runtime_settings
+                    .mitm_ca_trust_bundle
+                    .as_ref()
+                    .map(|bundle| bundle.path.as_path()),
+            );
+        }
         // Enforce proxying for child processes. Proxy endpoint values are always rewritten;
         // managed MITM CA vars preserve child-scoped overrides after proxy startup.
         apply_proxy_env_overrides(
@@ -1587,28 +1595,37 @@ impl NetworkProxy {
         Ok(addrs)
     }
 
-    pub async fn replace_config_state(&self, new_state: ConfigState) -> Result<()> {
-        let current_cfg = self.state.current_cfg().await?;
+    /// Verifies that an in-place reload preserves the running proxy's listeners.
+    pub fn validate_config_update(
+        current_cfg: &config::NetworkProxyConfig,
+        next: &config::NetworkProxyConfig,
+    ) -> Result<()> {
         anyhow::ensure!(
-            new_state.config.enabled == current_cfg.enabled,
+            next.enabled == current_cfg.enabled,
             "cannot update network.enabled on a running proxy"
         );
         anyhow::ensure!(
-            new_state.config.proxy_url == current_cfg.proxy_url,
+            next.proxy_url == current_cfg.proxy_url,
             "cannot update network.proxy_url on a running proxy"
         );
         anyhow::ensure!(
-            new_state.config.socks_url == current_cfg.socks_url,
+            next.socks_url == current_cfg.socks_url,
             "cannot update network.socks_url on a running proxy"
         );
         anyhow::ensure!(
-            new_state.config.enable_socks5 == current_cfg.enable_socks5,
+            next.enable_socks5 == current_cfg.enable_socks5,
             "cannot update network.enable_socks5 on a running proxy"
         );
         anyhow::ensure!(
-            new_state.config.enable_socks5_udp == current_cfg.enable_socks5_udp,
+            next.enable_socks5_udp == current_cfg.enable_socks5_udp,
             "cannot update network.enable_socks5_udp on a running proxy"
         );
+        Ok(())
+    }
+
+    pub async fn replace_config_state(&self, new_state: ConfigState) -> Result<()> {
+        let current_cfg = self.state.current_cfg().await?;
+        Self::validate_config_update(&current_cfg, &new_state.config)?;
         let config = self
             .state
             .local_binding_policy

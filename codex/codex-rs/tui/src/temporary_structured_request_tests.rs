@@ -10,7 +10,7 @@ use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::SandboxPolicy;
 use codex_app_server_protocol::ServerNotification;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnCompletedNotification;
@@ -23,8 +23,11 @@ use tempfile::tempdir;
 use tokio::sync::mpsc::unbounded_channel;
 
 fn agent_message_notification(turn_id: &str, text: &str) -> ServerNotification {
-    ServerNotification::ItemCompleted(ItemCompletedNotification {
-        item: ThreadItem::AgentMessage {
+    ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+        "thread-1".to_string(),
+        turn_id.to_string(),
+        ThreadItemPayload::AgentMessage {
+            moderation: None,
             id: "message-1".to_string(),
             text: text.to_string(),
             phase: None,
@@ -32,10 +35,9 @@ fn agent_message_notification(turn_id: &str, text: &str) -> ServerNotification {
             delivery: None,
             questions: None,
         },
-        thread_id: "thread-1".to_string(),
-        turn_id: turn_id.to_string(),
-        completed_at_ms: 0,
-    })
+        /*started_at_ms*/ None,
+        /*completed_at_ms*/ 0,
+    ))
 }
 
 fn turn_completed_notification(turn_id: &str, status: TurnStatus) -> ServerNotification {
@@ -90,7 +92,6 @@ async fn managed_workspace_default_respects_read_only_availability() -> color_ey
                 .permissions
                 .active_permission_profile()
                 .map(|profile| profile.id),
-            mcp_server_names: Vec::new(),
         };
         let client = crate::start_embedded_app_server(
             Default::default(),
@@ -191,7 +192,6 @@ async fn preserves_custom_permissions_and_disables_required_mcp_servers() -> col
             model_provider: config.model_provider_id.clone(),
             cwd: config.cwd.display().to_string(),
             active_permission_profile: Some("title-restricted".to_string()),
-            mcp_server_names: vec!["forbidden".to_string()],
         },
     )
     .await?;

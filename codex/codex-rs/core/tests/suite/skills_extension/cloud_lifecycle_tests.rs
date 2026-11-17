@@ -15,7 +15,7 @@ struct CloudTurnProvider {
 }
 
 impl SkillProvider for CloudTurnProvider {
-    fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog> {
+    fn list<'a>(&'a self, query: SkillListQuery<'a>) -> SkillProviderFuture<'a, SkillCatalog> {
         Box::pin(async move {
             self.lists.fetch_add(1, Ordering::SeqCst);
             *self.resource_key.lock().expect("resource key lock") = query
@@ -112,6 +112,8 @@ async fn cloud_skills_reuse_cache_and_invalidate_on_connection_or_auth_change() 
         SkillProviders::new().with_cloud_provider(provider.clone()),
         |_config: &Config| SkillsExtensionConfig {
             include_instructions: true,
+            catalog_deltas_enabled: false,
+            omit_descriptions: false,
             max_context_tokens: None,
             bundled_skills_enabled: false,
             cloud_skill_enabled: true,

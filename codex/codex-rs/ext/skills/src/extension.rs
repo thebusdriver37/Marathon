@@ -126,7 +126,9 @@ fn render_prepared_catalog(
         return RenderedCatalog::default();
     };
     record_catalog_render(extension_metrics, catalog_surface, budget, &rendered.report);
-    let warning_message = rendered.report.warning_message();
+    let warning_message = rendered
+        .report
+        .warning_message(/*catalog_deltas_enabled*/ false);
     let fragment = rendered.into_fragment(include_skills_usage_instructions);
     RenderedCatalog {
         fragment,
@@ -156,6 +158,7 @@ where
             input.thread_store.insert(SkillsThreadState::new(
                 (self.config_from_host)(input.config),
                 cloud_skills_available,
+                input.extension_metrics,
             ));
         })
     }
@@ -167,7 +170,7 @@ where
 {
     fn on_config_changed(
         &self,
-        _session_store: &ExtensionData,
+        session_store: &ExtensionData,
         thread_store: &ExtensionData,
         _previous_config: &C,
         new_config: &C,
@@ -177,7 +180,13 @@ where
             state.set_config(next_config);
         } else {
             let cloud_skills_available = self.providers.has_cloud_provider();
-            thread_store.insert(SkillsThreadState::new(next_config, cloud_skills_available));
+            thread_store.insert(SkillsThreadState::new(
+                next_config,
+                cloud_skills_available,
+                session_store
+                    .get::<SkillsSessionState>()
+                    .and_then(|state| state.extension_metrics.clone()),
+            ));
         }
     }
 }
@@ -204,7 +213,6 @@ where
                 .list_for_turn(SkillListQuery {
                     turn_id: thread_store.level_id().to_string(),
                     executor_roots: Vec::new(),
-                    resolved_executor_roots: Vec::new(),
                     host_snapshot: None,
                     include_host_skills: false,
                     include_bundled_skills: config.bundled_skills_enabled,
@@ -230,7 +238,8 @@ where
                 CatalogSurface::ThreadContext,
                 &catalog,
                 include_usage,
-                SkillCatalogRenderPolicy::ExtensionCompatible,
+                SkillCatalogRenderPolicy::EXTENSION_COMPATIBLE
+                    .with_omitted_descriptions(config.omit_descriptions),
                 skill_metadata_budget(/*context_window*/ None, config.max_context_tokens),
             );
             if let Some(message) = rendered.warning_message {
@@ -337,7 +346,7 @@ where
             let mcp_resources = session_store
                 .get::<SkillsSessionState>()
                 .and_then(|state| state.mcp_resources.clone());
-            let host_snapshot = turn_store.get::<HostSkillsSnapshot>();
+            let host_snapshot = HostSkillsSnapshot::for_step(input.step_store, turn_store);
             let host_catalog_in_world_state =
                 turn_store.get::<HostSkillsCatalogInWorldState>().is_some();
             let Some(step_state) = input.step_store.get::<SkillsStepState>() else {
@@ -348,7 +357,6 @@ where
             let query = SkillListQuery {
                 turn_id: input.turn_id.clone(),
                 executor_roots: Vec::new(),
-                resolved_executor_roots: Vec::new(),
                 host_snapshot: host_snapshot.clone(),
                 include_host_skills: host_skills.is_none() && !host_catalog_in_world_state,
                 include_bundled_skills: config.bundled_skills_enabled,
@@ -409,7 +417,8 @@ where
                     CatalogSurface::TurnInput,
                     &turn_catalog,
                     include_usage,
-                    SkillCatalogRenderPolicy::ExtensionCompatible,
+                    SkillCatalogRenderPolicy::EXTENSION_COMPATIBLE
+                        .with_omitted_descriptions(config.omit_descriptions),
                     metadata_budget,
                 );
                 if let Some(message) = rendered.warning_message {
@@ -530,7 +539,14 @@ impl<C> SkillsExtension<C> {
         let context = match entry.authority.kind {
             SkillSourceKind::Cloud => SkillReadContext::Cloud { mcp_resources },
             SkillSourceKind::Custom(_) => SkillReadContext::Custom { mcp_resources },
-            SkillSourceKind::Host => SkillReadContext::Host { host_snapshot },
+            SkillSourceKind::Host => SkillReadContext::Host {
+                host_snapshot,
+                accessors: input
+                    .environments
+                    .iter()
+                    .map(|environment| environment.fs)
+                    .collect(),
+            },
             SkillSourceKind::Executor => {
                 let fs = entry
                     .main_prompt

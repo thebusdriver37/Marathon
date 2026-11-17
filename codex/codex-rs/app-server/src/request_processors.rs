@@ -129,6 +129,7 @@ use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::MockExperimentalMethodResponse;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
+use codex_app_server_protocol::ModelProviderError;
 use codex_app_server_protocol::PermissionProfileListParams;
 use codex_app_server_protocol::PermissionProfileListResponse;
 use codex_app_server_protocol::PermissionProfileSummary;
@@ -172,7 +173,6 @@ use codex_app_server_protocol::RateLimitResetCreditStatus;
 use codex_app_server_protocol::RateLimitResetCreditsSummary;
 use codex_app_server_protocol::RateLimitResetType;
 use codex_app_server_protocol::RequestId;
-use codex_app_server_protocol::ReviewDelivery as ApiReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
@@ -180,7 +180,6 @@ use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::SendAddCreditsNudgeEmailParams;
 use codex_app_server_protocol::SendAddCreditsNudgeEmailResponse;
 use codex_app_server_protocol::ServerNotification;
-use codex_app_server_protocol::ServerRequestResolvedNotification;
 use codex_app_server_protocol::SkillSummary;
 use codex_app_server_protocol::SkillsConfigWriteParams;
 use codex_app_server_protocol::SkillsConfigWriteResponse;
@@ -229,8 +228,8 @@ use codex_app_server_protocol::ThreadIncrementElicitationParams;
 use codex_app_server_protocol::ThreadIncrementElicitationResponse;
 use codex_app_server_protocol::ThreadInjectItemsParams;
 use codex_app_server_protocol::ThreadInjectItemsResponse;
-use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadItemEntry;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_app_server_protocol::ThreadItemsReadParams;
@@ -444,6 +443,8 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
+use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::ConversationAudioParams;
 use codex_protocol::protocol::ConversationSpeechParams;
@@ -457,7 +458,6 @@ use codex_protocol::protocol::GitInfo as CoreGitInfo;
 use codex_protocol::protocol::McpAuthStatus as CoreMcpAuthStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RealtimeVoicesList;
-use codex_protocol::protocol::ReviewDelivery as CoreReviewDelivery;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget as CoreReviewTarget;
 use codex_protocol::protocol::SessionConfiguredEvent;
@@ -465,6 +465,7 @@ use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::TurnEnvironmentRequest;
 use codex_protocol::protocol::W3cTraceContext;
+#[cfg(test)]
 use codex_protocol::protocol::strip_user_message_prefix;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use codex_protocol::user_input::UserInput as CoreInputItem;
@@ -695,6 +696,25 @@ fn resolve_turn_environment_requests(
     Ok(Some(requests))
 }
 
+/// Project-local layers cannot define providers, so explicit selectors can use the startup map.
+fn config_for_provider(
+    startup: &Arc<Config>,
+    provider_id: &str,
+) -> Result<Arc<Config>, JSONRPCErrorError> {
+    if startup.model_provider_id == provider_id {
+        return Ok(Arc::clone(startup));
+    }
+    let provider = startup.model_providers.get(provider_id).ok_or_else(|| {
+        model_provider_error(&ModelProviderError::ModelProviderNotConfigured {
+            model_provider: provider_id.to_owned(),
+        })
+    })?;
+    let mut config = startup.as_ref().clone();
+    config.model_provider_id = provider_id.to_owned();
+    config.model_provider = provider.clone();
+    Ok(Arc::new(config))
+}
+
 fn resolve_runtime_workspace_roots(workspace_roots: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
     let mut resolved_roots = Vec::new();
     for root in workspace_roots {
@@ -721,7 +741,6 @@ use self::thread_resume_redaction::*;
 use self::thread_summary::*;
 
 pub(crate) use self::thread_lifecycle::populate_thread_turns_from_history;
-pub(crate) use self::thread_processor::thread_from_stored_thread;
 #[cfg(test)]
 pub(crate) use self::thread_summary::read_summary_from_rollout;
 #[cfg(test)]

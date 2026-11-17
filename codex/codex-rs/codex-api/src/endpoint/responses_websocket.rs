@@ -1,3 +1,4 @@
+use crate::RESPONSES_PATH;
 use crate::auth::SharedAuthProvider;
 use crate::common::ResponseEvent;
 use crate::common::ResponseInterrupt;
@@ -5,6 +6,10 @@ use crate::common::ResponseStream;
 use crate::common::ResponsesWsRequest;
 use crate::common::SafetyBufferingTreatment;
 use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
+use crate::endpoint::responses_websocket_probe::ResponsesWebsocketClose;
+use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbe;
+use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbeError;
+use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbeFailureStage;
 use crate::error::ApiError;
 use crate::provider::Provider;
 use crate::rate_limits::parse_rate_limit_event;
@@ -13,6 +18,7 @@ use crate::safety_buffering::treatment_from_headers;
 use crate::sse::ResponsesStreamEvent;
 use crate::sse::process_responses_event;
 use crate::telemetry::WebsocketTelemetry;
+use bytes::Bytes;
 use codex_client::TransportError;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::RetryAfter;
@@ -37,7 +43,11 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Response;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::Fragment;
+use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::Data;
 use tracing::Instrument;
 use tracing::Span;
 use tracing::debug;
@@ -50,6 +60,7 @@ use tungstenite::protocol::WebSocketConfig;
 use url::Url;
 
 struct WsStream {
+    routing_affinity: Option<codex_http_client::ChatGptRoutingAffinity>,
     tx_command: mpsc::Sender<WsCommand>,
     rx_message: mpsc::UnboundedReceiver<Result<Message, WsError>>,
     pump_task: tokio::task::JoinHandle<()>,
@@ -62,8 +73,39 @@ enum WsCommand {
     },
 }
 
+/// Send large Responses turns as one text message with backpressure between frames.
+async fn send_message(
+    socket: &mut (impl futures::Sink<Message, Error = WsError> + Unpin),
+    message: Message,
+) -> Result<(), WsError> {
+    const FRAGMENT_SIZE: usize = 1024 * 1024;
+
+    let Message::Text(text) = message else {
+        return socket.send(message).await;
+    };
+    if text.len() <= FRAGMENT_SIZE {
+        return socket.send(Message::Text(text)).await;
+    }
+
+    let mut data = Bytes::from(text);
+    let mut opcode = Data::Text;
+    while !data.is_empty() {
+        let payload = data.split_to(data.len().min(FRAGMENT_SIZE));
+        let fragment = if data.is_empty() {
+            Fragment::Final
+        } else {
+            Fragment::More
+        };
+        let frame = Frame::message_fragment(payload, opcode, fragment);
+        socket.send(Message::Frame(frame)).await?;
+        opcode = Data::Continue;
+    }
+    Ok(())
+}
+
 impl WsStream {
     fn new(inner: WebSocketConnection) -> Self {
+        let routing_affinity = inner.routing_affinity().cloned();
         let (tx_command, mut rx_command) = mpsc::channel::<WsCommand>(32);
         let (tx_message, rx_message) = mpsc::unbounded_channel::<Result<Message, WsError>>();
 
@@ -77,7 +119,7 @@ impl WsStream {
                         };
                         match command {
                             WsCommand::Send { message, tx_result } => {
-                                let result = inner.send(message).await;
+                                let result = send_message(&mut inner, message).await;
                                 let should_break = result.is_err();
                                 let _ = tx_result.send(result);
                                 if should_break {
@@ -121,6 +163,7 @@ impl WsStream {
         });
 
         Self {
+            routing_affinity,
             tx_command,
             rx_message,
             pump_task,
@@ -188,6 +231,7 @@ struct ResponsesWebsocketTimingLogContext {
 }
 
 pub struct ResponsesWebsocketConnection {
+    routing_affinity: Option<codex_http_client::ChatGptRoutingAffinity>,
     stream: Arc<Mutex<Option<WsStream>>>,
     // TODO (pakrym): is this the right place for timeout?
     idle_timeout: Duration,
@@ -210,18 +254,20 @@ impl std::fmt::Debug for ResponsesWebsocketConnection {
 
 impl ResponsesWebsocketConnection {
     fn new(
-        stream: WsStream,
+        mut stream: WsStream,
         idle_timeout: Duration,
         server_reasoning_included: bool,
         server_model: Option<String>,
         telemetry: Option<Arc<dyn WebsocketTelemetry>>,
     ) -> Self {
+        let routing_affinity = stream.routing_affinity.take();
         Self {
             stream: Arc::new(Mutex::new(Some(stream))),
             idle_timeout,
             server_reasoning_included,
             server_model,
             telemetry,
+            routing_affinity,
         }
     }
 
@@ -326,54 +372,70 @@ impl ResponsesWebsocketConnection {
                 if tx_event.is_closed() {
                     return;
                 }
+                let Some(mut ws_stream) = guard.take() else {
+                    let _ = tx_event
+                        .send(Err(ApiError::Stream(
+                            "websocket connection is closed".to_string(),
+                        )))
+                        .await;
+                    return;
+                };
                 let mut completion = None;
                 let result = {
-                    let Some(ws_stream) = guard.as_mut() else {
-                        let _ = tx_event
-                            .send(Err(ApiError::Stream(
-                                "websocket connection is closed".to_string(),
-                            )))
-                            .await;
-                        return;
-                    };
+                    let response = run_websocket_response_stream(
+                        &mut ws_stream,
+                        tx_event.clone(),
+                        request_text,
+                        idle_timeout,
+                        telemetry,
+                        turn_state.as_deref(),
+                        &timing_log_context,
+                        interrupt.clone(),
+                        &mut completion,
+                    );
+                    tokio::pin!(response);
 
                     tokio::select! {
                         biased;
-                        result = run_websocket_response_stream(
-                            ws_stream,
-                            tx_event.clone(),
-                            request_text,
-                            idle_timeout,
-                            telemetry,
-                            turn_state.as_deref(),
-                            &timing_log_context,
-                            interrupt.clone(),
-                            &mut completion,
-                        ) => result,
+                        result = &mut response => result,
                         () = &mut interrupt_timeout => Err(ApiError::Stream(
                             "timed out draining interrupted response".into(),
                         )),
-                        _ = tx_event.closed() => Err(ApiError::Stream(
-                            "response event consumer dropped".to_string(),
-                        )),
+                        () = tx_event.closed() => {
+                            // Release the lock so later requests can open a new connection
+                            // while this task finishes cleanup on the detached socket.
+                            drop(guard);
+                            if matches!(
+                                interrupt.clone().now_or_never(),
+                                Some(ResponseInterrupt::Cancel { .. })
+                            ) {
+                                tokio::select! {
+                                    _ = &mut response => {}
+                                    () = &mut interrupt_timeout => {}
+                                }
+                            }
+                            return;
+                        }
                     }
                 };
 
                 if let Err(err) = result {
                     // A terminal stream error should reach the caller immediately. Waiting for a
                     // graceful close handshake here can stall indefinitely and mask the error.
-                    let failed_stream = guard.take();
                     drop(guard);
-                    drop(failed_stream);
+                    drop(ws_stream);
                     // Failed cancellation retires the socket while preserving any received
                     // completion and its usage for the abandoned classifier's cleanup.
                     let event = completion.map_or_else(|| Err(err), Ok);
                     let _ = tx_event.send(event).await;
-                } else if let Some(completed) = completion {
-                    // The handshake is finished. Consumer backpressure must not let the
-                    // interruption deadline discard completion or its usage accounting.
-                    drop(guard);
-                    let _ = tx_event.send(Ok(completed)).await;
+                } else {
+                    *guard = Some(ws_stream);
+                    if let Some(completed) = completion {
+                        // The handshake is finished. Consumer backpressure must not let the
+                        // interruption deadline discard completion or its usage accounting.
+                        drop(guard);
+                        let _ = tx_event.send(Ok(completed)).await;
+                    }
                 }
             }
             .instrument(current_span),
@@ -382,6 +444,7 @@ impl ResponsesWebsocketConnection {
         Ok(ResponseStream {
             rx_event,
             upstream_request_id: None,
+            routing_affinity: self.routing_affinity.clone(),
             interrupt: Some(tx_interrupt),
         })
     }
@@ -393,30 +456,6 @@ mod connector;
 pub struct ResponsesWebsocketClient {
     provider: Provider,
     auth: SharedAuthProvider,
-}
-
-/// Close frame information captured by a handshake probe.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResponsesWebsocketClose {
-    /// WebSocket close code returned by the server.
-    pub code: String,
-    /// Human-readable close reason returned by the server.
-    pub reason: String,
-}
-
-/// Result of a handshake-only Responses WebSocket probe.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResponsesWebsocketProbe {
-    /// Redacted by callers before displaying or serializing support reports.
-    pub url: String,
-    /// HTTP status returned by the successful WebSocket upgrade.
-    pub status: StatusCode,
-    /// Whether the server reported reasoning support in the upgrade response.
-    pub reasoning_included: bool,
-    /// Whether the server returned a server-selected model in the upgrade response.
-    pub server_model_present: bool,
-    /// Close frame received immediately after upgrade, when one arrives quickly.
-    pub immediate_close: Option<ResponsesWebsocketClose>,
 }
 
 impl ResponsesWebsocketClient {
@@ -458,36 +497,67 @@ impl ResponsesWebsocketClient {
         extra_headers: HeaderMap,
         default_headers: HeaderMap,
         immediate_close_timeout: Duration,
-    ) -> Result<ResponsesWebsocketProbe, ApiError> {
+    ) -> Result<ResponsesWebsocketProbe, ResponsesWebsocketProbeError> {
         let ws_url = self
             .provider
-            .websocket_url_for_path("/responses")
-            .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
+            .websocket_url_for_path(RESPONSES_PATH)
+            .map_err(|err| {
+                ResponsesWebsocketProbeError::before_upgrade(
+                    ApiError::Stream(format!("failed to build websocket URL: {err}")),
+                    ResponsesWebsocketProbeFailureStage::Unknown,
+                )
+            })?;
 
-        let mut headers =
-            merge_request_headers(&self.provider.headers, extra_headers, default_headers);
-        self.auth.add_auth_headers(&mut headers)?;
+        let headers = merge_request_headers(&self.provider.headers, extra_headers, default_headers);
+        let headers = self.auth.apply_auth_headers(headers).await.map_err(|err| {
+            ResponsesWebsocketProbeError::before_upgrade(
+                err.into(),
+                ResponsesWebsocketProbeFailureStage::Unknown,
+            )
+        })?;
 
-        let connector = WebSocketConnector::new(http_client_factory)
-            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
-        let (mut stream, status, reasoning_included, server_model) = connect_websocket(
+        let connector = WebSocketConnector::new(http_client_factory).map_err(|err| {
+            ResponsesWebsocketProbeError::before_upgrade(
+                ApiError::Stream(format!("failed to configure websocket TLS: {err}")),
+                ResponsesWebsocketProbeFailureStage::Tls,
+            )
+        })?;
+        let (mut stream, response, reasoning_included, server_model) = connect_websocket(
             ws_url.clone(),
             headers,
             &connector,
             /*turn_state*/ None,
         )
         .await?;
+        let status = response.status();
+        let mut headers = HeaderMap::new();
+        for name in [
+            "x-request-id",
+            "x-oai-request-id",
+            "cf-ray",
+            "x-ms-request-id",
+        ] {
+            for value in response.headers().get_all(name) {
+                headers.append(name, value.clone());
+            }
+        }
         let immediate_close = tokio::time::timeout(immediate_close_timeout, stream.next())
             .await
             .ok()
             .flatten()
             .transpose()
-            .map_err(map_ws_stream_error)?
+            .map_err(|error| ResponsesWebsocketProbeError {
+                error: Box::new(map_ws_stream_error(error)),
+                stage: ResponsesWebsocketProbeFailureStage::Unknown,
+                status: Some(status),
+                headers: Some(headers.clone()),
+            })?
             .and_then(immediate_close_from_message);
 
         Ok(ResponsesWebsocketProbe {
             url: ws_url.to_string(),
             status,
+            headers,
             reasoning_included,
             server_model_present: server_model.is_some(),
             immediate_close,
@@ -499,7 +569,13 @@ fn immediate_close_from_message(message: Message) -> Option<ResponsesWebsocketCl
     let Message::Close(frame) = message else {
         return None;
     };
-    frame.map(close_frame_to_probe)
+    Some(match frame {
+        Some(frame) => close_frame_to_probe(frame),
+        None => ResponsesWebsocketClose {
+            code: "1005".to_string(),
+            reason: String::new(),
+        },
+    })
 }
 
 fn close_frame_to_probe(frame: CloseFrame) -> ResponsesWebsocketClose {
@@ -529,25 +605,46 @@ async fn connect_websocket(
     headers: HeaderMap,
     connector: &WebSocketConnector,
     turn_state: Option<Arc<OnceLock<String>>>,
-) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
-    info!("connecting to websocket: {url}");
+) -> Result<(WsStream, Response, bool, Option<String>), ResponsesWebsocketProbeError> {
+    info!("connecting to Responses WebSocket");
 
-    let mut request = url
-        .as_str()
-        .into_client_request()
-        .map_err(|err| ApiError::Stream(format!("failed to build websocket request: {err}")))?;
+    let mut request = url.as_str().into_client_request().map_err(|err| {
+        ResponsesWebsocketProbeError::before_upgrade(
+            ApiError::Stream(format!("failed to build websocket request: {err}")),
+            ResponsesWebsocketProbeFailureStage::Unknown,
+        )
+    })?;
     request.headers_mut().extend(headers);
 
     let response = connector.connect(request, websocket_config()).await;
 
     let (stream, response) = match response {
         Ok((stream, response)) => {
-            info!("successfully connected to websocket: {url}");
+            info!(
+                status = response.status().as_u16(),
+                "successfully connected to Responses WebSocket"
+            );
             (stream, response)
         }
         Err(err) => {
-            error!("failed to connect to websocket: {err}, url: {url}");
-            return Err(map_ws_error(err, &url));
+            // Tokio-rustls wraps certificate failures in I/O errors.
+            let is_tls = match &err {
+                WsError::Tls(_) => true,
+                WsError::Io(error) => {
+                    matches!(error.get_ref(), Some(source) if source.is::<rustls::Error>())
+                }
+                _ => false,
+            };
+            let stage = if is_tls {
+                ResponsesWebsocketProbeFailureStage::Tls
+            } else {
+                ResponsesWebsocketProbeFailureStage::Unknown
+            };
+            error!(?stage, "failed to connect to Responses WebSocket");
+            return Err(ResponsesWebsocketProbeError::before_upgrade(
+                map_ws_error(err, &url),
+                stage,
+            ));
         }
     };
 
@@ -567,7 +664,7 @@ async fn connect_websocket(
     }
     Ok((
         WsStream::new(stream),
-        response.status(),
+        response,
         reasoning_included,
         server_model,
     ))
@@ -705,6 +802,18 @@ struct InterruptAcknowledgement {
     response_id: String,
 }
 
+fn is_websocket_receive_failure(
+    response: &Result<Option<Result<Message, WsError>>, ApiError>,
+) -> bool {
+    match response {
+        Ok(Some(Ok(message))) => match message {
+            Message::Text(_) | Message::Ping(_) | Message::Pong(_) => false,
+            Message::Binary(_) | Message::Close(_) | Message::Frame(_) => true,
+        },
+        Ok(Some(Err(_))) | Ok(None) | Err(_) => true,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_websocket_response_stream(
     ws_stream: &mut WsStream,
@@ -764,8 +873,11 @@ async fn run_websocket_response_stream(
                 continue;
             }
         };
-        if let Some(t) = telemetry.as_ref() {
-            t.on_ws_event(&response, poll_start.elapsed());
+        let poll_duration = poll_start.elapsed();
+        if let Some(telemetry) = &telemetry
+            && is_websocket_receive_failure(&response)
+        {
+            telemetry.on_ws_receive_failure(poll_duration);
         }
         let message = match response {
             Ok(Some(Ok(msg))) => msg,
@@ -784,14 +896,21 @@ async fn run_websocket_response_stream(
 
         match message {
             Message::Text(text) => {
-                if let Some(wrapped_error) = parse_wrapped_websocket_error_event(&text)
+                let event = serde_json::from_str::<ResponsesStreamEvent>(&text);
+                let kind = event.as_ref().ok().map(ResponsesStreamEvent::kind);
+                if let Some(t) = telemetry.as_ref() {
+                    t.on_ws_text_event(&text, kind, poll_duration);
+                }
+                // A wrapped error can still be valid when an unrelated stream field is malformed.
+                if matches!(kind, Some("error") | None)
+                    && let Some(wrapped_error) = parse_wrapped_websocket_error_event(&text)
                     && let Some(error) =
                         map_wrapped_websocket_error_event(wrapped_error, text.to_string())
                 {
                     return Err(error);
                 }
 
-                let event = match serde_json::from_str::<ResponsesStreamEvent>(&text) {
+                let event = match event {
                     Ok(event) => event,
                     Err(err) => {
                         debug!("failed to parse websocket event: {err}, data: {text}");
@@ -851,10 +970,9 @@ async fn run_websocket_response_stream(
                 {
                     let _ = turn_state.set(response_turn_state);
                 }
-                let model_verifications = event.model_verifications();
-                let turn_moderation_metadata = event.turn_moderation_metadata();
                 let safety_buffering =
                     safety_buffering_for_event(&event, &mut safety_buffering_treatment);
+                let metadata_events = event.metadata_events(safety_buffering);
                 if event.kind() == "codex.rate_limits" {
                     if let Some(snapshot) = parse_rate_limit_event(&text) {
                         let _ = tx_event.send(Ok(ResponseEvent::RateLimits(snapshot))).await;
@@ -878,35 +996,8 @@ async fn run_websocket_response_stream(
                         .await;
                     last_server_model = Some(model);
                 }
-                if let Some(verifications) = model_verifications
-                    && tx_event
-                        .send(Ok(ResponseEvent::ModelVerifications(verifications)))
-                        .await
-                        .is_err()
-                {
-                    return Err(ApiError::Stream(
-                        "response event consumer dropped".to_string(),
-                    ));
-                }
-                if let Some(metadata) = turn_moderation_metadata
-                    && tx_event
-                        .send(Ok(ResponseEvent::TurnModerationMetadata(metadata)))
-                        .await
-                        .is_err()
-                {
-                    return Err(ApiError::Stream(
-                        "response event consumer dropped".to_string(),
-                    ));
-                }
-                if let Some(buffering) = safety_buffering
-                    && tx_event
-                        .send(Ok(ResponseEvent::SafetyBuffering(buffering)))
-                        .await
-                        .is_err()
-                {
-                    return Err(ApiError::Stream(
-                        "response event consumer dropped".to_string(),
-                    ));
+                for metadata_event in metadata_events {
+                    let _ = tx_event.send(Ok(metadata_event)).await;
                 }
                 match event {
                     Ok(Some(event)) => {
@@ -1082,6 +1173,9 @@ mod tests {
             include: vec!["reasoning.encrypted_content".to_string()],
             service_tier: Some("priority".to_string()),
             prompt_cache_key: Some("cache-key".to_string()),
+            prompt_cache_options: Some(crate::PromptCacheOptions {
+                ttl: codex_protocol::turn_input::PromptCacheTtl::TwelveHours,
+            }),
             text: None,
             access_programs: Some(
                 codex_protocol::turn_input::CyberAccessProgram::DaybreakBlue.into(),
@@ -1111,6 +1205,38 @@ mod tests {
             serde_json::from_str::<Value>(&request_text).expect("parse websocket request");
 
         assert_eq!(wire_payload, expected_payload);
+    }
+
+    #[tokio::test]
+    async fn large_turn_is_one_text_message_in_bounded_frames() {
+        const MIB: usize = 1024 * 1024;
+        let (tx, mut frames) = futures::channel::mpsc::unbounded();
+        let mut socket = tx.sink_map_err(|_| WsError::ConnectionClosed);
+
+        let at_limit = Message::text("a".repeat(MIB));
+        send_message(&mut socket, at_limit.clone()).await.unwrap();
+        assert_eq!(frames.next().await, Some(at_limit));
+
+        let mut text = "a".repeat(MIB - 1);
+        text.push('🌱');
+        text.push_str(&"b".repeat(MIB));
+        send_message(&mut socket, Message::text(text.clone()))
+            .await
+            .unwrap();
+        drop(socket);
+        for (i, expected) in text.as_bytes().chunks(MIB).enumerate() {
+            let Some(Message::Frame(frame)) = frames.next().await else {
+                panic!("expected a data frame");
+            };
+            let opcode = if i == 0 { Data::Text } else { Data::Continue };
+            assert_eq!(
+                frame.header().opcode,
+                tokio_tungstenite::tungstenite::protocol::frame::coding::OpCode::Data(opcode)
+            );
+            assert_eq!(frame.header().is_final, (i + 1) * MIB >= text.len());
+            assert_eq!(frame.payload(), expected);
+        }
+        assert!(frames.next().await.is_none());
     }
 
     #[test]
@@ -1264,6 +1390,32 @@ mod tests {
         let body = body.expect("expected body");
         assert!(body.contains("invalid_request_error"));
         assert!(body.contains("Model does not support image inputs"));
+    }
+
+    #[test]
+    fn wrapped_context_length_error_respects_http_status() {
+        for status in [400, 503] {
+            let payload = json!({
+                "type": "error",
+                "status": status,
+                "error": {"code": "context_length_exceeded"}
+            })
+            .to_string();
+            let event = parse_wrapped_websocket_error_event(&payload).unwrap();
+            let error = map_wrapped_websocket_error_event(event, payload).unwrap();
+            let error = crate::api_bridge::map_api_error(error);
+            assert_eq!(
+                matches!(
+                    error.details(),
+                    codex_protocol::error::CodexErrorDetails::ContextWindowExceeded
+                ),
+                status == 400
+            );
+            assert_eq!(
+                error.retry_delay(/*retry_count*/ 1).is_some(),
+                status == 503
+            );
+        }
     }
 
     #[test]

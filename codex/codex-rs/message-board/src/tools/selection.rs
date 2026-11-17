@@ -5,6 +5,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageBoardTool {
     CreateChannel,
+    /// Creates a channel or updates its description, without subscriptions or notifications.
+    UpsertChannel,
     GetChannels,
     ListThreads,
     SearchPosts,
@@ -19,6 +21,14 @@ pub enum MessageBoardTool {
 }
 
 impl MessageBoardTool {
+    pub(super) const READ_ONLY: [Self; 5] = [
+        Self::GetChannels,
+        Self::ListThreads,
+        Self::SearchPosts,
+        Self::ReadThread,
+        Self::ReadPost,
+    ];
+
     /// Existing agent discussion tools, in their original registration order.
     pub const DISCUSSION: [Self; 9] = [
         Self::CreateChannel,
@@ -32,9 +42,18 @@ impl MessageBoardTool {
         Self::Post,
     ];
 
+    /// Bundled schema for discovery before a caller has been bound to a board.
+    pub fn spec(self) -> codex_tools::ToolSpec {
+        super::spec::tool(
+            self, /*namespace*/ None, /*namespace_description*/ "",
+            /*description_override*/ None,
+        )
+    }
+
     pub(super) fn name(self) -> &'static str {
         match self {
             Self::CreateChannel => "create_channel",
+            Self::UpsertChannel => "upsert_channel",
             Self::GetChannels => "get_channels",
             Self::ListThreads => "list_threads",
             Self::SearchPosts => "search_posts",

@@ -1,6 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/status_and_layout.rs
-assertion_line: 3121
+assertion_line: 3386
 expression: normalized_backend_snapshot(terminal.backend())
 ---
 "                                                                        "
@@ -8,3 +8,4 @@ expression: normalized_backend_snapshot(terminal.backend())
 "› Ask Marathon to do anything                                           "
 "                                                                        "
 "  Working · 105.0 tok/s                                                 "
+"  ? for shortcuts                                                       "

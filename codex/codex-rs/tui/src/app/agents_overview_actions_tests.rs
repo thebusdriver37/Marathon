@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::agents_overview_discovery::list_pinned_threads;
+use crate::app::tests::test_thread_session;
 use crate::app_event::AgentsOverviewAction;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::RequestId;
@@ -29,12 +30,21 @@ async fn pin_action_updates_shared_section_state() -> Result<()> {
             AppEvent::ToggleAgentsOverviewPin { thread_id, pinned },
         ))
         .await?;
-        assert!(app.agents_overview.pending_pin_change.is_some());
-        let completed = rx.recv().await.expect("pin request completes");
-        assert!(matches!(
-            &completed,
-            AppEvent::AgentsOverviewPinToggled { .. }
-        ));
+        let pending = app
+            .agents_overview
+            .pending_pin_change
+            .expect("pin request started");
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let event = rx.recv().await.expect("pin request completes");
+                if let AppEvent::AgentsOverviewPinToggled { request_id, .. } = &event
+                    && *request_id == pending
+                {
+                    return event;
+                }
+            }
+        })
+        .await?;
         app.agents_overview
             .refresh_notifications
             .insert(thread_id, Vec::new());
@@ -48,12 +58,126 @@ async fn pin_action_updates_shared_section_state() -> Result<()> {
         assert_eq!(
             threads
                 .iter()
-                .any(|thread| thread.id == started.session.thread_id.to_string()),
+                .any(|(thread, _)| thread.id == started.session.thread_id.to_string()),
             pinned
         );
     }
 
     app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cloud_archive_preserves_attached_child_and_other_tasks() -> Result<()> {
+    use codex_app_server_client::AppServerClient;
+    use codex_app_server_client::CloudClient;
+    use codex_app_server_client::CloudOperation;
+    use serde_json::json;
+
+    let mut app = make_test_app().await;
+    app.app_server_target = AppServerTarget::Cloud;
+    let parent = ThreadId::new();
+    let child = ThreadId::new();
+    let other = ThreadId::new();
+    let threads = HashMap::from([
+        (
+            parent,
+            Some(overview_thread(
+                parent,
+                /*parent_thread_id*/ None,
+                "Cloud parent",
+                ThreadStatus::Idle,
+            )),
+        ),
+        (
+            child,
+            Some(overview_thread(
+                child,
+                Some(parent),
+                "Cloud child",
+                ThreadStatus::Active {
+                    active_flags: Vec::new(),
+                },
+            )),
+        ),
+        (
+            other,
+            Some(overview_thread(
+                other,
+                /*parent_thread_id*/ None,
+                "Other task",
+                ThreadStatus::Idle,
+            )),
+        ),
+    ]);
+    app.agents_overview.threads = threads.clone();
+    app.primary_thread_id = Some(child);
+    app.active_thread_id = Some(child);
+    app.chat_widget
+        .handle_thread_session(test_thread_session(child, app.config.cwd.to_path_buf()));
+    app.chat_widget
+        .apply_external_edit("Keep child draft".into());
+    let draft = app.chat_widget.capture_thread_input_state();
+    crate::chatwidget::activate_voice_for_thread(&mut app.chat_widget, child);
+
+    app.confirm_agents_overview_action(parent, AgentsOverviewAction::Archive);
+    insta::assert_snapshot!(render_bottom_popup(&app.chat_widget, /*width*/ 80), @"
+          Archive “Cloud parent”?
+    › Ke  This stops any running work in this task and archives it. Child
+          agents stay unchanged. Its history can be restored from the resume
+      gp  picker.
+
+
+        › 1. Cancel
+          2. Archive task
+
+          enter select · esc back
+    ");
+    app.chat_widget.handle_key_event(KeyCode::Esc.into());
+
+    let (client, mut commands, _events) = CloudClient::channel(/*capacity*/ 1);
+    let mut session = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        AppServerClient::Cloud(client),
+        crate::app_server_session::ThreadParamsMode::Cloud,
+    );
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.pause_events();
+    let (result, ()) = tokio::join!(
+        Box::pin(app.run_agents_overview_action(
+            &mut tui,
+            &mut session,
+            parent,
+            AgentsOverviewAction::Archive
+        )),
+        async {
+            let command = commands.recv().await.expect("archive request");
+            let CloudOperation::Request(request) = command.operation else {
+                panic!("expected archive request");
+            };
+            assert!(
+                matches!(*request, ClientRequest::ThreadArchive { params, .. } if params.thread_id == parent.to_string())
+            );
+            command.response.send(Ok(Ok(json!({})))).unwrap();
+        },
+    );
+    result?;
+    let mut expected = threads;
+    expected.remove(&parent);
+    assert_eq!(app.agents_overview.threads, expected);
+    assert_eq!(
+        (
+            app.primary_thread_id,
+            app.current_displayed_thread_id(),
+            app.chat_widget.thread_id()
+        ),
+        (Some(child), Some(child), Some(child))
+    );
+    assert_eq!(app.chat_widget.capture_thread_input_state(), draft);
+    assert_eq!(app.voice_owner_thread_id(), Some(child));
+    if let Some(refresh) = app.agents_overview.refresh_task.take() {
+        refresh.abort();
+    }
     Ok(())
 }
 
@@ -128,9 +252,11 @@ async fn lifecycle_shortcuts_target_filtered_task_in_any_state() {
         );
         view.handle_key_event(KeyCode::Esc.into());
         view.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        for character in "Target".chars() {
-            view.handle_key_event(KeyCode::Char(character).into());
-        }
+        view.handle_paste("Target".into());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::SearchAgentsOverview(..))
+        ));
         for (key, expected) in [
             (5, AgentsOverviewAction::Archive),
             (6, AgentsOverviewAction::Delete),
@@ -481,8 +607,8 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
             app.agents_overview.visible_thread_ids = view.thread_ids();
             app.chat_widget.show_bottom_pane_view(Box::new(view));
             let expected = match (grouping, filtered) {
-                // The preceding filtered case retains Other 2; rediscovered tasks append.
-                (AgentsOverviewGrouping::Status, false) => vec![3, 1, 4, 2],
+                // Status displays tasks newest first: 4, 3, 2, 1.
+                (AgentsOverviewGrouping::Status, false) => vec![3, 2, 1, 4],
                 (AgentsOverviewGrouping::Status, true) => vec![3, 1, 4],
                 (
                     AgentsOverviewGrouping::Project
@@ -654,7 +780,8 @@ async fn hidden_task_stays_hidden_through_activity_and_seed_until_explicit_resum
         &app_server,
         request_id,
         Ok(AgentsOverviewThreadRefresh {
-            threads: HashMap::from([(id, Some(thread.clone()))]),
+            cleared_unread: Vec::new(),
+            threads: HashMap::from([(id, Some((thread.clone(), false, None)))]),
             last_messages: HashMap::new(),
             recent_seed_complete: true,
             discovery: None,
@@ -935,7 +1062,11 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             &app_server,
             request_id,
             Ok(AgentsOverviewThreadRefresh {
-                threads: stale_threads,
+                cleared_unread: Vec::new(),
+                threads: stale_threads
+                    .into_iter()
+                    .map(|(id, thread)| (id, thread.map(|thread| (thread, false, None))))
+                    .collect(),
                 last_messages: HashMap::new(),
                 recent_seed_complete: true,
                 discovery: None,
@@ -1038,6 +1169,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             .send(AppEvent::AgentsOverviewThreadsLoaded {
                 request_id,
                 result: Ok(AgentsOverviewThreadRefresh {
+                    cleared_unread: Vec::new(),
                     threads: HashMap::new(),
                     last_messages: HashMap::new(),
                     recent_seed_complete: true,
@@ -1111,6 +1243,12 @@ async fn fork_shortcut_respects_metadata_editing() {
     for editor in ['r', '/'] {
         view.handle_key_event(KeyCode::Char(editor).into());
         view.handle_key_event(KeyCode::Char('f').into());
+        if editor == '/' {
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(AppEvent::SearchAgentsOverview(..))
+            ));
+        }
         assert!(rx.try_recv().is_err());
         view.handle_key_event(KeyCode::Esc.into());
     }

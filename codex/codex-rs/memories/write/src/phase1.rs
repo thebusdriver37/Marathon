@@ -12,7 +12,6 @@ use codex_config::types::MemoriesConfig;
 use codex_core::Prompt;
 use codex_core::config::Config;
 use codex_protocol::MemoryVersion;
-use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -292,7 +291,7 @@ mod job {
             MemoryVersion::V1 => vec![ResponseItem::Message {
                 status: None,
                 encrypted_content: None,
-                id: Some(ResponseItemId::new("msg")),
+                id: Some(context.item_id_generator()("msg")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: input_text }],
                 phase: None,
@@ -405,7 +404,8 @@ mod job {
                 RolloutItem::InterAgentCommunication(communication) => {
                     Some(communication.to_model_input_item())
                 }
-                RolloutItem::SessionMeta(_)
+                RolloutItem::DynamicToolsUpdated { .. }
+                | RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)

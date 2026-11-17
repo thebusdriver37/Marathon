@@ -125,6 +125,22 @@ impl PersistContext {
     }
 }
 
+/// A saved Daybreak choice staged for a thread before its stored row is materialized.
+pub struct PendingDaybreakPreference(Option<bool>);
+
+impl PendingDaybreakPreference {
+    /// Read staging before the stored row: materialization can consume the staged metadata.
+    pub async fn read(store: &dyn ThreadStore, thread_id: ThreadId) -> ThreadStoreResult<Self> {
+        let pending = store.read_pending_thread_metadata(thread_id).await?;
+        Ok(Self(pending.and_then(|patch| patch.daybreak_enabled)))
+    }
+
+    /// A stored choice, including explicit Off, takes precedence over the staged snapshot.
+    pub fn resolve(&self, stored: Option<bool>) -> Option<bool> {
+        stored.or(self.0)
+    }
+}
+
 /// Storage-neutral thread persistence boundary.
 pub trait ThreadStore: Any + Send + Sync {
     /// Return this store as [`Any`] for implementation-owned escape hatches.
@@ -253,6 +269,23 @@ pub trait ThreadStore: Any + Send + Sync {
         &self,
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredThreadHistory>;
+
+    /// Captures a complete tail, optionally reading originals after a saved position.
+    /// Local storage uses one reader for the cutoff and records; compressed rollouts
+    /// are decoded once per call. It supports append-only paginated roots;
+    /// other histories and backends must fail explicitly rather than omit originals.
+    /// Callers flush pending writes before capturing a boundary and own progress.
+    fn read_original_history(
+        &self,
+        _thread_id: ThreadId,
+        _request: crate::OriginalHistoryRequest,
+    ) -> ThreadStoreFuture<'_, crate::OriginalHistoryRead> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "read_original_history",
+            })
+        })
+    }
 
     /// Loads the persisted rollout items needed to reconstruct the latest model-visible context.
     ///
@@ -618,6 +651,44 @@ pub trait ThreadStore: Any + Send + Sync {
 
     /// Unarchives a thread and returns its updated metadata.
     fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread>;
+
+    /// Restores threads in order, returning the first thread's metadata and restored ids.
+    ///
+    /// The requested thread must restore successfully; active descendants are skipped and
+    /// descendant failures are best effort. Stores can share rollout discovery work.
+    fn unarchive_threads(
+        &self,
+        params: ArchiveThreadParams,
+        descendant_thread_ids: Vec<ThreadId>,
+    ) -> ThreadStoreFuture<'_, (StoredThread, Vec<ThreadId>)> {
+        Box::pin(async move {
+            let thread_id = params.thread_id;
+            let root = self.unarchive_thread(params).await?;
+            let mut restored = vec![thread_id];
+            for thread_id in descendant_thread_ids {
+                let result = async {
+                    let thread = self
+                        .read_thread(ReadThreadParams {
+                            thread_id,
+                            include_archived: true,
+                            include_history: false,
+                        })
+                        .await?;
+                    if thread.archived_at.is_some() {
+                        self.unarchive_thread(ArchiveThreadParams { thread_id })
+                            .await?;
+                        restored.push(thread_id);
+                    }
+                    Ok::<_, ThreadStoreError>(())
+                }
+                .await;
+                if let Err(err) = result {
+                    tracing::warn!("failed to unarchive thread {thread_id}: {err}");
+                }
+            }
+            Ok((root, restored))
+        })
+    }
 
     /// Deletes a thread's persisted rollout data and associated metadata.
     /// Success includes cleanup of associated persisted state; callers must not repeat it.

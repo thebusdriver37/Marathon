@@ -37,7 +37,7 @@ pub fn config_server_bundle_loader(
                 codex_home,
                 CLOUD_CONFIG_BUNDLE_TIMEOUT,
             );
-            crate::bundle_loader::cloud_config_bundle_loader_for_service(service).0
+            crate::bundle_loader::managed_config_bundle_loader_for_service(service).0
         }
         Err(error) => CloudConfigBundleLoader::new(std::future::ready(Err(error))),
     }
@@ -191,13 +191,15 @@ impl BundleSource for ConfigServerSource {
             });
         }
         *identity = credentials.authorization_id;
-        fetch_bundle(
-            &self
-                .client
-                .clone()
-                .with_bearer_token(credentials.access_token),
-        )
-        .await
+        let client = self
+            .client
+            .clone()
+            .with_bearer_token(credentials.access_token)
+            .map_err(|_| BundleRequestError::Fatal {
+                error: auth_failure(),
+                metric_reason: Some("auth"),
+            })?;
+        fetch_bundle(&client).await
     }
 
     async fn recover_auth(

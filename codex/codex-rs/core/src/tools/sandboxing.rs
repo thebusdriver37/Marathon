@@ -14,17 +14,21 @@ use crate::tools::hook_names::HookToolName;
 use crate::tools::network_approval::NetworkApprovalSpec;
 use codex_file_system::FileSystemSandboxContext;
 use codex_file_system::WindowsSandboxSelection;
+use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::CodexErr;
+use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
 pub(crate) use codex_protocol::sandbox::SandboxOverride;
 use codex_sandboxing::SandboxCommand;
+use codex_sandboxing::SandboxExecRequest;
 use codex_sandboxing::SandboxManager;
+use codex_sandboxing::SandboxSelection;
 use codex_sandboxing::SandboxTransformRequest;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::SandboxablePreference;
@@ -129,10 +133,11 @@ pub(crate) use super::approvals::ApprovalAction;
 pub(crate) struct PermissionRequestPayload {
     pub tool_name: HookToolName,
     pub tool_input: serde_json::Value,
+    pub tool_cwd: Option<PathUri>,
 }
 
 impl PermissionRequestPayload {
-    pub(crate) fn bash(command: String, description: Option<String>) -> Self {
+    pub(crate) fn bash(command: String, description: Option<String>, cwd: PathUri) -> Self {
         let mut tool_input = serde_json::Map::new();
         tool_input.insert("command".to_string(), serde_json::Value::String(command));
         if let Some(description) = description {
@@ -145,6 +150,7 @@ impl PermissionRequestPayload {
         Self {
             tool_name: HookToolName::bash(),
             tool_input: serde_json::Value::Object(tool_input),
+            tool_cwd: Some(cwd),
         }
     }
 }
@@ -168,6 +174,8 @@ pub(crate) enum ExecApprovalRequirement {
         /// See core/src/exec_policy.rs for more details on how proposed_execpolicy_amendment is determined.
         proposed_execpolicy_amendment: Option<ExecPolicyAmendment>,
     },
+    /// A fresh human decision is required for each execution attempt.
+    NeedsHumanApproval { reason: Option<String> },
     /// Execution forbidden for this tool call.
     Forbidden { reason: String },
 }
@@ -500,7 +508,9 @@ impl<'a> SandboxAttempt<'a> {
             .transform(SandboxTransformRequest {
                 command,
                 permissions: self.permissions,
-                sandbox: self.sandbox,
+                workspace_roots: None,
+                runtime_readable_paths: &[],
+                selection: SandboxSelection::Explicit(self.sandbox),
                 enforce_managed_network: self.enforce_managed_network,
                 environment_id,
                 network,
@@ -508,8 +518,8 @@ impl<'a> SandboxAttempt<'a> {
                 sandbox_exe: self.sandbox_exe.map(std::path::PathBuf::as_path),
                 use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
-            })
-            .map_err(CodexErr::from)?;
+            })?
+            .into_command_request();
         request.sandbox_override = self.sandbox_override;
         let workspace_roots = self
             .workspace_roots
@@ -522,31 +532,28 @@ impl<'a> SandboxAttempt<'a> {
 
     pub async fn env_for_exec_server(
         &self,
-        command: SandboxCommand,
+        argv: Vec<String>,
+        cwd: PathUri,
+        env: HashMap<String, String>,
+        managed_network: Option<ManagedNetworkSandboxContext>,
+        additional_permissions: Option<&AdditionalPermissionProfile>,
         options: ExecOptions,
     ) -> Result<crate::sandboxing::ExecRequest, CodexErr> {
-        let managed_network = command.managed_network.clone();
-        let exec_server_permissions = effective_permission_profile(
-            self.exec_server_permissions,
-            command.additional_permissions.as_ref(),
-        );
-        let mut request = self
-            .manager
-            .transform(SandboxTransformRequest {
-                command,
-                permissions: self.permissions,
-                // The exec-server must receive the native command, not this host's wrapper.
-                sandbox: SandboxType::None,
-                enforce_managed_network: self.enforce_managed_network,
-                environment_id: None,
-                network: None,
-                sandbox_policy_cwd: self.sandbox_cwd,
-                sandbox_exe: None,
-                use_legacy_landlock: self.use_legacy_landlock,
-                windows_sandbox_level: self.windows_sandbox_level,
-            })
-            .map_err(CodexErr::from)?;
-        request.sandbox_override = self.sandbox_override;
+        let exec_server_permissions =
+            effective_permission_profile(self.exec_server_permissions, additional_permissions);
+        let request = SandboxExecRequest {
+            command: argv,
+            cwd,
+            env,
+            network: None,
+            network_environment_id: None,
+            sandbox: SandboxType::None,
+            sandbox_override: self.sandbox_override,
+            sandbox_policy_cwd: self.sandbox_cwd.clone(),
+            windows_sandbox_level: self.windows_sandbox_level,
+            permission_profile: exec_server_permissions.clone(),
+            arg0: None,
+        };
         let mut exec_request =
             crate::sandboxing::ExecRequest::from_sandbox_exec_request(request, options, Vec::new())
                 .await?;

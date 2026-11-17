@@ -67,6 +67,8 @@ pub enum RawToolCallRequester {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RawTraceEventPayload {
+    /// Final record after all producers release a writer with no recorded errors.
+    RecordingCompleted,
     RolloutStarted {
         trace_id: String,
         root_thread_id: AgentThreadId,
@@ -84,6 +86,10 @@ pub enum RawTraceEventPayload {
         thread_id: AgentThreadId,
         status: RolloutStatus,
     },
+    /// An evicted runtime was reloaded for a thread already recorded in this bundle.
+    ThreadResumed {
+        thread_id: AgentThreadId,
+    },
     CodexTurnStarted {
         codex_turn_id: CodexTurnId,
         thread_id: AgentThreadId,
@@ -96,6 +102,9 @@ pub enum RawTraceEventPayload {
     /// evidence of its rendered content, which may be truncated before sampling.
     HistoryItemAccepted {
         item_id: String,
+        /// A delivery may never appear in a subsequent inference or compaction snapshot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_message_payload: Option<RawPayloadRef>,
     },
     InferenceStarted {
         inference_call_id: InferenceCallId,
@@ -156,6 +165,8 @@ pub enum RawTraceEventPayload {
     },
     ToolCallRuntimeStarted {
         tool_call_id: ToolCallId,
+        /// Executed handler, which may differ from the requested callable.
+        kind: ToolCallKind,
         /// Runtime/protocol observation for how Codex began executing the tool.
         runtime_payload: RawPayloadRef,
     },
@@ -245,12 +256,13 @@ impl RawTraceEventPayload {
     /// Raw payload refs that must exist before this raw event is appended.
     pub(crate) fn raw_payload_refs(&self) -> Vec<&RawPayloadRef> {
         match self {
-            RawTraceEventPayload::RolloutStarted { .. }
+            RawTraceEventPayload::RecordingCompleted
+            | RawTraceEventPayload::RolloutStarted { .. }
             | RawTraceEventPayload::RolloutEnded { .. }
             | RawTraceEventPayload::ThreadEnded { .. }
+            | RawTraceEventPayload::ThreadResumed { .. }
             | RawTraceEventPayload::CodexTurnStarted { .. }
             | RawTraceEventPayload::CodexTurnEnded { .. }
-            | RawTraceEventPayload::HistoryItemAccepted { .. }
             | RawTraceEventPayload::CompactionRequestFailed { .. }
             | RawTraceEventPayload::CodeCellStarted { .. }
             | RawTraceEventPayload::McpToolCallCorrelationAssigned { .. }
@@ -259,6 +271,10 @@ impl RawTraceEventPayload {
                 carried_payload: None,
                 ..
             } => Vec::new(),
+            RawTraceEventPayload::HistoryItemAccepted {
+                agent_message_payload,
+                ..
+            } => agent_message_payload.iter().collect(),
             RawTraceEventPayload::ThreadStarted {
                 metadata_payload, ..
             } => metadata_payload.iter().collect(),

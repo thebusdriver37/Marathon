@@ -29,7 +29,13 @@ impl ChatWidget {
     /// UI and turn-selection eligibility; the catalog and server still determine program access.
     pub(crate) fn daybreak_account_eligible(&self) -> bool {
         self.daybreak_feature_enabled()
-            && self.config.model_provider_id == "openai"
+            && self
+                .config
+                .model_providers
+                .get(&self.config.model_provider_id)
+                .is_some_and(|provider| {
+                    provider.supports_cyber_access_programs(&self.config.model_provider_id)
+                })
             && (self.has_chatgpt_account
                 || matches!(
                     self.status_account_display,
@@ -131,7 +137,7 @@ impl ChatWidget {
         }
         if matches!(feature, Feature::FastMode | Feature::UltrafastMode) {
             self.refresh_effective_service_tier();
-            self.sync_service_tier_commands();
+            self.refresh_model_dependent_surfaces();
         }
         if feature == Feature::Plugins {
             self.sync_plugins_command_enabled();
@@ -213,10 +219,17 @@ impl ChatWidget {
         self.model_catalog.clone()
     }
 
-    pub(crate) fn on_account_email_loaded(&mut self, current_email: Option<String>) {
-        if let Some(StatusAccountDisplay::ChatGpt { email, .. }) = &mut self.status_account_display
+    pub(crate) fn on_account_email_loaded(
+        &mut self,
+        current_email: Option<String>,
+        current_workspace: Option<String>,
+    ) {
+        if let Some(StatusAccountDisplay::ChatGpt {
+            email, workspace, ..
+        }) = &mut self.status_account_display
         {
             *email = current_email;
+            *workspace = current_workspace;
         }
     }
 
@@ -241,7 +254,7 @@ impl ChatWidget {
     ) {
         // Account-update notifications are the identity boundary. The visible account fields can
         // be identical across two accounts, so always invalidate account-scoped requests and data.
-        self.model_popup_request_id = None;
+        self.dismiss_stale_model_picker();
         let api_key_changed = self.status_account_display == Some(StatusAccountDisplay::ApiKey)
             || status_account_display == Some(StatusAccountDisplay::ApiKey);
         self.invalidate_permission_discovery();
@@ -298,6 +311,7 @@ impl ChatWidget {
     /// Set the model in the widget's config copy and stored collaboration mode.
     pub(crate) fn set_model(&mut self, model: &str) {
         if model != self.current_model() {
+            self.queue_unavailable_daybreak_disable(model);
             if self.current_model() == crate::model_catalog::LUNA_RESERVE_MODEL {
                 self.clear_reserve_return();
             } else {
@@ -317,6 +331,26 @@ impl ChatWidget {
         }
         self.refresh_effective_service_tier();
         self.refresh_model_dependent_surfaces();
+    }
+
+    pub(super) fn queue_unavailable_daybreak_disable(&self, model: &str) {
+        if let Some(thread_id) = self.thread_id
+            && self.should_disable_daybreak(model)
+        {
+            self.app_event_tx
+                .send(AppEvent::DisableUnavailableDaybreak {
+                    thread_id,
+                    model: model.to_owned(),
+                });
+        }
+    }
+
+    pub(crate) fn should_disable_daybreak(&self, model: &str) -> bool {
+        self.daybreak_enabled
+            && self.model_catalog.models.iter().any(|entry| {
+                entry.model == model
+                    && crate::daybreak::availability(std::slice::from_ref(entry)) == Some(false)
+            })
     }
 
     pub(crate) fn current_model(&self) -> &str {
@@ -497,6 +531,7 @@ impl ChatWidget {
         let cwd_changed = self.config.cwd != settings.cwd;
         self.apply_thread_settings_cwd(settings.cwd.clone());
         self.config.model_provider_id = settings.model_provider.clone();
+        self.set_daybreak_enabled(self.daybreak_enabled);
         self.set_service_tier(settings.service_tier.clone());
         if let Err(err) = self
             .config
@@ -536,6 +571,9 @@ impl ChatWidget {
             }
         }
 
+        if self.current_model() != settings.model {
+            self.queue_unavailable_daybreak_disable(&settings.model);
+        }
         settings.collaboration_mode.settings.model = settings.model;
         settings.collaboration_mode.settings.reasoning_effort = settings.effort;
         self.set_effective_collaboration_mode(settings.collaboration_mode);
@@ -724,6 +762,9 @@ impl ChatWidget {
         }
         self.active_collaboration_mask = Some(mask);
         self.update_collaboration_mode_indicator();
+        if previous_model != self.current_model() {
+            self.queue_unavailable_daybreak_disable(self.current_model());
+        }
         self.refresh_model_dependent_surfaces();
         let next_mode = self.active_mode_kind();
         let next_model = self.current_model();

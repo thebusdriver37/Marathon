@@ -17,14 +17,37 @@ use tracing::warn;
 use crate::pagination::collect_paginated;
 use crate::rmcp_client::ManagedClient;
 
-/// The ready clients captured for one model step.
+/// Items listed by ready servers and names of deferred servers available to query explicitly.
+pub struct McpResourceListing<T> {
+    pub by_server: HashMap<String, Vec<T>>,
+    pub deferred_servers: Vec<String>,
+}
+
+/// The ready clients and dormant server names captured for one model step.
+#[derive(Default)]
 pub(crate) struct McpBindingClients {
     clients: HashMap<String, Arc<ManagedClient>>,
+    deferred_servers: Vec<String>,
 }
 
 impl McpBindingClients {
-    pub(crate) fn new(clients: HashMap<String, Arc<ManagedClient>>) -> Self {
-        Self { clients }
+    pub(crate) fn new(
+        clients: HashMap<String, Arc<ManagedClient>>,
+        mut deferred_servers: Vec<String>,
+    ) -> Self {
+        deferred_servers.sort_unstable();
+        Self {
+            clients,
+            deferred_servers,
+        }
+    }
+
+    fn deferred_servers(&self, include_server: impl Fn(&str) -> bool) -> Vec<String> {
+        self.deferred_servers
+            .iter()
+            .filter(|name| include_server(name))
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn client(&self, server: &str) -> Option<Arc<ManagedClient>> {
@@ -40,7 +63,6 @@ impl McpBindingClients {
             .client(server)
             .ok_or_else(|| anyhow!("MCP server '{server}' was not ready for this step"))?;
         managed
-            .client
             .list_resources(params, managed.tool_timeout)
             .await
             .with_context(|| format!("resources/list failed for `{server}`"))
@@ -55,7 +77,6 @@ impl McpBindingClients {
             .client(server)
             .ok_or_else(|| anyhow!("MCP server '{server}' was not ready for this step"))?;
         managed
-            .client
             .list_resource_templates(params, managed.tool_timeout)
             .await
             .with_context(|| format!("resources/templates/list failed for `{server}`"))
@@ -71,7 +92,6 @@ impl McpBindingClients {
             .ok_or_else(|| anyhow!("MCP server '{server}' was not ready for this step"))?;
         let uri = params.uri.clone();
         managed
-            .client
             .read_resource(params, managed.tool_timeout)
             .await
             .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
@@ -80,7 +100,7 @@ impl McpBindingClients {
     pub(crate) async fn list_all_resources(
         &self,
         include_server: impl Fn(&str) -> bool,
-    ) -> HashMap<String, Vec<Resource>> {
+    ) -> McpResourceListing<Resource> {
         let mut join_set = JoinSet::new();
         for (server_name, managed) in self
             .clients
@@ -88,7 +108,7 @@ impl McpBindingClients {
             .filter(|(server_name, _)| include_server(server_name))
         {
             let server_name = server_name.clone();
-            let client = Arc::clone(&managed.client);
+            let client = Arc::clone(managed);
             let timeout = managed.tool_timeout;
             join_set.spawn(async move {
                 let resources = collect_paginated("resources/list", timeout, |params| {
@@ -102,13 +122,16 @@ impl McpBindingClients {
                 (server_name, resources)
             });
         }
-        collect_resource_results(&mut join_set, "resources").await
+        McpResourceListing {
+            by_server: collect_resource_results(&mut join_set, "resources").await,
+            deferred_servers: self.deferred_servers(include_server),
+        }
     }
 
     pub(crate) async fn list_all_resource_templates(
         &self,
         include_server: impl Fn(&str) -> bool,
-    ) -> HashMap<String, Vec<ResourceTemplate>> {
+    ) -> McpResourceListing<ResourceTemplate> {
         let mut join_set = JoinSet::new();
         for (server_name, managed) in self
             .clients
@@ -116,7 +139,7 @@ impl McpBindingClients {
             .filter(|(server_name, _)| include_server(server_name))
         {
             let server_name = server_name.clone();
-            let client = Arc::clone(&managed.client);
+            let client = Arc::clone(managed);
             let timeout = managed.tool_timeout;
             join_set.spawn(async move {
                 let templates = collect_paginated("resources/templates/list", timeout, |params| {
@@ -130,7 +153,10 @@ impl McpBindingClients {
                 (server_name, templates)
             });
         }
-        collect_resource_results(&mut join_set, "resource templates").await
+        McpResourceListing {
+            by_server: collect_resource_results(&mut join_set, "resource templates").await,
+            deferred_servers: self.deferred_servers(include_server),
+        }
     }
 }
 

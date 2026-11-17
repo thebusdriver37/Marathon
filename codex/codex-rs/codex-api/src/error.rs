@@ -25,6 +25,8 @@ pub enum ApiError {
     QuotaExceeded,
     #[error("usage not included")]
     UsageNotIncluded,
+    #[error("session budget exceeded")]
+    SessionBudgetExceeded,
     #[error("retryable error: {message}")]
     Retryable {
         message: String,
@@ -40,12 +42,27 @@ pub enum ApiError {
     #[error("invalid request: {message}")]
     InvalidRequest { message: String },
     #[error("{message}")]
+    AccessProgramNotEnabled { message: String },
+    #[error("{message}")]
+    InvalidAudioInput {
+        message: String,
+        /// True when the provider rejected an individual clip, independent of request size.
+        per_recording: bool,
+    },
+    #[error("{message}")]
     ModelNotFound {
         message: String,
         status: Option<StatusCode>,
     },
     #[error("invalid prompt: {message}")]
     InvalidPrompt { message: String },
+    #[error("{message}")]
+    InferenceHookDenied { message: String },
+    #[error("{message}")]
+    ContentPolicyViolation {
+        message: String,
+        status: Option<StatusCode>,
+    },
     #[error("cyber policy: {message}")]
     CyberPolicy { message: String },
     #[error("bio policy: {message}")]
@@ -57,6 +74,9 @@ pub enum ApiError {
     },
     #[error("Flex capacity unavailable.")]
     FlexUnavailable,
+    /// Server-confirmed capacity failure on a policy-restricted route.
+    #[error("policy-restricted capacity unavailable")]
+    PolicyCapacityUnavailable { retry_after: Option<RetryAfter> },
     #[error("server overloaded")]
     ServerOverloaded { retry_after: Option<RetryAfter> },
 }
@@ -73,7 +93,58 @@ pub(crate) fn parse_terminal_provider_error(
 ) -> Option<ApiError> {
     let error = error?;
     let code = error.get("code")?.as_str()?;
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty());
     match (code, status) {
+        ("inference_hook_denied", None | Some(StatusCode::FORBIDDEN)) => {
+            Some(ApiError::InferenceHookDenied {
+                message: message
+                    .unwrap_or("Your workspace inference hook blocked this request.")
+                    .to_owned(),
+            })
+        }
+        ("context_length_exceeded", None | Some(StatusCode::BAD_REQUEST)) => {
+            Some(ApiError::ContextWindowExceeded)
+        }
+        // A non-streaming 400 already follows the ordinary invalid-request path.
+        ("invalid_access_program" | "unsupported_access_program", None) => {
+            Some(ApiError::InvalidRequest {
+                message: message
+                    .unwrap_or("The requested access program cannot be used with this model.")
+                    .to_owned(),
+            })
+        }
+        ("content_policy_violation", None | Some(StatusCode::BAD_REQUEST)) => {
+            Some(ApiError::ContentPolicyViolation {
+                message: message
+                    .unwrap_or("The input was rejected by the content policy.")
+                    .to_owned(),
+                status,
+            })
+        }
+        // HTTP 403s retain their request ID and headers in the API bridge.
+        ("access_program_not_enabled", None) => Some(ApiError::AccessProgramNotEnabled {
+            message: message
+                .unwrap_or("The requested access program is not enabled.")
+                .to_owned(),
+        }),
+        ("budget_reached", None | Some(StatusCode::BAD_REQUEST)) => {
+            Some(ApiError::SessionBudgetExceeded)
+        }
+        (
+            "audio_too_large"
+            | "audio_too_short"
+            | "invalid_audio"
+            | "invalid_audio_data"
+            | "invalid_audio_format"
+            | "missing_audio_sample_rate",
+            None | Some(StatusCode::BAD_REQUEST),
+        ) => Some(ApiError::InvalidAudioInput {
+            per_recording: code != "audio_too_large",
+            message: message.unwrap_or("Invalid audio input.").to_owned(),
+        }),
         ("flex_unavailable", None | Some(StatusCode::TOO_MANY_REQUESTS)) => {
             Some(ApiError::FlexUnavailable)
         }
@@ -81,12 +152,7 @@ pub(crate) fn parse_terminal_provider_error(
             "model_not_found",
             None | Some(StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
         ) => Some(ApiError::ModelNotFound {
-            message: error
-                .get("message")
-                .and_then(Value::as_str)
-                .filter(|message| !message.trim().is_empty())
-                .unwrap_or(code)
-                .to_owned(),
+            message: message.unwrap_or(code).to_owned(),
             status,
         }),
         _ => None,

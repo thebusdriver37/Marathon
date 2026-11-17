@@ -1,11 +1,11 @@
 ---
 source: tui/src/status/tests.rs
-assertion_line: 1006
+assertion_line: 1023
 expression: sanitized
 ---
 /status
 
-  >_ Marathon (v0.165.0)
+  >_ Marathon (v0.169.0)
 
   Visit https://chatgpt.com/settings/usage for up-to-date
   information on rate limits and credits

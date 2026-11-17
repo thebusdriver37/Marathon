@@ -11,6 +11,7 @@ use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadInjectItemsParams;
 use codex_app_server_protocol::ThreadInjectItemsResponse;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -195,6 +196,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
                     AdditionalContextEntry {
                         value: application_context_text.to_string(),
                         kind: AdditionalContextKind::Application,
+                        name: None,
                     },
                 ),
                 (
@@ -202,6 +204,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
                     AdditionalContextEntry {
                         value: untrusted_context_text.to_string(),
                         kind: AdditionalContextKind::Untrusted,
+                        name: None,
                     },
                 ),
             ])),
@@ -225,24 +228,37 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
         .iter()
         .filter_map(|item| match item {
             RolloutItem::ResponseItem(envelope) => {
-                let ResponseItem::Message { role, content, .. } = &envelope.item else {
-                    return None;
+                let context_kind = match &envelope.item {
+                    ResponseItem::Message { role, content, .. } => {
+                        content.iter().find_map(|item| {
+                            let ContentItem::InputText { text } = item else {
+                                return None;
+                            };
+                            text.contains(application_context_text)
+                                .then_some(role.as_str())
+                        })
+                    }
+                    ResponseItem::FunctionCallOutput {
+                        name,
+                        namespace,
+                        output,
+                        ..
+                    } if name.as_deref() == Some("untrusted_context")
+                        && namespace.as_deref() == Some("agent")
+                        && output.text_content() == Some(untrusted_context_text) =>
+                    {
+                        Some("function_call_output")
+                    }
+                    _ => None,
                 };
-                content.iter().find_map(|item| {
-                    let ContentItem::InputText { text } = item else {
-                        return None;
-                    };
-                    (text.contains(application_context_text)
-                        || text.contains(untrusted_context_text))
-                    .then(|| {
-                        (
-                            role.as_str(),
-                            envelope
-                                .metadata
-                                .as_ref()
-                                .map(|metadata| metadata.client_authored),
-                        )
-                    })
+                context_kind.map(|kind| {
+                    (
+                        kind,
+                        envelope
+                            .metadata
+                            .as_ref()
+                            .map(|metadata| metadata.client_authored),
+                    )
                 })
             }
             _ => None,
@@ -250,7 +266,10 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
         .collect::<Vec<_>>();
     assert_eq!(
         persisted_additional_context,
-        vec![("developer", Some(true)), ("user", None)]
+        vec![
+            ("developer", Some(true)),
+            ("function_call_output", Some(false))
+        ]
     );
 
     let injected_value = serde_json::to_value(&injected_item)?;
@@ -330,10 +349,16 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
     assert_eq!(turn.id, turn_started.turn.id);
     assert_eq!(turn_started.turn.status, TurnStatus::InProgress);
     assert_eq!(item_completed.turn_id, turn_started.turn.id);
-    assert_eq!(item_started.item, item_completed.item);
+    assert_eq!(
+        item_completed.item,
+        ThreadItem {
+            completed_at_ms: Some(item_completed.completed_at_ms),
+            ..item_started.item
+        }
+    );
     assert!(matches!(
-        &item_completed.item,
-        ThreadItem::FunctionCallOutput {
+        &item_completed.item.payload,
+        ThreadItemPayload::FunctionCallOutput {
             name,
             namespace,
             output: FunctionCallOutputBody::Text(output),
@@ -607,7 +632,13 @@ async fn thread_inject_items_adds_raw_response_items_after_a_turn() -> Result<()
             _ => None,
         })
         .context("injected developer item should be persisted")?;
-    assert_eq!(persisted_developer_item.metadata, None);
+    assert_eq!(
+        persisted_developer_item.metadata,
+        Some(serde_json::from_value(json!({
+            "history_sequence": 5,
+            "sampled_through_sequence": 3,
+        }))?)
+    );
 
     let second_turn_req = mcp
         .send_turn_start_request(TurnStartParams {
@@ -748,5 +779,45 @@ async fn turn_tool_output_retention_preserves_sender_metadata() -> Result<()> {
         sender_messages.receiver_message_id,
         envelope.item.id().unwrap().to_string()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn guardian_review_returns_the_injected_call_id_when_policy_skips_review() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let rules = codex_home.path().join("rules");
+    std::fs::create_dir_all(&rules)?;
+    std::fs::write(
+        rules.join("default.rules"),
+        r#"prefix_rule(pattern=["git", "init", "guardian-skipped"], decision="allow")"#,
+    )?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let start = app
+        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .await?;
+    let ThreadStartResponse { thread, .. } = app.read_response(start).await?;
+    let inject = app
+        .send_thread_inject_items_request(ThreadInjectItemsParams {
+            thread_id: thread.id.clone(),
+            items: vec![json!({
+                "type": "function_call", "name": "exec_command", "call_id": "recorded",
+                "arguments": r#"{"cmd":"git init guardian-skipped"}"#,
+            })],
+        })
+        .await?;
+    let _: ThreadInjectItemsResponse = app.read_response(inject).await?;
+    let review = app
+        .send_raw_request(
+            "thread/guardianReview",
+            Some(json!({"threadId": thread.id})),
+        )
+        .await?;
+    let response: Value = app.read_response(review).await?;
+    assert_eq!(response, json!({"callId":"recorded", "assessment":null}));
     Ok(())
 }

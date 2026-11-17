@@ -290,3 +290,68 @@ async fn mcp_refresh_preserves_apps_until_new_session() {
     assert!(reloaded.features.enabled(Feature::Apps));
     assert!(!next.features.enabled(Feature::Apps));
 }
+
+const BROWSER_AND_CALENDAR_DISABLED: &str =
+    "plugins.browser.enabled = false\napps.calendar.enabled = false";
+const BROWSER_AND_CALENDAR_ENABLED: &str =
+    "plugins.browser.enabled = true\napps.calendar.enabled = true";
+
+#[test_case::test_case(
+    "plugins.browser.enabled = true\napps.calendar.enabled = false",
+    "apps.calendar.enabled = true",
+    BROWSER_AND_CALENDAR_ENABLED;
+    "apps update preserves omitted plugins"
+)]
+#[test_case::test_case(
+    BROWSER_AND_CALENDAR_ENABLED,
+    "plugins.browser.enabled = false",
+    "apps.calendar.enabled = true";
+    "plugin update preserves omitted apps"
+)]
+#[test_case::test_case(
+    "apps.calendar.enabled = true",
+    "apps = {}\nplugins.browser.enabled = true",
+    "plugins.browser.enabled = true";
+    "clearing apps restores inheritance alongside a plugin update"
+)]
+#[test_case::test_case(
+    BROWSER_AND_CALENDAR_ENABLED,
+    "plugins = {}",
+    "apps.calendar.enabled = true";
+    "clearing plugins restores inheritance and preserves apps"
+)]
+#[test_case::test_case(
+    BROWSER_AND_CALENDAR_DISABLED,
+    BROWSER_AND_CALENDAR_ENABLED,
+    BROWSER_AND_CALENDAR_ENABLED;
+    "both nonempty overrides change together"
+)]
+#[tokio::test]
+async fn mcp_refresh_updates_session_plugins_and_apps(
+    initial_session: &str,
+    incoming_session: &str,
+    expected_session: &str,
+) {
+    let (_home, base) = base_config().await;
+    let user = BROWSER_AND_CALENDAR_DISABLED;
+    let current = layered_config(&base, user, "", "", initial_session).await;
+    let incoming = layered_config(&base, user, "", "", incoming_session).await;
+    let expected = layered_config(&base, user, "", "", expected_session).await;
+    let initial_layer_count = current.config_layer_stack.all_layers_low_to_high().count();
+
+    let refreshed = current
+        .resolve_runtime_refresh(&incoming, RuntimeConfigRefresh::Mcp)
+        .unwrap();
+    assert_eq!(refreshed.plugins, expected.plugins);
+    assert_eq!(
+        refreshed.config_layer_stack.effective_config()["apps"],
+        expected.config_layer_stack.effective_config()["apps"]
+    );
+    assert_eq!(
+        refreshed
+            .config_layer_stack
+            .all_layers_low_to_high()
+            .count(),
+        initial_layer_count
+    );
+}
