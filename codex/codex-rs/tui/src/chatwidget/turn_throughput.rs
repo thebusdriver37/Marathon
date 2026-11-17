@@ -5,6 +5,9 @@ use std::time::Instant;
 use codex_app_server_protocol::FileUpdateChange;
 use codex_app_server_protocol::MarathonResponseMetrics;
 
+pub(super) const GENERATION_ACTIVITY_INTERVAL: Duration = Duration::from_millis(100);
+const GENERATION_ACTIVITY_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GenerationStage {
     Prefill,
@@ -129,6 +132,17 @@ impl TurnThroughput {
 
     pub(super) fn generation_stage(&self) -> Option<GenerationStage> {
         self.generation_stage
+    }
+
+    pub(super) fn generation_activity_frame(&self, now: Instant) -> Option<&'static str> {
+        self.generation_stage?;
+        let started_at = self.turn_started_at?;
+        let frame_index = (now.saturating_duration_since(started_at).as_millis()
+            / GENERATION_ACTIVITY_INTERVAL.as_millis())
+            % GENERATION_ACTIVITY_FRAMES.len() as u128;
+        GENERATION_ACTIVITY_FRAMES
+            .get(frame_index as usize)
+            .copied()
     }
 
     pub(super) fn time_to_first_output(&self) -> Option<Duration> {

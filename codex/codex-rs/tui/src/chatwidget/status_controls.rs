@@ -456,12 +456,23 @@ impl ChatWidget {
 
     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
         if let Some(stage) = self.turn_throughput.generation_stage() {
+            let now = Instant::now();
+            let stage_label = if self.config.animations {
+                self.turn_throughput
+                    .generation_activity_frame(now)
+                    .map_or_else(
+                        || stage.label().to_string(),
+                        |frame| format!("{frame} {}", stage.label()),
+                    )
+            } else {
+                stage.label().to_string()
+            };
             if matches!(
                 stage,
                 GenerationStage::DraftingCode | GenerationStage::ApplyingChanges
             ) && let Some(progress) = self.turn_throughput.patch_progress()
             {
-                let mut label = format!("{} {}", stage.label(), progress.target);
+                let mut label = format!("{stage_label} {}", progress.target);
                 if progress.line_count > 0 {
                     let unit = if progress.line_count == 1 {
                         "line"
@@ -472,16 +483,16 @@ impl ChatWidget {
                 }
                 label.push_str(&format!(
                     " · {}",
-                    format_latency(Instant::now().saturating_duration_since(progress.started_at))
+                    format_latency(now.saturating_duration_since(progress.started_at))
                 ));
                 return Some(label);
             }
-            let elapsed = self.turn_throughput.elapsed(Instant::now());
+            let elapsed = self.turn_throughput.elapsed(now);
             return Some(match elapsed {
                 Some(elapsed) => {
-                    format!("{} · total {}", stage.label(), format_latency(elapsed))
+                    format!("{stage_label} · total {}", format_latency(elapsed))
                 }
-                None => stage.label().to_string(),
+                None => stage_label,
             });
         }
 
@@ -500,6 +511,23 @@ impl ChatWidget {
         }
         label.push_str(&format!(" · total {}", format_latency(elapsed)));
         Some(label)
+    }
+
+    /// Keep the compact generation footer visibly alive while model output is buffered.
+    pub(super) fn refresh_active_generation_status_line(&mut self) {
+        if !self.config.animations
+            || self.turn_throughput.generation_stage().is_none()
+            || !self
+                .configured_status_line_items()
+                .iter()
+                .any(|item| item == "tokens-per-second")
+        {
+            return;
+        }
+
+        self.refresh_status_line();
+        self.frame_requester
+            .schedule_frame_in(GENERATION_ACTIVITY_INTERVAL);
     }
 
     pub(super) fn status_line_limit_display(

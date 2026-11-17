@@ -408,6 +408,7 @@ mod turn_lifecycle;
 mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;
 mod turn_throughput;
+use self::turn_throughput::GENERATION_ACTIVITY_INTERVAL;
 use self::turn_throughput::GenerationStage;
 use self::turn_throughput::TurnThroughput;
 mod usage;
@@ -1209,6 +1210,7 @@ impl ChatWidget {
             self.refresh_terminal_title();
         }
         self.refresh_status_line_if_workspace_headline_due();
+        self.refresh_active_generation_status_line();
         self.refresh_thread_usage_if_settlement_due();
         self.refresh_terminal_program_status();
     }

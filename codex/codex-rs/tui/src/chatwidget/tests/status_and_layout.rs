@@ -3191,27 +3191,84 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
     handle_turn_started(&mut chat, "turn-stage");
     chat.refresh_status_line();
     assert!(
-        status_line_text(&chat).is_some_and(|status| status.starts_with("Prefill · total ")),
-        "prefill should include live turn duration"
+        status_line_text(&chat).is_some_and(|status| {
+            status.contains("Prefill · total ")
+                && status
+                    .chars()
+                    .next()
+                    .is_some_and(is_generation_spinner_frame)
+        }),
+        "prefill should include animated activity and live turn duration"
     );
 
     handle_agent_reasoning_delta(&mut chat, "thinking");
     assert!(
-        status_line_text(&chat).is_some_and(|status| status.starts_with("Thinking · total ")),
-        "reasoning delta should identify thinking"
+        status_line_text(&chat).is_some_and(|status| {
+            status.contains("Thinking · total ")
+                && status
+                    .chars()
+                    .next()
+                    .is_some_and(is_generation_spinner_frame)
+        }),
+        "reasoning delta should identify thinking with animated activity"
     );
 
     handle_agent_reasoning_final(&mut chat);
     assert!(
-        status_line_text(&chat)
-            .is_some_and(|status| status.starts_with("Preparing next action · total ")),
-        "completed reasoning should show progress while the next item is generated"
+        status_line_text(&chat).is_some_and(|status| {
+            status.contains("Preparing next action · total ")
+                && status
+                    .chars()
+                    .next()
+                    .is_some_and(is_generation_spinner_frame)
+        }),
+        "completed reasoning should retain animated activity while the next item is generated"
     );
 
     handle_agent_message_delta(&mut chat, "answering");
     assert!(
-        status_line_text(&chat).is_some_and(|status| status.starts_with("Generating · total ")),
-        "answer delta should identify answering"
+        status_line_text(&chat).is_some_and(|status| {
+            status.contains("Generating · total ")
+                && status
+                    .chars()
+                    .next()
+                    .is_some_and(is_generation_spinner_frame)
+        }),
+        "answer delta should identify generation with animated activity"
+    );
+}
+
+fn is_generation_spinner_frame(frame: char) -> bool {
+    matches!(
+        frame,
+        '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏'
+    )
+}
+
+#[tokio::test]
+async fn active_generation_footer_schedules_continuous_animation_frames() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (frame_requester, mut frame_rx) = crate::tui::FrameRequester::test_channel();
+    chat.frame_requester = frame_requester;
+    chat.config.animations = true;
+    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
+    handle_turn_started(&mut chat, "turn-animated-stage");
+    while frame_rx.try_recv().is_ok() {}
+
+    let before_tick = Instant::now();
+    chat.pre_draw_tick();
+    let scheduled_at = frame_rx
+        .try_recv()
+        .expect("active generation should schedule another footer frame");
+    assert!(scheduled_at >= before_tick + GENERATION_ACTIVITY_INTERVAL);
+    assert!(scheduled_at <= Instant::now() + GENERATION_ACTIVITY_INTERVAL);
+
+    chat.turn_throughput.finish_turn(Instant::now());
+    while frame_rx.try_recv().is_ok() {}
+    chat.pre_draw_tick();
+    assert!(
+        frame_rx.try_recv().is_err(),
+        "finished turns should stop animating"
     );
 }
 
@@ -3241,7 +3298,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
 
     let drafting = status_line_text(&chat).expect("drafting status");
     assert!(
-        drafting.starts_with("Drafting src/pages/dashboard.rs · 3 lines · "),
+        drafting.contains("Drafting src/pages/dashboard.rs · 3 lines · "),
         "unexpected drafting status: {drafting}"
     );
 
@@ -3260,7 +3317,7 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
     );
     assert!(
         status_line_text(&chat).is_some_and(|status| {
-            status.starts_with("Applying src/pages/dashboard.rs · 3 lines · ")
+            status.contains("Applying src/pages/dashboard.rs · 3 lines · ")
         }),
         "patch application should replace the drafting stage"
     );
@@ -3279,8 +3336,8 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
         None,
     );
     assert!(
-        status_line_text(&chat).is_some_and(|status| status.starts_with("Prefill · total ")),
-        "the next model request should retain live elapsed feedback"
+        status_line_text(&chat).is_some_and(|status| status.contains("Prefill · total ")),
+        "the next model request should retain animated elapsed feedback"
     );
 }
 

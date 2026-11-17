@@ -4,6 +4,7 @@ use std::time::Instant;
 use codex_app_server_protocol::MarathonResponseMetrics;
 use pretty_assertions::assert_eq;
 
+use super::GENERATION_ACTIVITY_INTERVAL;
 use super::GenerationStage;
 use super::ThroughputSample;
 use super::TurnThroughput;
@@ -171,6 +172,29 @@ fn first_output_is_recorded_once_and_stage_tracks_the_stream() {
     );
     throughput.finish_turn(start + Duration::from_secs(10));
     assert_eq!(throughput.generation_stage(), None);
+}
+
+#[test]
+fn generation_activity_frame_advances_and_stops_with_the_turn() {
+    let start = Instant::now();
+    let mut throughput = TurnThroughput::default();
+    throughput.start_turn(start);
+
+    assert_eq!(throughput.generation_activity_frame(start), Some("⠋"));
+    assert_eq!(
+        throughput.generation_activity_frame(start + GENERATION_ACTIVITY_INTERVAL),
+        Some("⠙")
+    );
+    assert_eq!(
+        throughput.generation_activity_frame(start + GENERATION_ACTIVITY_INTERVAL * 10),
+        Some("⠋")
+    );
+
+    throughput.finish_turn(start + Duration::from_secs(2));
+    assert_eq!(
+        throughput.generation_activity_frame(start + Duration::from_secs(3)),
+        None
+    );
 }
 
 #[test]
