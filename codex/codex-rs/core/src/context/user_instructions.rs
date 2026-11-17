@@ -1,0 +1,42 @@
+use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::input_text;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct UserInstructions {
+    pub(crate) directory: Option<String>,
+    pub(crate) text: String,
+}
+
+impl ContextualUserFragment for UserInstructions {
+    fn content_metadata(&self) -> ContentItemMetadata {
+        ContentItemMetadata::agents_md()
+    }
+
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("agents_md.instructions".to_string())
+    }
+
+    fn role(&self) -> &'static str {
+        "user"
+    }
+
+    fn markers(&self) -> (&'static str, &'static str) {
+        Self::type_markers()
+    }
+
+    fn type_markers() -> (&'static str, &'static str) {
+        ("# AGENTS.md instructions", "</INSTRUCTIONS>")
+    }
+
+    fn body(&self) -> ContentItem {
+        let directory = self
+            .directory
+            .as_ref()
+            .map(|directory| format!(" for {directory}"))
+            .unwrap_or_default();
+        input_text(format!("{directory}\n\n<INSTRUCTIONS>\n{}\n", self.text))
+    }
+}

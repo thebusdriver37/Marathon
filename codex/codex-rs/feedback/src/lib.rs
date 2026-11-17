@@ -1,0 +1,1073 @@
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::collections::btree_map::Entry;
+use std::fs;
+use std::io::Read;
+use std::io::Write;
+use std::io::{self};
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
+
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::anyhow;
+use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::RouteAwareClientPool;
+use codex_login::AuthEnvTelemetry;
+use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionSource;
+use codex_state::LogWriteFailureReporter;
+use tracing::Event;
+use tracing::Level;
+use tracing::field::Visit;
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::fmt::writer::MakeWriter;
+use tracing_subscriber::registry::LookupSpan;
+
+mod archive;
+mod daemon_logs;
+pub use daemon_logs::daemon_log_attachments;
+pub(crate) mod feedback_diagnostics;
+mod guardian;
+mod report_upload;
+mod rollout_archive;
+mod upload;
+pub use feedback_diagnostics::FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME;
+pub use feedback_diagnostics::FeedbackDiagnostic;
+pub use feedback_diagnostics::FeedbackDiagnostics;
+pub use guardian::GuardianReviewFailures;
+pub use guardian::GuardianReviewRecord;
+pub use guardian::guardian_review_failures;
+pub use guardian::record_guardian_review_failure;
+pub use report_upload::FeedbackDelivery;
+pub use report_upload::FeedbackTransport;
+pub use report_upload::prepare_report_attachment;
+
+/// Filename used for the redacted `codex doctor --json` feedback attachment.
+pub const DOCTOR_REPORT_ATTACHMENT_FILENAME: &str = "codex-doctor-report.json";
+/// Filename used for the raw Codex Apps MCP tools cache feedback attachment.
+pub const CODEX_APPS_TOOLS_CACHE_ATTACHMENT_FILENAME: &str = "codex-apps-tools-cache.json";
+/// Filename used for the raw connector directory cache feedback attachment.
+pub const CODEX_APP_DIRECTORY_CACHE_ATTACHMENT_FILENAME: &str = "codex-app-directory-cache.json";
+/// Filename used for the Windows sandbox log feedback attachment.
+pub const WINDOWS_SANDBOX_LOG_ATTACHMENT_FILENAME: &str = "windows-sandbox.log";
+const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+const SENTRY_DSN: &str =
+    "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458";
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 300);
+// Raw collection budgets used by the report API, not the interactive upload.
+pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_ATTACHMENTS_BYTES: usize = 126 * 1024 * 1024;
+// Bound decoded envelopes, including framing. Do not shorten attachments to fit:
+// they may already be compressed, and callers need an error for incomplete delivery.
+// This bounds the decoded request including framing, not guaranteed attachment storage.
+// https://develop.sentry.dev/sdk/foundations/envelopes/#size-limits
+const MAX_DECODED_UPLOAD_BYTES: usize = 200 * 1024 * 1024;
+const MAX_EVENT_BYTES: usize = 1024 * 1024;
+const FEEDBACK_TAGS_TARGET: &str = "feedback_tags";
+// Leave room for every feature, usage settings, and request/auth diagnostics.
+const MAX_FEEDBACK_TAGS: usize = 512;
+
+/// Structured request/auth fields that should be attached to feedback uploads.
+pub struct FeedbackRequestTags<'a> {
+    pub endpoint: &'a str,
+    pub auth_header_attached: bool,
+    pub auth_header_name: Option<&'a str>,
+    pub auth_mode: Option<&'a str>,
+    pub auth_retry_after_unauthorized: Option<bool>,
+    pub auth_recovery_mode: Option<&'a str>,
+    pub auth_recovery_phase: Option<&'a str>,
+    pub auth_connection_reused: Option<bool>,
+    pub auth_request_id: Option<&'a str>,
+    pub auth_cf_ray: Option<&'a str>,
+    pub auth_error: Option<&'a str>,
+    pub auth_error_code: Option<&'a str>,
+    pub auth_recovery_followup_success: Option<bool>,
+    pub auth_recovery_followup_status: Option<u16>,
+}
+
+struct FeedbackRequestSnapshot<'a> {
+    endpoint: &'a str,
+    auth_header_attached: bool,
+    auth_header_name: &'a str,
+    auth_mode: &'a str,
+    auth_retry_after_unauthorized: String,
+    auth_recovery_mode: &'a str,
+    auth_recovery_phase: &'a str,
+    auth_connection_reused: String,
+    auth_request_id: &'a str,
+    auth_cf_ray: &'a str,
+    auth_error: &'a str,
+    auth_error_code: &'a str,
+    auth_recovery_followup_success: String,
+    auth_recovery_followup_status: String,
+}
+
+impl<'a> FeedbackRequestSnapshot<'a> {
+    fn from_tags(tags: &'a FeedbackRequestTags<'a>) -> Self {
+        Self {
+            endpoint: tags.endpoint,
+            auth_header_attached: tags.auth_header_attached,
+            auth_header_name: tags.auth_header_name.unwrap_or(""),
+            auth_mode: tags.auth_mode.unwrap_or(""),
+            auth_retry_after_unauthorized: tags
+                .auth_retry_after_unauthorized
+                .map_or_else(String::new, |value| value.to_string()),
+            auth_recovery_mode: tags.auth_recovery_mode.unwrap_or(""),
+            auth_recovery_phase: tags.auth_recovery_phase.unwrap_or(""),
+            auth_connection_reused: tags
+                .auth_connection_reused
+                .map_or_else(String::new, |value| value.to_string()),
+            auth_request_id: tags.auth_request_id.unwrap_or(""),
+            auth_cf_ray: tags.auth_cf_ray.unwrap_or(""),
+            auth_error: tags.auth_error.unwrap_or(""),
+            auth_error_code: tags.auth_error_code.unwrap_or(""),
+            auth_recovery_followup_success: tags
+                .auth_recovery_followup_success
+                .map_or_else(String::new, |value| value.to_string()),
+            auth_recovery_followup_status: tags
+                .auth_recovery_followup_status
+                .map_or_else(String::new, |value| value.to_string()),
+        }
+    }
+}
+
+pub fn emit_feedback_request_tags(tags: &FeedbackRequestTags<'_>) {
+    let snapshot = FeedbackRequestSnapshot::from_tags(tags);
+    tracing::info!(
+        target: FEEDBACK_TAGS_TARGET,
+        endpoint = tracing::field::debug(snapshot.endpoint),
+        auth_header_attached = tracing::field::debug(snapshot.auth_header_attached),
+        auth_header_name = tracing::field::debug(snapshot.auth_header_name),
+        auth_mode = tracing::field::debug(snapshot.auth_mode),
+        auth_retry_after_unauthorized = tracing::field::debug(&snapshot.auth_retry_after_unauthorized),
+        auth_recovery_mode = tracing::field::debug(snapshot.auth_recovery_mode),
+        auth_recovery_phase = tracing::field::debug(snapshot.auth_recovery_phase),
+        auth_connection_reused = tracing::field::debug(&snapshot.auth_connection_reused),
+        auth_request_id = tracing::field::debug(snapshot.auth_request_id),
+        auth_cf_ray = tracing::field::debug(snapshot.auth_cf_ray),
+        auth_error = tracing::field::debug(snapshot.auth_error),
+        auth_error_code = tracing::field::debug(snapshot.auth_error_code),
+        auth_recovery_followup_success = tracing::field::debug(&snapshot.auth_recovery_followup_success),
+        auth_recovery_followup_status = tracing::field::debug(&snapshot.auth_recovery_followup_status),
+    );
+}
+
+pub fn emit_feedback_request_tags_with_auth_env(
+    tags: &FeedbackRequestTags<'_>,
+    auth_env: &AuthEnvTelemetry,
+) {
+    let snapshot = FeedbackRequestSnapshot::from_tags(tags);
+    tracing::info!(
+        target: FEEDBACK_TAGS_TARGET,
+        endpoint = tracing::field::debug(snapshot.endpoint),
+        auth_header_attached = tracing::field::debug(snapshot.auth_header_attached),
+        auth_header_name = tracing::field::debug(snapshot.auth_header_name),
+        auth_mode = tracing::field::debug(snapshot.auth_mode),
+        auth_retry_after_unauthorized = tracing::field::debug(&snapshot.auth_retry_after_unauthorized),
+        auth_recovery_mode = tracing::field::debug(snapshot.auth_recovery_mode),
+        auth_recovery_phase = tracing::field::debug(snapshot.auth_recovery_phase),
+        auth_connection_reused = tracing::field::debug(&snapshot.auth_connection_reused),
+        auth_request_id = tracing::field::debug(snapshot.auth_request_id),
+        auth_cf_ray = tracing::field::debug(snapshot.auth_cf_ray),
+        auth_error = tracing::field::debug(snapshot.auth_error),
+        auth_error_code = tracing::field::debug(snapshot.auth_error_code),
+        auth_recovery_followup_success = tracing::field::debug(&snapshot.auth_recovery_followup_success),
+        auth_recovery_followup_status = tracing::field::debug(&snapshot.auth_recovery_followup_status),
+        auth_env_openai_api_key_present = tracing::field::debug(auth_env.openai_api_key_env_present),
+        auth_env_codex_api_key_present = tracing::field::debug(auth_env.codex_api_key_env_present),
+        auth_env_codex_api_key_enabled = tracing::field::debug(auth_env.codex_api_key_env_enabled),
+        // Custom provider `env_key` is arbitrary config text, so emit only a safe bucket.
+        auth_env_provider_key_name = tracing::field::debug(
+            auth_env.provider_env_key_name.as_deref().unwrap_or("")
+        ),
+        auth_env_provider_key_present = tracing::field::debug(
+            &auth_env.provider_env_key_present.map_or_else(String::new, |value| value.to_string())
+        ),
+        auth_env_refresh_token_url_override_present = tracing::field::debug(
+            auth_env.refresh_token_url_override_present
+        ),
+    );
+}
+
+#[derive(Clone)]
+pub struct CodexFeedback {
+    inner: Arc<FeedbackInner>,
+}
+
+impl LogWriteFailureReporter for CodexFeedback {
+    fn report_failure(&self, diagnostic: &str) {
+        // Bypass tracing so this diagnostic cannot return to the SQLite writer.
+        self.inner
+            .ring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_bytes(diagnostic.as_bytes());
+    }
+}
+
+impl Default for CodexFeedback {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CodexFeedback {
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_MAX_BYTES)
+    }
+
+    pub(crate) fn with_capacity(max_bytes: usize) -> Self {
+        Self {
+            inner: Arc::new(FeedbackInner::new(max_bytes)),
+        }
+    }
+
+    pub fn make_writer(&self) -> FeedbackMakeWriter {
+        FeedbackMakeWriter {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Returns a [`tracing_subscriber`] layer that captures diagnostic logs into this feedback
+    /// ring buffer.
+    ///
+    /// This is intended for initialization code so call sites don't have to duplicate the exact
+    /// `fmt::layer()` configuration and filter logic.
+    pub fn logger_layer<S>(&self) -> impl Layer<S> + Send + Sync + 'static
+    where
+        S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    {
+        tracing_subscriber::fmt::layer()
+            .with_writer(self.make_writer())
+            .with_timer(tracing_subscriber::fmt::time::SystemTime)
+            .with_ansi(false)
+            .with_target(false)
+            // Capture diagnostics independently of `RUST_LOG` without filling the feedback ring
+            // with high-volume request and response payloads.
+            .with_filter(
+                Targets::new()
+                    .with_default(Level::TRACE)
+                    // Opted-in content belongs to the configured OTLP destination, not feedback.
+                    .with_target("codex_otel.log_only", LevelFilter::OFF)
+                    .with_target("codex_http_client::transport", LevelFilter::DEBUG)
+                    .with_target("codex_api::sse", LevelFilter::DEBUG)
+                    // `tracing-log` checks legacy log records against their original
+                    // target before re-emitting them as `log`; tungstenite TRACE
+                    // includes full websocket frames and authenticated handshakes.
+                    .with_target("tungstenite", LevelFilter::DEBUG)
+                    .with_target("codex_api::responses_websocket_timing", LevelFilter::OFF)
+                    .with_target("codex_core::post_sampling_token_estimate", LevelFilter::OFF),
+            )
+    }
+
+    /// Returns a [`tracing_subscriber`] layer that collects structured metadata for feedback.
+    ///
+    /// Events with `target: "feedback_tags"` are treated as key/value tags to attach to feedback
+    /// uploads later.
+    pub fn metadata_layer<S>(&self) -> impl Layer<S> + Send + Sync + 'static
+    where
+        S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    {
+        FeedbackMetadataLayer {
+            inner: self.inner.clone(),
+        }
+        .with_filter(Targets::new().with_target(FEEDBACK_TAGS_TARGET, Level::TRACE))
+    }
+
+    pub fn snapshot(&self, session_id: Option<ThreadId>) -> FeedbackSnapshot {
+        let bytes = {
+            #[allow(clippy::expect_used)]
+            let guard = self.inner.ring.lock().expect("mutex poisoned");
+            guard.snapshot_bytes()
+        };
+        let tags = {
+            #[allow(clippy::expect_used)]
+            let guard = self.inner.tags.lock().expect("mutex poisoned");
+            guard.clone()
+        };
+        FeedbackSnapshot {
+            bytes,
+            tags,
+            feedback_diagnostics: FeedbackDiagnostics::collect_from_env(),
+            thread_id: session_id
+                .map(|id| id.to_string())
+                .unwrap_or("no-active-thread-".to_string() + &ThreadId::new().to_string()),
+        }
+    }
+}
+
+struct FeedbackInner {
+    ring: Mutex<RingBuffer>,
+    tags: Mutex<BTreeMap<String, String>>,
+}
+
+impl FeedbackInner {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            ring: Mutex::new(RingBuffer::new(max_bytes)),
+            tags: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct FeedbackMakeWriter {
+    inner: Arc<FeedbackInner>,
+}
+
+impl<'a> MakeWriter<'a> for FeedbackMakeWriter {
+    type Writer = FeedbackWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        FeedbackWriter {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+pub struct FeedbackWriter {
+    inner: Arc<FeedbackInner>,
+}
+
+impl Write for FeedbackWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut guard = self.inner.ring.lock().map_err(|_| io::ErrorKind::Other)?;
+        guard.push_bytes(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct RingBuffer {
+    max: usize,
+    buf: VecDeque<u8>,
+}
+
+impl RingBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            max: capacity,
+            buf: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    fn push_bytes(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+
+        // If the incoming chunk is larger than capacity, keep only the trailing bytes.
+        if data.len() >= self.max {
+            self.buf.clear();
+            let start = data.len() - self.max;
+            self.buf.extend(data[start..].iter().copied());
+            return;
+        }
+
+        // Evict from the front if we would exceed capacity.
+        let needed = self.len() + data.len();
+        if needed > self.max {
+            let to_drop = needed - self.max;
+            for _ in 0..to_drop {
+                let _ = self.buf.pop_front();
+            }
+        }
+
+        self.buf.extend(data.iter().copied());
+    }
+
+    fn snapshot_bytes(&self) -> Vec<u8> {
+        self.buf.iter().copied().collect()
+    }
+}
+
+pub struct FeedbackSnapshot {
+    bytes: Vec<u8>,
+    tags: BTreeMap<String, String>,
+    feedback_diagnostics: FeedbackDiagnostics,
+    pub thread_id: String,
+}
+
+pub struct FeedbackAttachmentPath {
+    pub path: PathBuf,
+    /// Optional filename to use for the uploaded attachment instead of `path`'s basename.
+    pub attachment_filename_override: Option<String>,
+}
+
+impl FeedbackAttachmentPath {
+    /// Read a whole regular file within the caller's size limit.
+    pub fn read_attachment(&self, max_bytes: usize) -> io::Result<Option<FeedbackAttachment>> {
+        let mut attachment_path = self.path.clone();
+        let mut rollout_path = codex_rollout::rollout_id_from_path(&self.path)
+            .map(|_| codex_rollout::plain_rollout_path(&self.path));
+        let mut raw_rollout = false;
+        let decoded = if let Some(plain_path) = &rollout_path {
+            match codex_rollout::read_rollout_prefix(&self.path, max_bytes.saturating_add(1)) {
+                Ok(Some(buffer)) => Some(buffer),
+                Ok(None) => {
+                    tracing::error!(
+                        "feedback attachment skipped: rollout is missing or not a regular file"
+                    );
+                    return Ok(None);
+                }
+                Err(error)
+                    if error.raw_os_error().is_none()
+                        && matches!(
+                            error.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::InvalidData
+                                | io::ErrorKind::Other
+                        )
+                        && !plain_path.try_exists().unwrap_or(true) =>
+                {
+                    // Preserve a selected, undecodable archive for diagnosis. Never replace
+                    // a preferred plain rollout with its potentially stale compressed sibling.
+                    attachment_path = plain_path.with_extension("jsonl.zst");
+                    rollout_path = None;
+                    raw_rollout = true;
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let buffer = if let Some(buffer) = decoded {
+            buffer
+        } else {
+            let metadata = fs::metadata(&attachment_path)?;
+            if !metadata.is_file() {
+                tracing::error!("feedback attachment skipped: not a regular file");
+                return Ok(None);
+            }
+            if metadata.len() > max_bytes as u64 {
+                tracing::error!(
+                    bytes = metadata.len(),
+                    max_bytes,
+                    "feedback attachment skipped: size limit exceeded"
+                );
+                return Ok(None);
+            }
+            let mut buffer = Vec::new();
+            // Detect files that grow past the limit after the metadata check.
+            fs::File::open(&attachment_path)?
+                .take(max_bytes as u64 + 1)
+                .read_to_end(&mut buffer)?;
+            buffer
+        };
+        if buffer.len() > max_bytes {
+            tracing::error!(
+                bytes_read = buffer.len(),
+                max_bytes,
+                "feedback attachment skipped: decoded size limit exceeded"
+            );
+            return Ok(None);
+        }
+        let mut filename = self
+            .attachment_filename_override
+            .clone()
+            .unwrap_or_else(|| {
+                rollout_path
+                    .as_ref()
+                    .unwrap_or(&attachment_path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "extra-log.log".to_string())
+            });
+        if raw_rollout && !filename.ends_with(".zst") {
+            filename.push_str(".zst");
+        }
+        let content_type = match Path::new(&filename)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some(extension) if extension.eq_ignore_ascii_case("jsonl") => "text/plain".to_string(),
+            _ => mime_guess::from_path(&filename)
+                .first_or_octet_stream()
+                .essence_str()
+                .to_string(),
+        };
+        Ok(Some(FeedbackAttachment {
+            filename,
+            content_type: Some(content_type),
+            buffer,
+        }))
+    }
+}
+
+/// In-memory attachment to include in a feedback upload.
+///
+/// Use this for generated diagnostics that should not be materialized on disk,
+/// such as the redacted doctor report. File-backed artifacts should use
+/// `FeedbackAttachmentPath` so upload-time read failures can be logged and
+/// skipped independently.
+pub struct FeedbackAttachment {
+    /// Attachment filename shown in Sentry and in the feedback consent UI.
+    pub filename: String,
+    /// Optional MIME type for consumers that render or classify attachments.
+    pub content_type: Option<String>,
+    /// Attachment bytes captured before the upload starts.
+    pub buffer: Vec<u8>,
+}
+
+/// Inputs that control one feedback upload to Sentry.
+///
+/// The caller is responsible for applying any user-consent gate before setting
+/// `include_logs` or passing diagnostic attachments. This type only describes
+/// what to upload once that decision has been made.
+pub struct FeedbackUploadOptions<'a> {
+    pub classification: &'a str,
+    pub reason: Option<&'a str>,
+    pub tags: Option<&'a BTreeMap<String, String>>,
+    pub include_logs: bool,
+    /// Owned diagnostics and frozen rollout prefixes that are safe to upload.
+    ///
+    /// Diagnostics follow `codex-logs.log`; rollout prefixes join the archive with
+    /// path-backed rollouts. Callers must apply any user consent gate first.
+    pub extra_attachments: Vec<FeedbackAttachment>,
+    pub extra_attachment_paths: &'a [FeedbackAttachmentPath],
+    pub session_source: Option<SessionSource>,
+    pub logs_override: Option<Vec<u8>>,
+}
+
+impl FeedbackSnapshot {
+    /// Refreshes log bytes while preserving the captured metadata and thread identity.
+    pub fn refresh_logs(&mut self, feedback: &CodexFeedback) {
+        self.bytes = feedback
+            .inner
+            .ring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot_bytes();
+    }
+
+    fn feedback_event(
+        &self,
+        classification: &str,
+        reason: Option<&str>,
+        tags: Option<&BTreeMap<String, String>>,
+        session_source: Option<&SessionSource>,
+    ) -> sentry::protocol::Event<'static> {
+        use sentry::protocol::Event;
+        use sentry::protocol::Exception;
+        use sentry::protocol::Level;
+        use sentry::protocol::Values;
+
+        let level = match classification {
+            "bug" | "bad_result" | "safety_check" => Level::Error,
+            _ => Level::Info,
+        };
+        let custom_title = tags
+            .and_then(|tags| tags.get("feedback_title"))
+            .map(|title| title.trim())
+            .filter(|title| !title.is_empty());
+        let title = custom_title.map_or_else(
+            || {
+                format!(
+                    "[{}]: Codex session {}",
+                    display_classification(classification),
+                    self.thread_id
+                )
+            },
+            str::to_owned,
+        );
+        let mut event = Event {
+            level,
+            message: Some(title.clone()),
+            tags: self.upload_tags(classification, reason, tags, session_source),
+            ..Default::default()
+        };
+        if custom_title.is_some() {
+            // A shared title must not merge independent reports and suppress new-issue alerts.
+            event.fingerprint = vec![event.event_id.to_string().into()].into();
+        }
+        if let Some(reason) = reason {
+            event.exception = Values::from(vec![Exception {
+                ty: title,
+                value: Some(reason.to_string()),
+                ..Default::default()
+            }]);
+        }
+        event
+    }
+
+    pub fn log_attachment(&self, logs_override: Option<Vec<u8>>) -> FeedbackAttachment {
+        FeedbackAttachment {
+            filename: "codex-logs.log".to_string(),
+            content_type: Some("text/plain".to_string()),
+            buffer: logs_override.unwrap_or_else(|| self.bytes.clone()),
+        }
+    }
+
+    pub fn feedback_diagnostics(&self) -> &FeedbackDiagnostics {
+        &self.feedback_diagnostics
+    }
+
+    pub fn with_feedback_diagnostics(mut self, feedback_diagnostics: FeedbackDiagnostics) -> Self {
+        self.feedback_diagnostics = feedback_diagnostics;
+        self
+    }
+
+    pub fn feedback_diagnostics_attachment_text(&self, include_logs: bool) -> Option<String> {
+        if !include_logs {
+            return None;
+        }
+
+        self.feedback_diagnostics.attachment_text()
+    }
+
+    /// Submit feedback to Sentry with whole attachments within a shared deadline.
+    /// Success means HTTP acceptance, not durable attachment storage. Callers must
+    /// retain their source files; errors can occur after part of a report is accepted.
+    /// https://github.com/getsentry/relay/blob/master/relay-server/src/endpoints/common.rs
+    pub async fn upload_feedback(
+        &self,
+        options: FeedbackUploadOptions<'_>,
+        http_client_factory: &HttpClientFactory,
+    ) -> Result<()> {
+        self.upload_feedback_with_dsn(
+            options,
+            http_client_factory,
+            SENTRY_DSN,
+            Instant::now() + UPLOAD_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Atomically saves the consent-selected report and attachments without uploading.
+    /// Existing paths are rejected and failures never publish a partial archive.
+    pub fn save_feedback(&self, options: FeedbackUploadOptions<'_>, path: &Path) -> Result<()> {
+        let report = serde_json::to_vec(&self.feedback_event(
+            options.classification,
+            options.reason,
+            options.tags,
+            options.session_source.as_ref(),
+        ))?;
+        anyhow::ensure!(
+            report.len() <= MAX_EVENT_BYTES,
+            "feedback event exceeds the size limit"
+        );
+        let logs = options
+            .include_logs
+            .then(|| self.log_attachment(options.logs_override));
+        let diagnostics = self
+            .feedback_diagnostics_attachment_text(options.include_logs)
+            .map(|text| FeedbackAttachment {
+                buffer: text.into_bytes(),
+                filename: FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME.to_string(),
+                content_type: Some("text/plain".to_string()),
+            });
+        archive::save(
+            path,
+            &report,
+            logs.into_iter()
+                .chain(options.extra_attachments)
+                .chain(diagnostics)
+                .map(archive::Input::Owned)
+                .chain(
+                    options
+                        .extra_attachment_paths
+                        .iter()
+                        .map(archive::Input::Path),
+                ),
+            archive::Limits::default(),
+        )
+    }
+
+    async fn upload_feedback_with_dsn(
+        &self,
+        options: FeedbackUploadOptions<'_>,
+        http_client_factory: &HttpClientFactory,
+        dsn: &str,
+        deadline: Instant,
+    ) -> Result<()> {
+        use std::str::FromStr;
+
+        use sentry::protocol::Envelope;
+        use sentry::protocol::EnvelopeItem;
+        use sentry::types::Dsn;
+
+        let started_at = Instant::now();
+        let dsn = Dsn::from_str(dsn).map_err(|error| anyhow!("invalid DSN: {error}"))?;
+
+        let event = self.feedback_event(
+            options.classification,
+            options.reason,
+            options.tags,
+            options.session_source.as_ref(),
+        );
+        let mut envelope = Envelope::new();
+        envelope.add_item(EnvelopeItem::Event(event));
+        let (event_body, event_bytes) =
+            upload::encode_envelope(&envelope).context("failed to serialize feedback event")?;
+        anyhow::ensure!(
+            event_bytes <= MAX_EVENT_BYTES,
+            "feedback event exceeds the size limit"
+        );
+        let headers = envelope.headers().clone();
+        drop(envelope);
+        let client_pool = RouteAwareClientPool::new_without_redirects_or_request_logging(
+            http_client_factory.clone(),
+            ClientRouteClass::Other,
+        );
+        // Accept the report before reading diagnostics; all envelopes share one deadline.
+        let mut rate_limited = false;
+        let status = upload::send_envelope(
+            &client_pool,
+            &dsn,
+            event_body,
+            upload::EnvelopeKind::Event,
+            deadline,
+            &mut rate_limited,
+        )
+        .await?;
+        anyhow::ensure!(
+            status.is_success(),
+            "Sentry rejected feedback upload with HTTP status {status}"
+        );
+
+        let mut attachments = self.feedback_attachments(
+            &headers,
+            options.include_logs,
+            options.extra_attachments,
+            options.extra_attachment_paths,
+            options.logs_override,
+        );
+        let mut uploaded_attachments = 0;
+        let mut attachments_failed = false;
+        // Keep attachments linked to the accepted event, without replaying its contents.
+        // Inspect the upper bound without reading the next file after the deadline.
+        while attachments.size_hint().1 != Some(0) {
+            if rate_limited || Instant::now() >= deadline {
+                attachments_failed = true;
+                tracing::error!(
+                    reason = if rate_limited {
+                        "rate limit"
+                    } else {
+                        "upload deadline"
+                    },
+                    "remaining feedback attachments skipped"
+                );
+                break;
+            }
+            let Some(attachment) = attachments.next() else {
+                break;
+            };
+            if Instant::now() >= deadline {
+                attachments_failed = true;
+                tracing::error!(
+                    "remaining feedback attachments skipped: upload deadline reached while reading attachment"
+                );
+                break;
+            }
+            let mut status = None;
+            let result: Result<()> = async {
+                let body = upload::encode_attachment_envelope(&headers, attachment?)?;
+                let response_status = upload::send_envelope(
+                    &client_pool,
+                    &dsn,
+                    body,
+                    upload::EnvelopeKind::Attachment,
+                    deadline,
+                    &mut rate_limited,
+                )
+                .await
+                .map_err(|error| {
+                    // Transport error strings can contain credential-bearing URLs.
+                    if let Some(cause) = error.downcast_ref::<codex_http_client::RouteAwareRequestError>() {
+                        anyhow!(
+                            "feedback transport failed: class={:?}, timeout={}, connect={}, request={}, body={}",
+                            cause.failure_class(), cause.is_timeout(), cause.is_connect(), cause.is_request(), cause.is_body()
+                        )
+                    } else {
+                        error
+                    }
+                })?;
+
+                status = Some(response_status.as_u16());
+                anyhow::ensure!(response_status.is_success(), "Sentry rejected attachment");
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                attachments_failed = true;
+                // Keep trying other diagnostics before reporting the partial failure.
+                tracing::error!(status, error = %format!("{error:#}"), "feedback attachment upload failed; continuing");
+            } else {
+                uploaded_attachments += 1;
+            }
+        }
+        tracing::info!(
+            thread_id = %self.thread_id,
+            uploaded_attachments,
+            attachments_failed,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "feedback event uploaded to Sentry"
+        );
+        anyhow::ensure!(
+            !attachments_failed,
+            "feedback report was accepted, but some attachments failed to upload"
+        );
+        Ok(())
+    }
+
+    fn upload_tags(
+        &self,
+        classification: &str,
+        reason: Option<&str>,
+        client_tags: Option<&BTreeMap<String, String>>,
+        session_source: Option<&SessionSource>,
+    ) -> BTreeMap<String, String> {
+        let cli_version = env!("CARGO_PKG_VERSION");
+        let mut tags = BTreeMap::from([
+            (String::from("thread_id"), self.thread_id.to_string()),
+            (String::from("classification"), classification.to_string()),
+            (String::from("cli_version"), cli_version.to_string()),
+        ]);
+        if let Some(source) = session_source {
+            tags.insert(String::from("session_source"), source.to_string());
+        }
+        if let Some(reason) = reason {
+            // Sentry tags cannot contain newlines or exceed 200 characters. Keep the
+            // full comment in the exception body and a preview for tag consumers.
+            let preview = reason
+                .chars()
+                .take(200)
+                .map(|ch| if matches!(ch, '\r' | '\n') { ' ' } else { ch })
+                .collect();
+            tags.insert(String::from("reason"), preview);
+        }
+
+        let reserved = [
+            "thread_id",
+            "classification",
+            "cli_version",
+            "session_source",
+            "reason",
+        ];
+        if let Some(client_tags) = client_tags {
+            for (key, value) in client_tags {
+                if reserved.contains(&key.as_str()) {
+                    continue;
+                }
+                if let Entry::Vacant(entry) = tags.entry(key.clone()) {
+                    entry.insert(value.clone());
+                }
+            }
+        }
+        for (key, value) in &self.tags {
+            if reserved.contains(&key.as_str()) {
+                continue;
+            }
+            if let Entry::Vacant(entry) = tags.entry(key.clone()) {
+                entry.insert(value.clone());
+            }
+        }
+
+        tags
+    }
+
+    fn feedback_attachments<'a>(
+        &'a self,
+        headers: &'a sentry::protocol::EnvelopeHeaders,
+        include_logs: bool,
+        extra_attachments: Vec<FeedbackAttachment>,
+        extra_attachment_paths: &'a [FeedbackAttachmentPath],
+        logs_override: Option<Vec<u8>>,
+    ) -> impl Iterator<Item = Result<sentry::protocol::Attachment>> + 'a {
+        use sentry::protocol::Attachment;
+
+        // Partition metadata without reading files before the event is accepted. Keep
+        // generated diagnostics first, then rollouts, then remaining files in caller order.
+        let (rollouts, diagnostics_attachments): (Vec<_>, Vec<_>) =
+            extra_attachments.into_iter().partition(|attachment| {
+                codex_rollout::rollout_id_from_path(Path::new(&attachment.filename)).is_some()
+            });
+        let (rollout_paths, diagnostic_paths): (Vec<_>, Vec<_>) =
+            extra_attachment_paths.iter().partition(|attachment| {
+                codex_rollout::rollout_id_from_path(&attachment.path).is_some()
+            });
+        let has_rollouts = !rollouts.is_empty() || !rollout_paths.is_empty();
+        let archive = has_rollouts
+            .then_some((rollout_paths, rollouts))
+            .into_iter()
+            .flat_map(move |(paths, rollouts)| {
+                let archive =
+                    tempfile::tempdir()
+                        .map_err(anyhow::Error::from)
+                        .and_then(|directory| {
+                            let output_path = directory.path().join("rollouts.tar.gz");
+                            let Some(archive) = rollout_archive::archive_rollouts(
+                                &output_path,
+                                paths.iter().copied(),
+                                &rollouts,
+                                MAX_DECODED_UPLOAD_BYTES,
+                            )?
+                            else {
+                                return Ok(None);
+                            };
+                            let attachment = archive
+                                .read_attachment(MAX_DECODED_UPLOAD_BYTES)?
+                                .context("rollout archive is missing or exceeds the size limit")?;
+                            // Measure framing without copying the archive. Account for the extra
+                            // decimal digits when the empty attachment's length becomes nonzero.
+                            let mut envelope =
+                                sentry::protocol::Envelope::new().with_headers(headers.clone());
+                            envelope.add_item(Attachment {
+                                filename: attachment.filename.clone(),
+                                content_type: attachment.content_type.clone(),
+                                ..Default::default()
+                            });
+                            let mut framing = Vec::new();
+                            envelope.to_writer(&mut framing)?;
+                            let archive_bytes = attachment.buffer.len();
+                            let envelope_bytes = framing.len()
+                                + archive_bytes
+                                + archive_bytes.checked_ilog10().unwrap_or(0) as usize;
+                            anyhow::ensure!(
+                                envelope_bytes <= MAX_DECODED_UPLOAD_BYTES,
+                                "rollout archive envelope exceeds the size limit"
+                            );
+                            Ok(Some(attachment))
+                        });
+                rollout_archive::with_individual_fallback(
+                    archive,
+                    paths,
+                    rollouts,
+                    MAX_DECODED_UPLOAD_BYTES,
+                )
+            });
+        let logs = include_logs.then(|| self.log_attachment(logs_override));
+        let diagnostics = self
+            .feedback_diagnostics_attachment_text(include_logs)
+            .map(|text| FeedbackAttachment {
+                buffer: text.into_bytes(),
+                filename: FEEDBACK_DIAGNOSTICS_ATTACHMENT_FILENAME.to_string(),
+                content_type: Some("text/plain".to_string()),
+            });
+
+        logs.into_iter()
+            .chain(diagnostics_attachments)
+            .chain(diagnostics)
+            .map(Ok)
+            .chain(archive)
+            .chain(diagnostic_paths.into_iter().map(|attachment_path| {
+                attachment_path
+                    .read_attachment(MAX_DECODED_UPLOAD_BYTES)?
+                    .context("feedback attachment is not a regular file or exceeds the size limit")
+            }))
+            .map(|attachment| {
+                attachment.map(|attachment| Attachment {
+                    buffer: attachment.buffer,
+                    filename: attachment.filename,
+                    content_type: attachment.content_type,
+                    ty: None,
+                })
+            })
+    }
+}
+
+fn display_classification(classification: &str) -> String {
+    match classification {
+        "bug" => "Bug".to_string(),
+        "bad_result" => "Bad result".to_string(),
+        "good_result" => "Good result".to_string(),
+        "safety_check" => "Safety check".to_string(),
+        _ => "Other".to_string(),
+    }
+}
+
+#[derive(Clone)]
+struct FeedbackMetadataLayer {
+    inner: Arc<FeedbackInner>,
+}
+
+impl<S> Layer<S> for FeedbackMetadataLayer
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        // This layer is filtered by `Targets`, but keep the guard anyway in case it is used without
+        // the filter.
+        if event.metadata().target() != FEEDBACK_TAGS_TARGET {
+            return;
+        }
+
+        let mut visitor = FeedbackTagsVisitor::default();
+        event.record(&mut visitor);
+        // Expand runtime-selected keys alongside ordinary tracing fields.
+        if let Some(json) = visitor.tags.remove("tags_json")
+            && let Ok(tags) = serde_json::from_str::<BTreeMap<String, String>>(&json)
+        {
+            visitor.tags.extend(tags);
+        }
+        if visitor.tags.is_empty() {
+            return;
+        }
+
+        #[allow(clippy::expect_used)]
+        let mut guard = self.inner.tags.lock().expect("mutex poisoned");
+        for (key, value) in visitor.tags {
+            if guard.len() >= MAX_FEEDBACK_TAGS && !guard.contains_key(&key) {
+                continue;
+            }
+            guard.insert(key, value);
+        }
+    }
+}
+
+#[derive(Default)]
+struct FeedbackTagsVisitor {
+    tags: BTreeMap<String, String>,
+}
+
+impl Visit for FeedbackTagsVisitor {
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.tags
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.tags
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.tags
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        self.tags
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.tags
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.tags
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+}
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

@@ -1,0 +1,36 @@
+use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
+
+// This warning is not produced anymore but fragment definition is used to filter messaged from old sessions
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LegacyModelMismatchWarning;
+
+impl ContextualUserFragment for LegacyModelMismatchWarning {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("model_switch.legacy_mismatch_warning".to_string())
+    }
+
+    fn role(&self) -> &'static str {
+        "user"
+    }
+
+    fn markers(&self) -> (&'static str, &'static str) {
+        Self::type_markers()
+    }
+
+    fn type_markers() -> (&'static str, &'static str) {
+        ("", "")
+    }
+
+    fn matches_text(text: &str) -> bool {
+        text.trim().starts_with(
+            "Warning: Your account was flagged for potentially high-risk cyber activity",
+        )
+    }
+
+    fn body(&self) -> ContentItem {
+        input_text(String::new())
+    }
+}
