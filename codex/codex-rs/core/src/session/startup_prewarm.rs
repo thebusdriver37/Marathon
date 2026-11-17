@@ -36,6 +36,7 @@ use codex_protocol::protocol::SubAgentSource;
 pub(crate) enum PrewarmInput {
     Base,
     History,
+    ModelSelection,
 }
 
 impl PrewarmInput {
@@ -43,6 +44,7 @@ impl PrewarmInput {
         match self {
             Self::Base => "base",
             Self::History => "history",
+            Self::ModelSelection => "model_selection",
         }
     }
 }
@@ -308,6 +310,9 @@ async fn schedule_startup_prewarm_inner(
 ) -> CodexResult<ModelClientSession> {
     let prewarm_started_at = Instant::now();
     let mut client_session = session.services.model_client.new_session();
+    if matches!(input, PrewarmInput::ModelSelection) {
+        client_session.reset_for_model_prewarm();
+    }
     let websocket_ready = client_session.is_websocket_prewarmed().await;
     // Count the decision before preparation can fail; fresh clients also need prewarm.
     session.services.session_telemetry.counter(
@@ -396,7 +401,7 @@ async fn schedule_startup_prewarm_inner(
     )?;
     let build_prompt_started_at = Instant::now();
     let prompt_input = match input {
-        PrewarmInput::Base => Vec::new(),
+        PrewarmInput::Base | PrewarmInput::ModelSelection => Vec::new(),
         PrewarmInput::History => {
             // Use the same history projection and tool metadata as a sampling request.
             // The real turn still checks this prefix before reusing the prepared response.

@@ -612,6 +612,8 @@ pub(super) async fn submission_loop(
                     reply,
                 } => {
                     let _settings_guard = thread_settings::acquire_persistence_lock(&sess).await;
+                    let prewarm_model = thread_settings.model.is_some()
+                        && sess.get_config().await.model_provider_id == "marathon-local";
                     let thread_settings = WithTurnExtensionData {
                         request: thread_settings,
                         turn_extension_init: sub.turn_extension_init,
@@ -623,6 +625,15 @@ pub(super) async fn submission_loop(
                                 let _ = reply.send(Ok(()));
                             }
                             thread_settings::emit_applied(&sess, sub.id.clone(), snapshot).await;
+                            if prewarm_model {
+                                if let Some(prewarm) = sess.take_session_startup_prewarm().await {
+                                    prewarm.abort().await;
+                                }
+                                sess.schedule_startup_prewarm(
+                                    super::startup_prewarm::PrewarmInput::ModelSelection,
+                                )
+                                .await;
+                            }
                         }
                         Err(error) => {
                             let message = format!("invalid thread settings override: {error}");

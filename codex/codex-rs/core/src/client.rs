@@ -2315,6 +2315,12 @@ impl ModelClientSession {
         websocket_telemetry
     }
 
+    /// A deliberate model choice needs a new generate=false request, even when
+    /// the previous model left a healthy cached connection.
+    pub(crate) fn reset_for_model_prewarm(&mut self) {
+        self.websocket_session.reset(Some("other"));
+    }
+
     /// Whether a previous request prepared a connection that is not known to be closed.
     /// The next request still validates provider, auth, and headers before reuse.
     pub(crate) async fn is_websocket_prewarmed(&self) -> bool {
