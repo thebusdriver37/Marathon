@@ -1476,6 +1476,7 @@ async fn run_ratatui_app(
             terminal_restore_guard.restore_silently();
             session_log::log_session_end();
             let _ = tui.terminal.clear();
+            let action_command = codex_utils_cli::cli_command_for_action(action);
             Ok(AppExitInfo {
                 token_usage: crate::token_usage::TokenUsage::default(),
                 thread_id: None,
@@ -1483,7 +1484,7 @@ async fn run_ratatui_app(
                 disconnect_info: None,
                 update_action: None,
                 exit_reason: ExitReason::Fatal(format!(
-                    "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
+                    "No saved session found with ID {id_str}. Run `{action_command}` without an ID to choose from existing sessions."
                 )),
             })
         };
