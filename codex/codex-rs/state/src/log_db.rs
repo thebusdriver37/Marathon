@@ -87,6 +87,10 @@ pub fn default_filter() -> Targets {
         // Per-chunk streaming traces otherwise flood the bounded SQLite log queue.
         .with_target("codex_tui::streaming::controller", LevelFilter::DEBUG)
         .with_target("codex_tui::streaming::table_holdback", LevelFilter::DEBUG)
+        // Per-message app-server and Markdown traces dominate retained rows in long TUI sessions.
+        // Keep their DEBUG diagnostics while excluding high-frequency TRACE bookkeeping.
+        .with_target("codex_app_server::outgoing_message", LevelFilter::DEBUG)
+        .with_target("codex_tui::markdown_stream", LevelFilter::DEBUG)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

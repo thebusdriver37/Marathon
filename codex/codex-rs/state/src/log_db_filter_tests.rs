@@ -85,6 +85,22 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
         "retained-table-holdback-debug"
     );
     tracing::trace!(
+        target: "codex_app_server::outgoing_message",
+        "dropped-app-server-message-trace"
+    );
+    tracing::debug!(
+        target: "codex_app_server::outgoing_message",
+        "retained-app-server-message-debug"
+    );
+    tracing::trace!(
+        target: "codex_tui::markdown_stream",
+        "dropped-markdown-stream-trace"
+    );
+    tracing::debug!(
+        target: "codex_tui::markdown_stream",
+        "retained-markdown-stream-debug"
+    );
+    tracing::trace!(
         target: "codex_tui::streaming::commit_tick",
         "retained-commit-tick-trace"
     );
@@ -163,6 +179,16 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
                 "DEBUG",
                 "codex_tui::streaming::table_holdback",
                 Some("retained-table-holdback-debug"),
+            ),
+            (
+                "DEBUG",
+                "codex_app_server::outgoing_message",
+                Some("retained-app-server-message-debug"),
+            ),
+            (
+                "DEBUG",
+                "codex_tui::markdown_stream",
+                Some("retained-markdown-stream-debug"),
             ),
             (
                 "TRACE",
