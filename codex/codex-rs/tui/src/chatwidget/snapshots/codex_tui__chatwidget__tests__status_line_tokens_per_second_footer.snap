@@ -1,10 +1,9 @@
 ---
 source: tui/src/chatwidget/tests/status_and_layout.rs
-assertion_line: 2955
 expression: normalized_backend_snapshot(terminal.backend())
 ---
 "                                                                        "
 "                                                                        "
 "› Ask Codex to do anything                                              "
 "                                                                        "
-"  60 tok/s decode · first output 2.5s · total 202s                      "
+"  60.6 tok/s turn avg · first output 2.5s · total 202s                  "

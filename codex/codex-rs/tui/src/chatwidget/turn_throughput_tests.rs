@@ -55,6 +55,13 @@ fn completed_calls_have_a_decode_time_weighted_average() {
     assert_eq!(
         throughput.sample(),
         Some(ThroughputSample {
+            tokens_per_second: 200.0 / 6.0
+        })
+    );
+    throughput.finish_turn(Instant::now());
+    assert_eq!(
+        throughput.sample(),
+        Some(ThroughputSample {
             tokens_per_second: 50.0
         })
     );
@@ -67,6 +74,13 @@ fn duplicate_completion_does_not_count_twice() {
     throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
     throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
     throughput.complete_response("second", Some(&metrics(/*tokens*/ 200, /*seconds*/ 6)));
+    assert_eq!(
+        throughput.sample(),
+        Some(ThroughputSample {
+            tokens_per_second: 200.0 / 6.0
+        })
+    );
+    throughput.finish_turn(Instant::now());
     assert_eq!(
         throughput.sample(),
         Some(ThroughputSample {
@@ -157,4 +171,29 @@ fn first_output_is_recorded_once_and_stage_tracks_the_stream() {
     );
     throughput.finish_turn(start + Duration::from_secs(10));
     assert_eq!(throughput.generation_stage(), None);
+}
+
+#[test]
+fn latest_call_recovers_after_missing_timings_but_turn_average_does_not() {
+    let mut throughput = TurnThroughput::default();
+    throughput.start_turn(Instant::now());
+    throughput.complete_response("first", Some(&metrics(/*tokens*/ 6700, /*seconds*/ 100)));
+    throughput.complete_response("missing", None);
+    assert_eq!(throughput.sample(), None);
+    throughput.complete_response("latest", Some(&metrics(/*tokens*/ 105, /*seconds*/ 1)));
+    assert_eq!(
+        throughput.sample(),
+        Some(ThroughputSample {
+            tokens_per_second: 105.0
+        })
+    );
+    throughput.complete_response("first", Some(&metrics(/*tokens*/ 6700, /*seconds*/ 100)));
+    assert_eq!(
+        throughput.sample(),
+        Some(ThroughputSample {
+            tokens_per_second: 105.0
+        })
+    );
+    throughput.finish_turn(Instant::now());
+    assert_eq!(throughput.sample(), None);
 }

@@ -37,6 +37,7 @@ pub(super) struct TurnThroughput {
     decode_tokens: u64,
     decode_microseconds: u64,
     missing_timings: bool,
+    latest_sample: Option<ThroughputSample>,
     generation_stage: Option<GenerationStage>,
 }
 
@@ -70,6 +71,7 @@ impl TurnThroughput {
             return;
         }
         self.generation_stage = None;
+        self.latest_sample = None;
         let Some(metrics) = metrics else {
             self.missing_timings = true;
             return;
@@ -80,6 +82,12 @@ impl TurnThroughput {
         {
             self.missing_timings = true;
             return;
+        }
+        if metrics.decode_tokens > 0 && metrics.decode_microseconds > 0 {
+            self.latest_sample = Some(ThroughputSample {
+                tokens_per_second: metrics.decode_tokens as f64 * 1_000_000.0
+                    / metrics.decode_microseconds as f64,
+            });
         }
         self.decode_tokens = self.decode_tokens.saturating_add(metrics.decode_tokens);
         self.decode_microseconds = self
@@ -115,7 +123,15 @@ impl TurnThroughput {
         self.generation_stage = Some(generation_stage);
     }
 
+    pub(super) fn is_finished(&self) -> bool {
+        self.turn_finished_at.is_some()
+    }
+
+    // During tool loops report the latest response; only summarize at turn end.
     pub(super) fn sample(&self) -> Option<ThroughputSample> {
+        if !self.is_finished() {
+            return self.latest_sample;
+        }
         if self.missing_timings || self.decode_tokens == 0 || self.decode_microseconds == 0 {
             return None;
         }

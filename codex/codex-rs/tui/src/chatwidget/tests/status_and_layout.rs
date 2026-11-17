@@ -3145,13 +3145,30 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
             model_context_window: Some(131_072),
         }),
     );
+    chat.turn_throughput.complete_response(
+        "latest",
+        Some(&codex_app_server_protocol::MarathonResponseMetrics {
+            decode_tokens: 105,
+            decode_microseconds: 1_000_000,
+            backend_calls: 1,
+            timed_backend_calls: 1,
+            ..Default::default()
+        }),
+    );
+    chat.refresh_status_line();
+    let live_label = status_line_text(&chat).expect("latest call footer");
+    // Wall time is live here; snapshot the stable rate and latency prefix.
+    insta::assert_snapshot!(
+        "status_line_latest_decode",
+        live_label.split(" · total").next().unwrap()
+    );
     chat.turn_throughput
         .finish_turn(started_at + Duration::from_secs(200));
     chat.refresh_status_line();
 
     assert_eq!(
         status_line_text(&chat),
-        Some("60 tok/s decode · first output 2.5s · total 202s".to_string())
+        Some("60.6 tok/s turn avg · first output 2.5s · total 202s".to_string())
     );
 
     let width = 72;

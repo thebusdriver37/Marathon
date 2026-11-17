@@ -460,9 +460,14 @@ impl ChatWidget {
         }
 
         let elapsed = self.turn_throughput.elapsed(Instant::now())?;
+        let rate_label = if self.turn_throughput.is_finished() {
+            "turn avg"
+        } else {
+            "decode"
+        };
         let mut label = self.turn_throughput.sample().map_or_else(
-            || "decode n/a".to_string(),
-            |sample| format!("{:.0} tok/s decode", sample.tokens_per_second),
+            || format!("{rate_label} n/a"),
+            |sample| format!("{:.1} tok/s {rate_label}", sample.tokens_per_second),
         );
         if let Some(latency) = self.turn_throughput.time_to_first_output() {
             label.push_str(&format!(" · first output {}", format_latency(latency)));
