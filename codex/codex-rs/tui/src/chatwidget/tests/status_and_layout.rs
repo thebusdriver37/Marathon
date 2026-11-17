@@ -3190,11 +3190,14 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
 
     handle_turn_started(&mut chat, "turn-stage");
     chat.refresh_status_line();
-    assert_eq!(status_line_text(&chat), Some("Prefill".to_string()));
+    assert!(
+        status_line_text(&chat).is_some_and(|status| status.starts_with("Prefill · total ")),
+        "prefill should include live turn duration"
+    );
 
     handle_agent_reasoning_delta(&mut chat, "thinking");
     assert!(
-        status_line_text(&chat).is_some_and(|status| status == "Thinking"),
+        status_line_text(&chat).is_some_and(|status| status.starts_with("Thinking · total ")),
         "reasoning delta should identify thinking"
     );
 
@@ -3207,7 +3210,7 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
 
     handle_agent_message_delta(&mut chat, "answering");
     assert!(
-        status_line_text(&chat).is_some_and(|status| status == "Answering"),
+        status_line_text(&chat).is_some_and(|status| status.starts_with("Generating · total ")),
         "answer delta should identify answering"
     );
 }
@@ -3275,7 +3278,10 @@ async fn status_line_shows_streaming_patch_progress_and_apply_lifecycle() {
         }),
         None,
     );
-    assert_eq!(status_line_text(&chat), Some("Prefill".to_string()));
+    assert!(
+        status_line_text(&chat).is_some_and(|status| status.starts_with("Prefill · total ")),
+        "the next model request should retain live elapsed feedback"
+    );
 }
 
 #[tokio::test]

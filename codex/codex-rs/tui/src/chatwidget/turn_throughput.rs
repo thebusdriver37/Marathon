@@ -20,7 +20,7 @@ impl GenerationStage {
         match self {
             Self::Prefill => "Prefill",
             Self::Thinking => "Thinking",
-            Self::Answering => "Answering",
+            Self::Answering => "Generating",
             Self::PreparingAction => "Preparing next action",
             Self::DraftingCode => "Drafting",
             Self::ApplyingChanges => "Applying",
