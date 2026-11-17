@@ -3104,15 +3104,16 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
 
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.show_welcome_banner = false;
-    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
+    chat.config.animations = false;
+    chat.config.tui_status_line = Some(vec![
+        "run-state".to_string(),
+        "tokens-per-second".to_string(),
+    ]);
     let started_at = Instant::now() - Duration::from_secs(200);
     chat.turn_throughput
         .start_turn(started_at - Duration::from_millis(2_500));
-    chat.turn_throughput.record_output_delta(
-        "streamed response",
-        GenerationStage::Answering,
-        started_at,
-    );
+    chat.turn_throughput
+        .record_output_delta("streamed response", GenerationStage::Answering);
     chat.handle_server_notification(
         ServerNotification::RawResponseCompleted(
             codex_app_server_protocol::RawResponseCompletedNotification {
@@ -3160,17 +3161,9 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
     );
     chat.refresh_status_line();
     let live_label = status_line_text(&chat).expect("latest call footer");
-    assert!(
-        is_working_status(&live_label),
-        "tool-loop gaps should keep one stable working state: {live_label}"
-    );
-    chat.turn_throughput
-        .finish_turn(started_at + Duration::from_secs(200));
-    chat.refresh_status_line();
-
     assert_eq!(
-        status_line_text(&chat),
-        Some("60.6 tok/s · first 2.5s".to_string())
+        live_label, "Working · 105.0 tok/s",
+        "the rate should update only from the latest completed backend call"
     );
 
     let width = 72;
@@ -3183,45 +3176,52 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
         "status_line_tokens_per_second_footer",
         normalized_backend_snapshot(terminal.backend())
     );
+
+    chat.turn_throughput
+        .finish_turn(started_at + Duration::from_secs(200));
+    chat.refresh_status_line();
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("Ready · 60.6 tok/s".to_string())
+    );
 }
 
 #[tokio::test]
-async fn status_line_keeps_one_working_state_across_generation_stages() {
+async fn status_line_limits_active_states_to_working_and_thinking() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
+    chat.config.tui_status_line = Some(vec!["run-state".to_string()]);
 
     handle_turn_started(&mut chat, "turn-stage");
     chat.refresh_status_line();
     assert!(
-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
+        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
         "prefill should use the stable working state"
     );
 
     handle_agent_reasoning_delta(&mut chat, "thinking");
     assert!(
-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
-        "reasoning should retain the stable working state"
+        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Thinking")),
+        "reasoning should expose the useful thinking distinction"
     );
 
     handle_agent_reasoning_final(&mut chat);
     assert!(
-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
+        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
         "the next action should retain the stable working state"
     );
 
     handle_agent_message_delta(&mut chat, "answering");
     assert!(
-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
+        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
         "answering should retain the stable working state"
     );
 }
 
-fn is_working_status(status: &str) -> bool {
-    status.contains(" Working · ")
-        && status
-            .chars()
-            .next()
-            .is_some_and(is_generation_spinner_frame)
+fn is_animated_status(status: &str, label: &str) -> bool {
+    let mut characters = status.chars();
+    characters.next().is_some_and(is_generation_spinner_frame)
+        && characters.as_str().strip_prefix(' ') == Some(label)
 }
 
 fn is_generation_spinner_frame(frame: char) -> bool {
@@ -3237,7 +3237,7 @@ async fn active_turn_footer_schedules_continuous_animation_frames() {
     let (frame_requester, mut frame_rx) = crate::tui::FrameRequester::test_channel();
     chat.frame_requester = frame_requester;
     chat.config.animations = true;
-    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
+    chat.config.tui_status_line = Some(vec!["run-state".to_string()]);
     handle_turn_started(&mut chat, "turn-animated-stage");
     while frame_rx.try_recv().is_ok() {}
 
@@ -3277,7 +3277,7 @@ async fn active_turn_footer_schedules_continuous_animation_frames() {
 #[tokio::test]
 async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
+    chat.config.tui_status_line = Some(vec!["run-state".to_string()]);
     handle_turn_started(&mut chat, "turn-patch-progress");
     handle_agent_message_delta(&mut chat, "I will add the page.");
 
@@ -3300,7 +3300,7 @@ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
 
     let drafting = status_line_text(&chat).expect("working status");
     assert!(
-        is_working_status(&drafting),
+        is_animated_status(&drafting, "Working"),
         "patch drafting should retain the stable working state: {drafting}"
     );
 
@@ -3318,7 +3318,7 @@ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
         None,
     );
     assert!(
-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
+        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
         "patch application should retain the stable working state"
     );
 
@@ -3336,7 +3336,7 @@ async fn status_line_stays_stable_during_streaming_patch_lifecycle() {
         None,
     );
     assert!(
-        status_line_text(&chat).is_some_and(|status| is_working_status(&status)),
+        status_line_text(&chat).is_some_and(|status| is_animated_status(&status, "Working")),
         "the next model request should retain the stable working state"
     );
 }

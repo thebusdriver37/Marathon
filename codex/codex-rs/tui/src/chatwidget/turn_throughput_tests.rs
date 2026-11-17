@@ -24,11 +24,7 @@ fn backend_decode_excludes_prefill_and_tool_waits() {
     let start = Instant::now();
     let mut throughput = TurnThroughput::default();
     throughput.start_turn(start);
-    throughput.record_output_delta(
-        "first output",
-        GenerationStage::Thinking,
-        start + Duration::from_secs(5),
-    );
+    throughput.record_output_delta("first output", GenerationStage::Thinking);
     throughput.complete_response("response", Some(&metrics(/*tokens*/ 2600, /*seconds*/ 40)));
     throughput.finish_turn(start + Duration::from_secs(80));
     assert_eq!(
@@ -36,10 +32,6 @@ fn backend_decode_excludes_prefill_and_tool_waits() {
         Some(ThroughputSample {
             tokens_per_second: 65.0
         })
-    );
-    assert_eq!(
-        throughput.time_to_first_output(),
-        Some(Duration::from_secs(5))
     );
     assert_eq!(
         throughput.elapsed(start + Duration::from_secs(100)),
@@ -117,7 +109,6 @@ fn a_new_turn_clears_previous_measurements() {
     throughput.finish_turn(start + Duration::from_secs(4));
     throughput.start_turn(start + Duration::from_secs(10));
     assert_eq!(throughput.sample(), None);
-    assert_eq!(throughput.time_to_first_output(), None);
     assert_eq!(
         throughput.generation_stage(),
         Some(GenerationStage::Prefill)
@@ -134,41 +125,25 @@ fn interrupted_generation_does_not_publish_a_partial_turn_average() {
     let mut throughput = TurnThroughput::default();
     throughput.start_turn(start);
     throughput.complete_response("first", Some(&metrics(/*tokens*/ 200, /*seconds*/ 2)));
-    throughput.record_output_delta(
-        "unfinished",
-        GenerationStage::Thinking,
-        start + Duration::from_secs(5),
-    );
+    throughput.record_output_delta("unfinished", GenerationStage::Thinking);
     throughput.finish_turn(start + Duration::from_secs(6));
     assert_eq!(throughput.sample(), None);
 }
 
 #[test]
-fn first_output_is_recorded_once_and_stage_tracks_the_stream() {
+fn generation_stage_tracks_the_stream() {
     let start = Instant::now();
     let mut throughput = TurnThroughput::default();
     throughput.start_turn(start);
-    throughput.record_output_delta(
-        "thinking",
-        GenerationStage::Thinking,
-        start + Duration::from_secs(2),
-    );
+    throughput.record_output_delta("thinking", GenerationStage::Thinking);
     assert_eq!(
         throughput.generation_stage(),
         Some(GenerationStage::Thinking)
     );
-    throughput.record_output_delta(
-        "answer",
-        GenerationStage::Answering,
-        start + Duration::from_secs(8),
-    );
+    throughput.record_output_delta("answer", GenerationStage::Answering);
     assert_eq!(
         throughput.generation_stage(),
         Some(GenerationStage::Answering)
-    );
-    assert_eq!(
-        throughput.time_to_first_output(),
-        Some(Duration::from_secs(2))
     );
     throughput.finish_turn(start + Duration::from_secs(10));
     assert_eq!(throughput.generation_stage(), None);
@@ -226,32 +201,4 @@ fn latest_call_recovers_after_missing_timings_but_turn_average_does_not() {
     );
     throughput.finish_turn(Instant::now());
     assert_eq!(throughput.sample(), None);
-}
-
-#[test]
-fn tool_activity_precedes_later_text_and_empty_deltas_do_not_start_the_clock() {
-    let start = Instant::now();
-    let mut throughput = TurnThroughput::default();
-    throughput.start_turn(start);
-    throughput.record_output_delta(
-        "",
-        GenerationStage::Thinking,
-        start + Duration::from_secs(1),
-    );
-    assert_eq!(throughput.time_to_first_output(), None);
-    throughput.record_first_output(start + Duration::from_secs(5));
-    throughput.record_output_delta(
-        "Done",
-        GenerationStage::Answering,
-        start + Duration::from_secs(37),
-    );
-    throughput.finish_turn(start + Duration::from_secs(40));
-    assert_eq!(
-        throughput.time_to_first_output(),
-        Some(Duration::from_secs(5))
-    );
-    assert_eq!(
-        throughput.elapsed(start + Duration::from_secs(100)),
-        Some(Duration::from_secs(40))
-    );
 }

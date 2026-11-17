@@ -127,15 +127,7 @@ impl ChatWidget {
                             self.refresh_status_line();
                         }
                         ThreadItem::FileChange { id, .. } => {
-                            self.turn_throughput.begin_patch_apply(id, Instant::now());
-                            self.refresh_status_line();
-                        }
-                        ThreadItem::CommandExecution { .. }
-                        | ThreadItem::McpToolCall { .. }
-                        | ThreadItem::DynamicToolCall { .. }
-                        | ThreadItem::WebSearch { .. }
-                        | ThreadItem::CollabAgentToolCall { .. } => {
-                            self.turn_throughput.record_first_output(Instant::now());
+                            self.turn_throughput.begin_patch_apply(id);
                             self.refresh_status_line();
                         }
                         _ => {}
@@ -235,7 +227,7 @@ impl ChatWidget {
             ServerNotification::FileChangePatchUpdated(notification) => {
                 if !from_replay {
                     self.turn_throughput
-                        .record_patch_progress(&notification.item_id, Instant::now());
+                        .record_patch_progress(&notification.item_id);
                     self.refresh_status_line();
                 }
             }

@@ -134,7 +134,7 @@ impl ChatWidget {
     ) {
         let stage_changed = self.turn_throughput.generation_stage() != Some(generation_stage);
         self.turn_throughput
-            .record_output_delta(delta, generation_stage, Instant::now());
+            .record_output_delta(delta, generation_stage);
         if stage_changed {
             self.refresh_status_line();
         }

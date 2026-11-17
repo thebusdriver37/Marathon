@@ -28,7 +28,6 @@ pub(super) struct ThroughputSample {
 pub(super) struct TurnThroughput {
     turn_started_at: Option<Instant>,
     turn_finished_at: Option<Instant>,
-    time_to_first_output: Option<Duration>,
     seen_responses: HashSet<String>,
     decode_tokens: u64,
     decode_microseconds: u64,
@@ -45,25 +44,11 @@ impl TurnThroughput {
         self.generation_stage = Some(GenerationStage::Prefill);
     }
 
-    pub(super) fn record_output_delta(
-        &mut self,
-        delta: &str,
-        generation_stage: GenerationStage,
-        now: Instant,
-    ) {
+    pub(super) fn record_output_delta(&mut self, delta: &str, generation_stage: GenerationStage) {
         if delta.is_empty() {
             return;
         }
-        self.record_first_output(now);
         self.generation_stage = Some(generation_stage);
-    }
-
-    pub(super) fn record_first_output(&mut self, now: Instant) {
-        if self.time_to_first_output.is_none()
-            && let Some(turn_started_at) = self.turn_started_at
-        {
-            self.time_to_first_output = Some(now.saturating_duration_since(turn_started_at));
-        }
     }
 
     pub(super) fn complete_response(
@@ -125,10 +110,6 @@ impl TurnThroughput {
             .copied()
     }
 
-    pub(super) fn time_to_first_output(&self) -> Option<Duration> {
-        self.time_to_first_output
-    }
-
     pub(super) fn elapsed(&self, now: Instant) -> Option<Duration> {
         self.turn_started_at.map(|start| {
             self.turn_finished_at
@@ -147,19 +128,18 @@ impl TurnThroughput {
         }
     }
 
-    pub(super) fn record_patch_progress(&mut self, call_id: &str, now: Instant) {
+    pub(super) fn record_patch_progress(&mut self, call_id: &str) {
         self.patch_call_id = Some(call_id.to_string());
-        self.record_first_output(now);
         self.generation_stage = Some(GenerationStage::DraftingCode);
     }
 
-    pub(super) fn begin_patch_apply(&mut self, call_id: &str, now: Instant) {
+    pub(super) fn begin_patch_apply(&mut self, call_id: &str) {
         if self
             .patch_call_id
             .as_deref()
             .is_none_or(|active_call_id| active_call_id != call_id)
         {
-            self.record_patch_progress(call_id, now);
+            self.record_patch_progress(call_id);
         }
         self.generation_stage = Some(GenerationStage::ApplyingChanges);
     }

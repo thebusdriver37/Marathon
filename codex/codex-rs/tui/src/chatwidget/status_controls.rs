@@ -455,28 +455,34 @@ impl ChatWidget {
     }
 
     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
-        if self.turn_throughput.is_active() {
-            let now = Instant::now();
-            let activity = if self.config.animations {
-                self.turn_throughput
-                    .generation_activity_frame(now)
-                    .map_or_else(|| "Working".to_string(), |frame| format!("{frame} Working"))
-            } else {
-                "Working".to_string()
-            };
-            let elapsed = self.turn_throughput.elapsed(now)?;
-            return Some(format!("{activity} · {}", format_turn_elapsed(elapsed)));
-        }
-
         self.turn_throughput.elapsed(Instant::now())?;
-        let mut label = self.turn_throughput.sample().map_or_else(
+        Some(self.turn_throughput.sample().map_or_else(
             || "speed n/a".to_string(),
             |sample| format!("{:.1} tok/s", sample.tokens_per_second),
-        );
-        if let Some(latency) = self.turn_throughput.time_to_first_output() {
-            label.push_str(&format!(" · first {}", format_latency(latency)));
+        ))
+    }
+
+    /// Render one low-churn activity label while retaining the useful thinking distinction.
+    pub(super) fn status_line_run_state(&self) -> String {
+        let active = self.turn_throughput.is_active();
+        let label = if active {
+            if self.turn_throughput.generation_stage() == Some(GenerationStage::Thinking) {
+                "Thinking"
+            } else {
+                "Working"
+            }
+        } else {
+            return self.run_state_status_text();
+        };
+
+        if self.config.animations
+            && let Some(frame) = self
+                .turn_throughput
+                .generation_activity_frame(Instant::now())
+        {
+            return format!("{frame} {label}");
         }
-        Some(label)
+        label.to_string()
     }
 
     /// Keep the compact footer visibly alive throughout an active turn.
@@ -486,7 +492,7 @@ impl ChatWidget {
             || !self
                 .configured_status_line_items()
                 .iter()
-                .any(|item| item == "tokens-per-second")
+                .any(|item| item == "run-state" || item == "status")
         {
             return;
         }
@@ -514,27 +520,5 @@ impl ChatWidget {
             Some(ReasoningEffortConfig::None) => "none".to_string(),
             Some(effort) => effort.as_str().to_string(),
         }
-    }
-}
-
-fn format_latency(duration: Duration) -> String {
-    let seconds = duration.as_secs_f64();
-    if seconds < 10.0 {
-        format!("{seconds:.1}s")
-    } else {
-        format!("{seconds:.0}s")
-    }
-}
-
-fn format_turn_elapsed(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    let minutes = seconds / 60;
-    let hours = minutes / 60;
-    if hours > 0 {
-        format!("{hours}:{:02}:{:02}", minutes % 60, seconds % 60)
-    } else if minutes > 0 {
-        format!("{minutes}:{:02}", seconds % 60)
-    } else {
-        format!("{seconds}s")
     }
 }
