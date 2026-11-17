@@ -38,6 +38,8 @@ struct ActiveResponse {
 
 #[derive(Debug, Default)]
 pub(super) struct TurnThroughput {
+    turn_started_at: Option<Instant>,
+    time_to_first_output: Option<Duration>,
     active_response: Option<ActiveResponse>,
     completed_output_tokens: u64,
     completed_generation_duration: Duration,
@@ -46,8 +48,9 @@ pub(super) struct TurnThroughput {
 }
 
 impl TurnThroughput {
-    pub(super) fn start_turn(&mut self) {
+    pub(super) fn start_turn(&mut self, now: Instant) {
         *self = Self::default();
+        self.turn_started_at = Some(now);
         self.generation_stage = Some(GenerationStage::Prefill);
     }
 
@@ -57,6 +60,11 @@ impl TurnThroughput {
         generation_stage: GenerationStage,
         now: Instant,
     ) {
+        if self.time_to_first_output.is_none()
+            && let Some(turn_started_at) = self.turn_started_at
+        {
+            self.time_to_first_output = Some(now.saturating_duration_since(turn_started_at));
+        }
         self.generation_stage = Some(generation_stage);
         let response = self.active_response.get_or_insert(ActiveResponse {
             started_at: now,
@@ -102,6 +110,10 @@ impl TurnThroughput {
 
     pub(super) fn generation_stage(&self) -> Option<GenerationStage> {
         self.generation_stage
+    }
+
+    pub(super) fn time_to_first_output(&self) -> Option<Duration> {
+        self.time_to_first_output
     }
 
     pub(super) fn set_generation_stage(&mut self, generation_stage: GenerationStage) {

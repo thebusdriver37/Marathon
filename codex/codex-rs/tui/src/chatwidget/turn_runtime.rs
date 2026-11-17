@@ -82,7 +82,7 @@ impl ChatWidget {
         self.input_queue.user_turn_pending_start = false;
         self.reset_safety_buffering_for_turn_start();
         self.turn_lifecycle.start(Instant::now());
-        self.turn_throughput.start_turn();
+        self.turn_throughput.start_turn(Instant::now());
         self.transcript.reset_turn_flags();
         self.adaptive_chunking.reset();
         if self.plan_stream_controller.take().is_some() {
@@ -132,9 +132,12 @@ impl ChatWidget {
         delta: &str,
         generation_stage: GenerationStage,
     ) {
+        let stage_changed = self.turn_throughput.generation_stage() != Some(generation_stage);
         self.turn_throughput
             .record_output_delta(delta, generation_stage, Instant::now());
-        self.refresh_status_line();
+        if stage_changed {
+            self.refresh_status_line();
+        }
     }
 
     pub(super) fn complete_turn_response(&mut self, output_tokens: Option<i64>) {

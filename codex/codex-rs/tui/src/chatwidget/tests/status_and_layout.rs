@@ -3103,7 +3103,8 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
     chat.show_welcome_banner = false;
     chat.config.tui_status_line = Some(vec!["tokens-per-second".to_string()]);
     let started_at = Instant::now() - Duration::from_secs(200);
-    chat.turn_throughput.start_turn();
+    chat.turn_throughput
+        .start_turn(started_at - Duration::from_millis(2_500));
     chat.turn_throughput.record_output_delta(
         "streamed response",
         GenerationStage::Answering,
@@ -3124,7 +3125,10 @@ async fn status_line_tokens_per_second_renders_completed_turn_rate_snapshot() {
     );
     chat.refresh_status_line();
 
-    assert_eq!(status_line_text(&chat), Some("21.0 tok/s".to_string()));
+    assert_eq!(
+        status_line_text(&chat),
+        Some("21 tok/s avg · first token 2.5s".to_string())
+    );
 
     let width = 48;
     let height = chat.desired_height(width);
@@ -3149,13 +3153,13 @@ async fn status_line_tokens_per_second_tracks_generation_stage() {
 
     handle_agent_reasoning_delta(&mut chat, "thinking");
     assert!(
-        status_line_text(&chat).is_some_and(|status| status.starts_with("Thinking")),
+        status_line_text(&chat).is_some_and(|status| status == "Thinking"),
         "reasoning delta should identify thinking"
     );
 
     handle_agent_message_delta(&mut chat, "answering");
     assert!(
-        status_line_text(&chat).is_some_and(|status| status.starts_with("Answering")),
+        status_line_text(&chat).is_some_and(|status| status == "Answering"),
         "answer delta should identify answering"
     );
 }

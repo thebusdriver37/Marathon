@@ -455,15 +455,18 @@ impl ChatWidget {
     }
 
     pub(super) fn status_line_tokens_per_second(&self) -> Option<String> {
-        let sample = self.turn_throughput.sample(Instant::now()).map(|sample| {
-            let prefix = if sample.estimated { "~" } else { "" };
-            format!("{prefix}{:.1} tok/s", sample.tokens_per_second)
-        });
-        match (self.turn_throughput.generation_stage(), sample) {
-            (Some(stage), Some(sample)) => Some(format!("{} · {sample}", stage.label())),
-            (Some(stage), None) => Some(stage.label().to_string()),
-            (None, sample) => sample,
+        if let Some(stage) = self.turn_throughput.generation_stage() {
+            return Some(stage.label().to_string());
         }
+
+        self.turn_throughput.sample(Instant::now()).map(|sample| {
+            let prefix = if sample.estimated { "~" } else { "" };
+            let rate = format!("{prefix}{:.0} tok/s avg", sample.tokens_per_second);
+            self.turn_throughput
+                .time_to_first_output()
+                .map(|latency| format!("{rate} · first token {}", format_latency(latency)))
+                .unwrap_or(rate)
+        })
     }
 
     pub(super) fn status_line_limit_display(
@@ -484,5 +487,14 @@ impl ChatWidget {
             Some(ReasoningEffortConfig::None) => "none".to_string(),
             Some(effort) => effort.as_str().to_string(),
         }
+    }
+}
+
+fn format_latency(duration: Duration) -> String {
+    let seconds = duration.as_secs_f64();
+    if seconds < 10.0 {
+        format!("{seconds:.1}s")
+    } else {
+        format!("{seconds:.0}s")
     }
 }

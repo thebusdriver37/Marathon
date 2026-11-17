@@ -7,4 +7,4 @@ expression: normalized_backend_snapshot(terminal.backend())
 "                                                "
 "› Ask Codex to do anything                      "
 "                                                "
-"  21.0 tok/s                                    "
+"  21 tok/s avg · first token 2.5s               "
