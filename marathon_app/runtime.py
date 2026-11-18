@@ -1197,6 +1197,8 @@ class Runtime:
                 "MARATHON_RUN_LOG": str(self.run_log or ""),
             }
         )
+        if self._backend.fast_mode_lora_id is not None:
+            router_env["MARATHON_MODEL_FAST_LORA_ID"] = str(self._backend.fast_mode_lora_id)
         if self._backend.kind == "llama_swap_pool":
             router_env["MARATHON_MODEL_EXTERNAL"] = "1"
             router_env["MARATHON_MODEL_PREWARM_SLUG"] = self.model.alias

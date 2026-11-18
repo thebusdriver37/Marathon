@@ -55,7 +55,7 @@ from marathon_app.catalog import external_models, backends
 from marathon_app.model_identity import pool_identity
 from marathon_app.pool import acquire_pool_worker, release_pool_worker, retain_slot, take_retained_slot
 from marathon_app.checkpoints import RollingCheckpointStore
-from marathon_app.checkpoints import SNAPSHOT_SIDECAR_SUFFIXES
+from marathon_app.checkpoints import FAST_LORA_SIDECAR_SUFFIX, SNAPSHOT_SIDECAR_SUFFIXES
 from marathon_app.checkpoints import conversation_key_hash
 from marathon_app.telemetry import EventWriter
 from marathon_app.router_security import is_loopback, router_security_middleware
@@ -342,6 +342,9 @@ class ModelProfile:
     instructions_file: str | None = None
     api_key_env: str | None = None
     api_key_file: str | None = None
+    # llama.cpp adapter id that implements fast mode: applied only at
+    # reasoning effort "none", explicitly disabled for every other effort.
+    fast_lora_id: int | None = None
 
     def resolved_model_path(self) -> str | None:
         for candidate in self.model_paths:
@@ -579,6 +582,7 @@ def _chat_prompt_body(
     for key in (
         "chat_template_kwargs",
         "enable_thinking",
+        "lora",
         "parallel_tool_calls",
         "reasoning_format",
         "tool_choice",
@@ -1516,6 +1520,10 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
     external = _env_bool("MARATHON_MODEL_EXTERNAL", False)
     api_key_env = os.getenv("MARATHON_MODEL_API_KEY_ENV")
     api_key_file = os.getenv("MARATHON_MODEL_API_KEY_FILE")
+    fast_lora_raw = (os.getenv("MARATHON_MODEL_FAST_LORA_ID") or "").strip()
+    fast_lora_id = int(fast_lora_raw) if fast_lora_raw else None
+    if fast_lora_id is not None and fast_lora_id < 0:
+        raise ValueError("MARATHON_MODEL_FAST_LORA_ID must be a non-negative adapter id")
 
     return ModelProfile(
         slug=slug,
@@ -1538,6 +1546,7 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         external=external,
         api_key_env=api_key_env.strip() if api_key_env else None,
         api_key_file=api_key_file.strip() if api_key_file else None,
+        fast_lora_id=fast_lora_id,
     )
 
 
@@ -2387,6 +2396,19 @@ def _apply_reasoning_effort(
             reasoning_effort=effort,
         )
     data["chat_template_kwargs"] = normalized_template_kwargs
+    if profile.fast_lora_id is not None:
+        data["lora"] = _fast_lora_request(profile, effort == "none")
+
+
+def _fast_lora_request(profile: ModelProfile, enabled: bool) -> list[dict[str, Any]]:
+    """Per-request llama.cpp adapter list; always explicit so slot state is known."""
+
+    return [{"id": profile.fast_lora_id, "scale": 1.0 if enabled else 0.0}]
+
+
+def _lora_field(request: dict[str, Any]) -> dict[str, Any]:
+    lora = request.get("lora")
+    return {"lora": copy.deepcopy(lora)} if isinstance(lora, list) else {}
 
 
 def normalize_responses_request(
@@ -4104,10 +4126,74 @@ class RouterState:
         return await self._slot_action(profile, "erase")
 
     async def save_slot(self, profile: ModelProfile, filename: str) -> dict[str, Any]:
-        return await self._slot_action(profile, "save", filename)
+        result = await self._slot_action(profile, "save", filename)
+        if profile.fast_lora_id is not None:
+            scale = await self._slot_fast_lora_scale(profile)
+            sidecar = Path(f"{self._slot_save_dir(profile) / filename}{FAST_LORA_SIDECAR_SUFFIX}")
+            if scale is None:
+                # Unknown provenance: never let a restore claim either mode.
+                sidecar.unlink(missing_ok=True)
+                (self._slot_save_dir(profile) / filename).unlink(missing_ok=True)
+                raise RuntimeError("cannot determine the fast-mode adapter state of the saved slot")
+            pending = sidecar.with_name(sidecar.name + ".tmp")
+            pending.write_text(json.dumps({"id": profile.fast_lora_id, "scale": scale}) + "\n")
+            pending.replace(sidecar)
+        return result
 
     async def restore_slot(self, profile: ModelProfile, filename: str) -> dict[str, Any]:
+        if profile.fast_lora_id is not None:
+            await self._prime_slot_fast_lora(profile, filename)
         return await self._slot_action(profile, "restore", filename)
+
+    async def _slot_fast_lora_scale(self, profile: ModelProfile) -> float | None:
+        """Adapter scale of the slot's KV, from the last request llama.cpp ran in it."""
+
+        slots = await self._request_json(profile, "GET", "/slots", retry_connection_error=True)
+        for slot in slots if isinstance(slots, list) else []:
+            if not isinstance(slot, dict) or slot.get("id") != self.slot_id:
+                continue
+            params = slot.get("params")
+            loras = params.get("lora") if isinstance(params, dict) else None
+            if not isinstance(loras, list):
+                return None
+            for entry in loras:
+                if isinstance(entry, dict) and entry.get("id") == profile.fast_lora_id:
+                    return float(entry.get("scale", 0.0))
+            # Absent ids run at the server default, which is the disabled adapter.
+            return 0.0
+        return None
+
+    async def _prime_slot_fast_lora(self, profile: ModelProfile, filename: str) -> None:
+        """Match the slot's adapter to the snapshot before restoring it.
+
+        llama.cpp discards a slot's KV when a request changes its adapters, so
+        a snapshot restored under the wrong adapter state would either be
+        thrown away (normal turn after a fast one) or, worse, be reused by a
+        turn in the other mode. Priming to the snapshot's own state keeps the
+        server's check exact: same mode reuses the cache, other mode clears it.
+        """
+
+        sidecar = Path(f"{self._slot_save_dir(profile) / filename}{FAST_LORA_SIDECAR_SUFFIX}")
+        try:
+            wanted = float(json.loads(sidecar.read_text()).get("scale", 0.0))
+        except FileNotFoundError:
+            wanted = 0.0  # snapshots from before fast mode were built without the adapter
+        current = await self._slot_fast_lora_scale(profile)
+        if current == wanted:
+            return
+        await self._request_json(
+            profile,
+            "POST",
+            "/completion",
+            {
+                "prompt": " ",
+                "n_predict": 0,
+                "id_slot": self.slot_id,
+                "cache_prompt": False,
+                "lora": [{"id": profile.fast_lora_id, "scale": wanted}],
+            },
+            retry_connection_error=True,
+        )
 
     async def _slot_has_cached_prompt(self, profile: ModelProfile) -> bool | None:
         """Return whether llama.cpp still has KV state for Marathon's slot."""
@@ -4329,6 +4415,7 @@ class RouterState:
                     "n_predict": 0,
                     "id_slot": self.slot_id,
                     "cache_prompt": True,
+                    **_lora_field(request),
                 },
                 retry_connection_error=True,
             )
@@ -4972,6 +5059,7 @@ class RouterState:
                 "n_predict": 0,
                 "id_slot": self.slot_id,
                 "cache_prompt": True,
+                **_lora_field(request),
             },
             retry_connection_error=True,
         )

@@ -88,6 +88,8 @@ class Backend:
     cache_id: str = ""
     identity_config: Path | None = None
     pool_min_free_vram_mib: int = 0
+    # llama.cpp adapter id served by this backend for fast mode (effort "none").
+    fast_mode_lora_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -596,6 +598,15 @@ def settings(catalog: dict[str, Any] | None = None) -> Settings:
     )
 
 
+def _fast_mode_lora_id(raw: dict[str, Any]) -> int | None:
+    value = raw.get("fast_mode_lora_id")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"backend {raw.get('id')!r} fast_mode_lora_id must be a non-negative integer")
+    return value
+
+
 def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
     loaded = catalog or load_catalog()
     ai_root = settings(loaded).ai_root
@@ -658,6 +669,7 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
             identity_config=(Path(str(raw["identity_config"])).expanduser()
                              if raw.get("identity_config") else None),
             pool_min_free_vram_mib=max(0, int(raw.get("pool_min_free_vram_mib", 0))),
+            fast_mode_lora_id=_fast_mode_lora_id(raw),
         )
     return result
 

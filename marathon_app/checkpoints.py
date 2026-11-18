@@ -26,7 +26,9 @@ CHECKPOINT_PREFIX = "conversation__"
 STARTER_PREFIX = "starter__"
 # Optional recurrent rewind state is tracked in schema 7 like the draft sidecars.
 # Older schema 7 bundles without it remain loadable, but cannot rewind after restore.
-SNAPSHOT_SIDECAR_SUFFIXES = (".draft", ".spec", ".checkpoints")
+SNAPSHOT_SIDECAR_SUFFIXES = (".draft", ".spec", ".checkpoints", ".lora")
+# Records which fast-mode adapter state built a slot snapshot (see the router).
+FAST_LORA_SIDECAR_SUFFIX = ".lora"
 MAX_CHECKPOINT_CACHE_BYTES = 32 * 1024**3
 PENDING_MAX_AGE_SECONDS = 60 * 60
 
