@@ -2345,6 +2345,17 @@ def _restore_local_reasoning_item(item: dict[str, Any]) -> dict[str, Any] | None
     return restored
 
 
+FAST_SERVICE_TIER_VALUES = ("priority", "fast")
+
+
+def _fast_service_tiers(profile: ModelProfile) -> list[dict[str, str]]:
+    """Advertise Codex's Fast tier (the /fast command) when effort none switches on a fast-mode adapter."""
+    if profile.fast_lora_id is None or "none" not in {effort for effort, _ in profile.supported_reasoning_levels}:
+        return []
+    return [{"id": "priority", "name": "Fast",
+             "description": "Fast mode: no thinking, pi agent adapter (same as reasoning effort none)"}]
+
+
 def _apply_reasoning_effort(
     data: dict[str, Any], profile: ModelProfile | None, *, request_kind: str | None = None
 ) -> None:
@@ -2364,6 +2375,10 @@ def _apply_reasoning_effort(
     if reasoning is not None and not isinstance(reasoning, dict):
         raise ValueError("reasoning must be an object")
     effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    # Codex's /fast toggle sends the "priority" service tier; with a fast-mode adapter it means effort none.
+    fast_tier = _fast_service_tiers(profile) and data.pop("service_tier", None) in FAST_SERVICE_TIER_VALUES
+    if fast_tier:
+        effort = "none"
     # Compaction is a summary task, and need not inherit a costly coding effort.
     # Keep the existing behavior unless the operator explicitly selects an override.
     if (request_kind or _codex_request_kind(data)) == "compaction":
@@ -3237,6 +3252,7 @@ class RouterState:
                     "supported_in_api": True,
                     "priority": 0,
                     "additional_speed_tiers": [],
+                    "service_tiers": _fast_service_tiers(profile),
                     "availability_nux": None,
                     "upgrade": None,
                     "base_instructions": _profile_base_instructions(instructions, profile),

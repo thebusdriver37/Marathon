@@ -51,6 +51,24 @@ class FastLoraRequestTests(unittest.TestCase):
         default = router_module.normalize_responses_request({"input": []}, profile)
         self.assertEqual(default["lora"], [{"id": 0, "scale": 0.0}])
 
+    def test_fast_service_tier_is_fast_mode_regardless_of_effort(self) -> None:
+        profile = fast_profile()
+        self.assertEqual(router_module._fast_service_tiers(profile)[0]["id"], "priority")
+        for tier in ("priority", "fast"):
+            normalized = router_module.normalize_responses_request(
+                {"input": [], "reasoning": {"effort": "xhigh"}, "service_tier": tier}, profile
+            )
+            self.assertEqual(normalized["lora"], [{"id": 0, "scale": 1.0}])
+            self.assertFalse(normalized["chat_template_kwargs"]["enable_thinking"])
+            self.assertNotIn("service_tier", normalized)
+        normalized = router_module.normalize_responses_request(
+            {"input": [], "reasoning": {"effort": "xhigh"}, "service_tier": "default"}, profile
+        )
+        self.assertEqual(normalized["lora"], [{"id": 0, "scale": 0.0}])
+        self.assertEqual(router_module._fast_service_tiers(fast_profile(None)), [])
+        no_none = replace(profile, supported_reasoning_levels=(("xhigh", "Deep"),))
+        self.assertEqual(router_module._fast_service_tiers(no_none), [])
+
     def test_profiles_without_fast_mode_send_no_adapter_field(self) -> None:
         normalized = router_module.normalize_responses_request(
             {"input": [], "reasoning": {"effort": "none"}}, fast_profile(None)
