@@ -9,6 +9,10 @@ The `inkling2` backend expects a native llama.cpp build at
 This revision recognizes Inkling's Jinja template and native PEG tool/reasoning parser.
 An older Qwen runtime cannot substitute for this build. Building or installing that
 backend and obtaining the weights remain separate operator steps.
+Use ggml-org IQ4_NL weights with that stock revision. Unsloth Mainline_Support
+weights need the loop-pass expert-scale fix in
+[llama.cpp #32704](https://github.com/ggml-org/llama.cpp/pull/32704), or the
+qualified Unsloth build recorded in the evaluation. Do not mix those pairs.
 
 The default `inkling-32k` profile uses 32768 context tokens, Q8 KV, one slot,
 1024/64 batch/microbatch, and natural reasoning. `inkling-262k` uses 262144
@@ -22,6 +26,11 @@ llama.cpp parses `<|content_thinking|>` and `<|content_invoke_tool_json|>` into
 structured reasoning and tool output. It also parses JSON-string tool arguments
 into objects before rendering tool history. Do not hand-render Inkling tool markup
 or replace the native template with a Qwen template.
+Direct optional/required tool calls and a multi-turn replay of JSON-string API
+arguments passed on both evaluated builds. General structured output is a
+separate gate: use `response_format` with `json_schema`, since raw `grammar`
+also constrains Inkling's message header
+([#32745](https://github.com/ggml-org/llama.cpp/issues/32745)).
 
 `reasoning_transport = "chat_template_effort"` forwards every advertised effort
 through `chat_template_kwargs.reasoning_effort`. It preserves `none`: Inkling maps
@@ -31,6 +40,12 @@ erases the template value, or overrides recovery with the original effort.
 Lowest effort can still emit reasoning. Other template levels are minimal=.1,
 low=.2, medium=.7, high=.9, and xhigh=.99. Recovery requests the lowest effort
 using the same transport. There is no post-tool reasoning cutoff for these profiles.
+The explicit template transport avoids
+[llama.cpp #32753](https://github.com/ggml-org/llama.cpp/issues/32753);
+rendered-prefix probes verified effort 0 for none and 0.7 for medium.
+Changing effort changes the early system prefix and can require full prompt
+prefill again. Keep effort stable during long conversations where possible;
+lowest-effort stalled recovery may incur that cost.
 
 For an existing external server, a machine-local `external_models` entry can use
 the same `reasoning_transport`, explicit reasoning levels/default, and actual
