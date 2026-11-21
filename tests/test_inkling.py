@@ -25,6 +25,8 @@ class InklingTests(unittest.TestCase):
         raw = catalog.tomllib.loads((ROOT / 'config/runtime_catalog.toml').read_text())
         family = catalog._family_for(Path('/models/Inkling-2-Mini-IQ4_NL.gguf'), catalog.families(raw))
         self.assertEqual(family.id, 'inkling-2-mini')
+        renamed = catalog._family_for(Path('/models/model.gguf'), catalog.families(raw), metadata_name='Inkling 2 Mini')
+        self.assertEqual(renamed.id, family.id)
         self.assertEqual(family.reasoning_transport, 'chat_template_effort')
         self.assertEqual(family.default_profile, 'inkling-32k')
         self.assertEqual([(p.context, p.ubatch) for p in family.profiles], [(32768, 64), (262144, 64)])
