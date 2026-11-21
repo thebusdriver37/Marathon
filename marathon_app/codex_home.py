@@ -169,6 +169,22 @@ def _shared_profile_text(source: Path) -> str:
     return content
 
 
+def shared_profile_overrides(codex_home: Path) -> list[str]:
+    """The shared profile's root settings as -c overrides, for `codex app-server`."""
+
+    try:
+        data = tomllib.loads((codex_home / SHARED_PROFILE_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    # An app sets each thread's folder and access itself, so project trust stays out.
+    return [
+        part
+        for key, value in data.items()
+        if key != "projects"
+        for part in ("-c", f"{key}={_toml_value(value)}")
+    ]
+
+
 def _write_shared_profile(stock_home: Path, isolated_home: Path) -> None:
     destination = isolated_home / SHARED_PROFILE_FILE
     content = _shared_profile_text(stock_home / "config.toml")

@@ -19,6 +19,7 @@ from marathon_app.codex_home import (
     SHARED_PROFILE_FILE,
     marathon_codex_home,
     prepare_codex_home,
+    shared_profile_overrides,
 )
 from marathon_app.frontends import (
     _codex_binary,
@@ -1522,6 +1523,18 @@ class FrontendTests(unittest.TestCase):
         self.assertLess(command.index('web_search="cached"'), command.index('web_search="disabled"'))
         self.assertLess(command.index('web_search="disabled"'), command.index("exec"))
         self.assertEqual(command[command.index("exec"):], ["exec", "hello"])
+
+    def test_app_server_gets_the_shared_profile_as_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "marathon-shared.config.toml").write_text(
+                'personality = "pragmatic"\nanalytics = { "enabled" = false }\n'
+                '\n[projects."/tmp/x"]\ntrust_level = "trusted"\n', encoding="utf-8")
+            self.assertEqual(
+                shared_profile_overrides(home),
+                ["-c", 'personality="pragmatic"', "-c", 'analytics={ "enabled" = false }'],
+            )
+            self.assertEqual(shared_profile_overrides(home / "missing"), [])
 
     def test_explicit_codex_model_does_not_duplicate_singleton_cli_option(self) -> None:
         model = fixture_model()

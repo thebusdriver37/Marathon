@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
-from .codex_home import codex_environment
+from .codex_home import codex_environment, shared_profile_overrides
 from .codex_telemetry import snapshot_sessions, summarize_session_changes
 from .runtime import Runtime
 from .router_security import open_api_request
@@ -192,6 +192,11 @@ def run_codex(runtime: Runtime, extra_args: list[str] | None = None) -> int:
         environment, codex_home, shared_profile = codex_environment(
             dict(os.environ, MARATHON_CODEX_HOME=str(session_home))
         )
+    # `codex app-server` (an app such as Majesty driving Marathon) takes no
+    # --profile, so the shared profile's settings go in as overrides instead.
+    if (extra_args or [])[:1] == ["app-server"]:
+        extra_args = [*shared_profile_overrides(codex_home), *extra_args]
+        shared_profile = None
     command = codex_command(runtime, [*history_config(codex_home), *(extra_args or [])], shared_profile=shared_profile)
     require_hardened_codex(command[0])
     missing = missing_runtime_tools("codex")
