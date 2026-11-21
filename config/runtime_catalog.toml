@@ -23,6 +23,11 @@ display_name = "Current upstream llama.cpp (Ampere CUDA build)"
 server = "backends/llama.cpp-current/build/bin/llama-server"
 
 [[backends]]
+id = "inkling2"
+display_name = "Inkling 2 llama.cpp (29b52d39, experimental)"
+server = "backends/llama.cpp-inkling-29b52d39/build/bin/llama-server"
+
+[[backends]]
 id = "qwen38"
 display_name = "Marathon Qwen 3.8 runtime (tested on RTX 3090 / Ti)"
 server = "backends/llama.cpp-qwen38/build/bin/llama-server"
@@ -59,6 +64,58 @@ layer_slices = ["0:9", "10:20", "21:31", "32:42"]
 gpu_ids = [0, 1, 2, 3]
 supports_slots = false
 environment = { DS4_METAL_PREFILL_CHUNK = "1024", DS4_CUDA_NO_Q8_F16_CACHE = "1", DS4_CUDA_WEIGHT_PRELOAD_SPAN_MB = "256", DS4_CUDA_WEIGHT_ARENA_CHUNK_MB = "256" }
+
+# Inkling requires its native Jinja/PEG parser. Do not use an older Qwen runtime.
+[[families]]
+id = "inkling-2-mini"
+display_name = "Inkling 2 Mini (experimental)"
+patterns = ["inkling-2-mini", "inkling_2_mini"]
+backend = "inkling2"
+default_profile = "inkling-32k"
+reasoning_transport = "chat_template_effort"
+default_reasoning_level = "medium"
+reasoning_levels = [
+  { effort = "none", description = "Lowest effort (0); reasoning may still occur" },
+  { effort = "minimal", description = "Minimal effort (0.1)" },
+  { effort = "low", description = "Low effort (0.2)" },
+  { effort = "medium", description = "Medium effort (0.7)" },
+  { effort = "high", description = "High effort (0.9)" },
+  { effort = "xhigh", description = "Maximum effort (0.99)" },
+]
+
+[[families.profiles]]
+id = "inkling-32k"
+display_name = "Inkling experimental 32K"
+description = "Single-GPU agent evaluation; native Inkling tools and natural reasoning."
+context = 32768
+batch = 1024
+ubatch = 64
+parallel = 1
+gpu_layers = "all"
+cache_k = "q8_0"
+cache_v = "q8_0"
+flash_attention = "on"
+extra_args = ["--fit", "off", "--cache-ram", "0", "--kv-unified"]
+confidence = "experimental"
+frontends = ["codex", "direct"]
+temperature = 1.0
+
+[[families.profiles]]
+id = "inkling-262k"
+display_name = "Inkling experimental 262K"
+description = "24 GB evaluation profile; long prefill, not a 1M-context claim."
+context = 262144
+batch = 1024
+ubatch = 64
+parallel = 1
+gpu_layers = "all"
+cache_k = "q4_0"
+cache_v = "q4_0"
+flash_attention = "on"
+extra_args = ["--fit", "off", "--cache-ram", "0", "--kv-unified"]
+confidence = "experimental"
+frontends = ["codex", "direct"]
+temperature = 1.0
 
 [[families]]
 id = "deepseek-v4-flash"

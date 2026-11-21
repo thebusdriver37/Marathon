@@ -1517,6 +1517,9 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
     default_reasoning_level, supported_reasoning_levels = (
         _reasoning_config_from_env()
     )
+    reasoning_transport = _env_str("MARATHON_MODEL_REASONING_TRANSPORT", "chat_template")
+    if reasoning_transport not in ("chat_template", "chat_template_effort", "responses"):
+        raise ValueError("MARATHON_MODEL_REASONING_TRANSPORT is invalid")
     external = _env_bool("MARATHON_MODEL_EXTERNAL", False)
     api_key_env = os.getenv("MARATHON_MODEL_API_KEY_ENV")
     api_key_file = os.getenv("MARATHON_MODEL_API_KEY_FILE")
@@ -1544,6 +1547,7 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         supported_reasoning_levels=supported_reasoning_levels,
         input_modalities=_input_modalities_from_env(),
         external=external,
+        reasoning_transport=reasoning_transport,
         api_key_env=api_key_env.strip() if api_key_env else None,
         api_key_file=api_key_file.strip() if api_key_file else None,
         fast_lora_id=fast_lora_id,
@@ -2398,21 +2402,26 @@ def _apply_reasoning_effort(
         data["reasoning"] = {**(reasoning or {}), "effort": effort}
         return
 
+    _set_template_reasoning_effort(data, profile, effort)
+    if profile.fast_lora_id is not None:
+        data["lora"] = _fast_lora_request(profile, effort == "none")
+
+
+def _set_template_reasoning_effort(data: dict[str, Any], profile: ModelProfile, effort: str) -> None:
+    """Inkling uses a symbolic effort even at none; enable_thinking is ignored."""
     template_kwargs = data.get("chat_template_kwargs")
     if template_kwargs is not None and not isinstance(template_kwargs, dict):
         raise ValueError("chat_template_kwargs must be an object")
-    normalized_template_kwargs = dict(template_kwargs or {})
-    if effort == "none":
-        normalized_template_kwargs.pop("reasoning_effort", None)
-        normalized_template_kwargs["enable_thinking"] = False
+    normalized = dict(template_kwargs or {})
+    if profile.reasoning_transport == "chat_template_effort":
+        normalized.pop("enable_thinking", None)
+        normalized["reasoning_effort"] = effort
+    elif effort == "none":
+        normalized.pop("reasoning_effort", None)
+        normalized["enable_thinking"] = False
     else:
-        normalized_template_kwargs.update(
-            enable_thinking=True,
-            reasoning_effort=effort,
-        )
-    data["chat_template_kwargs"] = normalized_template_kwargs
-    if profile.fast_lora_id is not None:
-        data["lora"] = _fast_lora_request(profile, effort == "none")
+        normalized.update(enable_thinking=True, reasoning_effort=effort)
+    data["chat_template_kwargs"] = normalized
 
 
 def _fast_lora_request(profile: ModelProfile, enabled: bool) -> list[dict[str, Any]]:
@@ -6233,16 +6242,8 @@ class RouterState:
                 ]
                 request["input"] = list(request.get("input") or []) + recovery_items
                 request_suffix.extend(copy.deepcopy(recovery_items))
-                if profile.reasoning_transport == "chat_template":
-                    template_kwargs = request.get("chat_template_kwargs")
-                    template_kwargs = (
-                        copy.deepcopy(template_kwargs)
-                        if isinstance(template_kwargs, dict)
-                        else {}
-                    )
-                    template_kwargs.pop("reasoning_effort", None)
-                    template_kwargs["enable_thinking"] = False
-                    request["chat_template_kwargs"] = template_kwargs
+                if profile.reasoning_transport in {"chat_template", "chat_template_effort"}:
+                    _set_template_reasoning_effort(request, profile, "none")
                 _disable_responses_reasoning_for_recovery(request, profile)
                 if tools_available:
                     request["tool_choice"] = "required"

@@ -1154,6 +1154,7 @@ class Runtime:
                         else self.model.multimodal_projector)
                     else "text"
                 ),
+                "MARATHON_MODEL_REASONING_TRANSPORT": self.model.family.reasoning_transport,
                 "MARATHON_MODEL_REASONING_LEVELS": json.dumps(
                     [
                         {

@@ -138,6 +138,7 @@ class Family:
     profiles: tuple[Profile, ...]
     reasoning_levels: tuple[ReasoningLevel, ...] = ()
     default_reasoning_level: str | None = None
+    reasoning_transport: str = "chat_template"
 
 
 @dataclass(frozen=True)
@@ -406,7 +407,7 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
             f"external model {model_id}",
         )
         reasoning_transport = raw.get("reasoning_transport", "chat_template")
-        if reasoning_transport not in ("chat_template", "responses"):
+        if reasoning_transport not in ("chat_template", "chat_template_effort", "responses"):
             raise ValueError(f"external model {model_id} has invalid reasoning_transport")
         native_instruction_roles = raw.get("native_instruction_roles", False)
         if not isinstance(native_instruction_roles, bool):
@@ -681,6 +682,9 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
             raw,
             f"family {raw['id']}",
         )
+        reasoning_transport = raw.get("reasoning_transport", "chat_template")
+        if reasoning_transport not in ("chat_template", "chat_template_effort"):
+            raise ValueError(f"family {raw['id']} has invalid reasoning_transport")
         profiles = tuple(
             Profile(
                 id=item["id"],
@@ -725,6 +729,7 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
                 backend=raw["backend"],
                 default_profile=raw["default_profile"],
                 profiles=profiles,
+                reasoning_transport=reasoning_transport,
                 reasoning_levels=reasoning_levels,
                 default_reasoning_level=default_reasoning_level,
             )
