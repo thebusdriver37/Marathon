@@ -2414,6 +2414,17 @@ def _set_template_reasoning_effort(data: dict[str, Any], profile: ModelProfile, 
         raise ValueError("chat_template_kwargs must be an object")
     normalized = dict(template_kwargs or {})
     if profile.reasoning_transport == "chat_template_effort":
+        # llama.cpp translates Responses reasoning.effort to the OAI field.
+        # That field wins over template kwargs, and OAI "none" erases the
+        # template effort entirely. Keep one source of truth for Inkling.
+        data.pop("reasoning_effort", None)
+        reasoning = data.get("reasoning")
+        if isinstance(reasoning, dict):
+            remaining = {key: value for key, value in reasoning.items() if key != "effort"}
+            if remaining:
+                data["reasoning"] = remaining
+            else:
+                data.pop("reasoning", None)
         normalized.pop("enable_thinking", None)
         normalized["reasoning_effort"] = effort
     elif effort == "none":

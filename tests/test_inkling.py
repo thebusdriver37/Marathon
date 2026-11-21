@@ -33,10 +33,12 @@ class InklingTests(unittest.TestCase):
 
     def test_all_efforts_survive_normalization_including_none(self):
         for effort in ('none', 'low', 'medium', 'xhigh'):
-            request = {'reasoning': {'effort': effort},
+            request = {'reasoning': {'effort': effort, 'summary': 'auto'}, 'reasoning_effort': 'high',
                        'chat_template_kwargs': {'enable_thinking': True, 'keep': 'value'}}
             router._apply_reasoning_effort(request, self.profile())
             self.assertEqual(request['chat_template_kwargs'], {'reasoning_effort': effort, 'keep': 'value'})
+            self.assertEqual(request['reasoning'], {'summary': 'auto'})
+            self.assertNotIn('reasoning_effort', request)
         request = {}
         router._apply_reasoning_effort(request, self.profile())
         self.assertEqual(request['chat_template_kwargs'], {'reasoning_effort': 'medium'})
@@ -65,9 +67,10 @@ class InklingTests(unittest.TestCase):
         state._request_json = mock.AsyncMock(side_effect=[stalled,recovered])
         asyncio.run(state._run_responses_loop(profile=self.profile(), forward_request={
             'input':[], 'tools':[{'type':'function','name':'exec_command'}], 'max_output_tokens':8192,
-            'chat_template_kwargs':{'reasoning_effort':'medium'}}, web_search_enabled=False))
+            'reasoning':{'effort':'medium'}, 'chat_template_kwargs':{'reasoning_effort':'medium'}}, web_search_enabled=False))
         request = state._request_json.await_args_list[1].args[3]
         self.assertEqual(request['chat_template_kwargs'], {'reasoning_effort':'none'})
         self.assertEqual(request['tool_choice'], 'required')
+        self.assertNotIn('reasoning', request)
 
 if __name__ == '__main__': unittest.main()

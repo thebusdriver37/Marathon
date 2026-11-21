@@ -25,7 +25,9 @@ or replace the native template with a Qwen template.
 
 `reasoning_transport = "chat_template_effort"` forwards every advertised effort
 through `chat_template_kwargs.reasoning_effort`. It preserves `none`: Inkling maps
-that to 0, while omission defaults to 0.9. The template ignores `enable_thinking`.
+that to 0, while omission defaults to 0.9. The template ignores `enable_thinking`. The router also removes the conflicting
+OpenAI effort field: llama.cpp otherwise translates `none` into a boolean and
+erases the template value, or overrides recovery with the original effort.
 Lowest effort can still emit reasoning. Other template levels are minimal=.1,
 low=.2, medium=.7, high=.9, and xhigh=.99. Recovery requests the lowest effort
 using the same transport. There is no post-tool reasoning cutoff for these profiles.
