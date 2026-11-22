@@ -19,7 +19,7 @@
 
 - **Majesty drives Marathon (2026-11-20).** `marathon codex app-server` now works: app-server refuses `--profile`, so the shared profile's settings (privacy hardening included) go in as `-c` overrides (`codex_home.shared_profile_overrides`). Majesty runs it as its local-only Marathon engine and lets it go after 10 idle minutes, which stops the runtime.
 
-- **Inkling 2 Mini (2026-11-22, rollout in progress).** Selectable Maya 262K / 344K on demand; Qwen stays default. Shared Qwen card leases, FP8 KV, attn split 80, DSpark w4. 150K+ agentic 2/2 vs Qwen 1/2; short 8/10 vs 9/10 at 0.68x time. Lacks slot-file cache/snapshot resume, fast-mode LoRA and GPU vision. Setup/one-line default change: [INKLING](docs/INKLING.md). Branch `exp/inkling-2-mini`; evidence `~/AI/experiments/inkling2-mini-20261121/integration/go-live`.
+- **Inkling 2 Mini (2026-11-22, live in Marathon).** Selectable Maya 262K / 344K on demand; Qwen stays default. Shared Qwen card leases, FP8 KV, attn split 80, DSpark w4. 150K+ agentic 2/2 vs Qwen 1/2; short 8/10 vs 9/10 at 0.68x time. Lacks slot-file cache/snapshot resume, fast-mode LoRA and GPU vision. Setup/one-line default change: [INKLING](docs/INKLING.md). Main `97da50e` pushed; Majesty idle refresh and cleanup pending. Evidence `~/AI/experiments/inkling2-mini-20261121/integration/go-live`.
 
 - **Cloud harnesses.** Installed Gemini CLI v0.70.0 (npm, node 24) and Antigravity CLI v1.5.13 (`agy`, `~/.local/bin`) as standalone harnesses for cloud-model comparisons; first-run auth for both is pending.
 
