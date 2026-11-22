@@ -33,6 +33,7 @@ from .catalog import (
     ROOT_DIR,
     backend_environment,
     backend_for,
+    backends,
     server_command,
     settings,
 )
@@ -489,6 +490,23 @@ def _set_parent_death_signal() -> None:
         libc.prctl(1, signal.SIGTERM)
 
 
+def _router_shutdown_timeout(backend: Backend, available: tuple[Backend, ...], configured: float) -> float:
+    """Allow a shared-pool router to finish the broker's durable worker unload.
+
+    The router can switch from Qwen into a lease-handoff pool during a session,
+    so check every pool sharing its lease namespace, not only its starting model.
+    """
+    if backend.kind != "llama_swap_pool":
+        return configured
+    namespace = backend.pool_lease_backend or backend.id
+    if any(candidate.kind == "llama_swap_pool" and candidate.pool_lease_backend
+           and (candidate.pool_lease_backend or candidate.id) == namespace
+           for candidate in (backend, *available)):
+        # The broker allows 120 seconds; retain a margin for router cleanup.
+        return max(configured, 150.0)
+    return configured
+
+
 class RuntimeBusyError(RuntimeError):
     """Another launch acquired this runtime identity first."""
 
@@ -504,6 +522,7 @@ class Runtime:
         self.instance: InstanceConfig = resolve_instance(instance)
         self.profile = self.instance.apply_profile(profile)
         self.config = self.instance.settings
+        self._router_stop_timeout = self.config.stop_timeout
         if not is_loopback(self.config.router_host):
             raise ValueError("The Marathon router must bind to a loopback address")
         self.router_token = secrets.token_urlsafe(32)
@@ -966,6 +985,9 @@ class Runtime:
         self.telemetry = create_run_writer(self.model.id, self.instance.name)
         self._run_started_mono = time.monotonic()
         self._backend = backend_for(self.model, self.profile)
+        self._router_stop_timeout = _router_shutdown_timeout(
+            self._backend, tuple(backends().values()), self.config.stop_timeout
+        )
         lazy_pool = lazy_pool and self._backend.kind == "llama_swap_pool"
         if self._backend.kind == "llama_swap_pool" and not lazy_pool:
             self._acquire_pool_model(self._backend)
@@ -1682,7 +1704,9 @@ class Runtime:
         started = time.monotonic()
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
-        deadline = time.monotonic() + self.config.stop_timeout
+        stop_timeout = (getattr(self, "_router_stop_timeout", self.config.stop_timeout)
+                        if name == "router" else self.config.stop_timeout)
+        deadline = time.monotonic() + stop_timeout
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 self.record(
