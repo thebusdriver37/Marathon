@@ -5382,7 +5382,7 @@ class RouterState:
         profile = self.available_profiles.get(candidate.profile_slug)
         if profile is not None and not profile.cache.slot_files and profile.cache.explicit_save:
             async with self.backend_lock:
-                return await self._save_engine_checkpoint_locked(profile, candidate)
+                return await self._save_engine_checkpoint_locked(profile, candidate, force=force)
         if profile is None or not profile.supports_slots:
             return {"status": "skipped", "reason": "model no longer supports slots"}
 
@@ -5396,12 +5396,14 @@ class RouterState:
         self,
         profile: ModelProfile,
         candidate: ConversationCheckpointCandidate,
+        *,
+        force: bool = False,
     ) -> dict[str, Any]:
         """Idle/unload checkpoint for engines that own their snapshot store.
 
-        Marathon decides when (idle, before unload); the engine persists its hot
-        prompt boundary and reports "clean" without writing when that exact
-        state is already stored, so repeated checkpoints cost nothing.
+        Marathon decides when (idle, before unload) with the same growth rule
+        as llama.cpp; the engine persists its hot prompt boundary and reports
+        "clean" without writing when that exact state is already stored.
         """
         self._defer_idle_checkpoint()
         if self.last_response_by_model.get(profile.slug) != candidate.response_id:
@@ -5409,8 +5411,19 @@ class RouterState:
                     "reason": "engine conversation has advanced beyond this checkpoint"}
         if not self._cache_target_ready(profile):
             return {"status": "skipped", "reason": "no worker reserved"}
+        saved_tokens = getattr(self, "engine_checkpoint_tokens", {})
+        key = (profile.slug, candidate.prompt_cache_key)
+        growth = candidate.context_tokens - saved_tokens.get(key, -10**12)
+        if not force and 0 <= growth < self.slot_snapshot_min_token_growth:
+            # A small append replays quickly from the stored boundary on resume;
+            # the engine still persists the latest state on switch and unload.
+            return {"status": "skipped",
+                    "reason": "conversation has not grown enough since the last checkpoint",
+                    "context_tokens": candidate.context_tokens}
         result = await self._cache_adapter(profile).save(self, profile)
         status = result.get("status")
+        if status in ("saved", "queued", "clean"):
+            self.engine_checkpoint_tokens = {**saved_tokens, key: candidate.context_tokens}
         return {
             "status": "saved" if status in ("saved", "queued") else "skipped",
             "reason": f"engine checkpoint {status}",

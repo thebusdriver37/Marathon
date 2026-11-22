@@ -58,6 +58,7 @@ def maya_state(replies, **attributes):
     state.last_response_by_model = {}
     state._generation_requests = 0
     state.checkpoint_tasks = {}
+    state.slot_snapshot_min_token_growth = 4096
     state._request_json = FakeBackend(replies)
     for key, value in attributes.items():
         setattr(state, key, value)
@@ -158,11 +159,16 @@ class MayaAdapterTests(unittest.TestCase):
     def test_idle_checkpoint_saves_through_the_engine(self):
         state = maya_state({"/slots/0?action=save": {
             "status": "saved", "n_saved": 149000, "n_written": 2611378536}},
-            last_response_by_model={"inkling": "resp-1"})
+            last_response_by_model={"inkling": "resp-1"}, slot_snapshot_min_token_growth=4096)
         result = asyncio.run(state._save_engine_checkpoint_locked(profile(), self.candidate()))
         self.assertEqual((result["status"], result["size_bytes"]), ("saved", 2611378536))
+        # Same growth rule as llama.cpp: a small append is not rewritten at idle ...
+        skipped = asyncio.run(state._save_engine_checkpoint_locked(profile(), self.candidate()))
+        self.assertEqual(skipped["reason"], "conversation has not grown enough since the last checkpoint")
+        self.assertEqual(len(state._request_json.calls), 1)
+        # ... but a forced flush (before unload) asks the engine, which writes nothing when clean.
         state._request_json.replies["/slots/0?action=save"] = {"status": "clean", "n_saved": 149000, "n_written": 0}
-        clean = asyncio.run(state._save_engine_checkpoint_locked(profile(), self.candidate()))
+        clean = asyncio.run(state._save_engine_checkpoint_locked(profile(), self.candidate(), force=True))
         self.assertEqual((clean["status"], clean["size_bytes"]), ("skipped", 0))
 
     def test_idle_checkpoint_skips_an_advanced_conversation(self):
