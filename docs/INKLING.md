@@ -4,7 +4,35 @@ This branch adds an Inkling model family to Marathon's GGUF discovery and model 
 Place target weights under the configured model root and choose Inkling in setup.
 The DSpark drafter remains a helper and is excluded from the picker.
 
-The `inkling2` backend expects a native llama.cpp build at
+Fast agentic evaluation uses Maya's full Python server through an external model
+entry, with `model = "inkling-2-mini"`, `reasoning_transport = "responses"`, and
+the backend slot API disabled. Its streaming Responses API works with the
+ordinary Marathon frontend and router; Maya handles prefix reuse internally.
+The standalone `runtime/maya-adapter.py` benchmark service only implements
+nonstreaming chat and is a different interface. The unapplied external entry is
+`integration/rollout/marathon-maya-entry.draft.toml` in the evaluation folder.
+The fast engine/weights/configuration and DSpark correctness limits are recorded
+in `integration/FAST-PROTOCOL.md` and `integration/REPORT.md` there. Keep its
+physical GPU's existing Marathon pool lease through server cleanup.
+The team's DSpark audit found changed complete greedy streams. Agentic results
+with that drafter describe the selected deployment, not plain-Maya equivalence.
+Enable Maya's `fit_max_tokens` so the output allowance fits the remaining
+window without truncating the prompt. Put sampling defaults in its `sampling`
+block or `.shared-settings.json`; a top-level `seed` is ignored. Verify `/props`
+and native request headers. Maya's API `top_k=0` selects its widest 64-token
+candidate shortlist, so matching API settings does not make its sampler
+identical to Qwen's.
+
+The installed frontend also has a 1,048,576-character limit on turn input.
+A 302,858-token repository snapshot exceeded that character limit before model
+inference, despite fitting the native Maya window. Context-token capacity alone
+does not guarantee that an arbitrary full snapshot can enter the frontend.
+Large text snapshot ingestion and cross-process snapshot/resume need separate
+qualification before production use.
+
+The local llama.cpp profiles below remain integration references; the fast
+evaluation uses the external Maya server above. The `inkling2` backend expects
+a native llama.cpp build at
 `~/AI/backends/llama.cpp-inkling-29b52d39/build/bin/llama-server`.
 This revision recognizes Inkling's Jinja template and native PEG tool/reasoning parser.
 An older Qwen runtime cannot substitute for this build. Building or installing that
