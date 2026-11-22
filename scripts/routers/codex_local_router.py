@@ -2349,6 +2349,21 @@ def _restore_local_reasoning_item(item: dict[str, Any]) -> dict[str, Any] | None
     return restored
 
 
+def _external_reasoning_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Translate our replay capsule only on the outbound backend copy."""
+    if item.get("type") != "reasoning":
+        return item
+    restored = _restore_local_reasoning_item(item)
+    if restored is None:
+        return item
+    return {
+        "type": "reasoning",
+        "summary": restored["summary"],
+        "content": [{"type": "reasoning_text", "text": part["text"]}
+                    for part in restored["content"]],
+    }
+
+
 FAST_SERVICE_TIER_VALUES = ("priority", "fast")
 
 
@@ -2565,14 +2580,7 @@ def normalize_responses_request(
                     # Local capsules and llama.cpp's `text` parts are private
                     # replay formats. External Responses servers require
                     # reasoning_text and must not receive our capsule marker.
-                    restored_reasoning = {
-                        "type": "reasoning",
-                        "summary": restored_reasoning["summary"],
-                        "content": [
-                            {"type": "reasoning_text", "text": part["text"]}
-                            for part in restored_reasoning["content"]
-                        ],
-                    }
+                    restored_reasoning = _external_reasoning_item(restored_reasoning)
                 normalized_input.append(restored_reasoning)
                 input_changed = input_changed or restored_reasoning is not item
                 continue
@@ -6660,6 +6668,13 @@ class RouterState:
         forward_request = dict(request)
         forward_request.pop("previous_response_id", None)
         forward_request["input"] = delta_input if delta_only_restore else full_input
+        if profile.external and profile.reasoning_transport == "responses":
+            # Previous-response lineage contains frontend-safe capsule/text
+            # items too, not just the new delta normalized above. Keep stored
+            # lineage intact, and translate its replay format before forwarding.
+            forward_request["input"] = [
+                _external_reasoning_item(item) for item in forward_request["input"]
+            ]
         if delta_only_restore:
             forward_request.pop("instructions", None)
             forward_request["tools"] = []

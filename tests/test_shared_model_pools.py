@@ -95,3 +95,26 @@ class SharedRouterTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(state.resolve_model('qwen').supports_slots)
                 finally:
                     await state._cancel_pool_release();state._release_pool_worker()
+
+class SharedPoolReasoningReplayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_external_delta_replay_translates_every_prior_reasoning_item(self):
+        from test_router_transport import serving, scripted_backend, answer
+        requests=[]
+        reasoning={"type":"reasoning","summary":[],"content":[
+            {"type":"reasoning_text","text":"A synthetic plan."}]}
+        backend=scripted_backend(lambda data,count:[reasoning,answer()],requests)
+        async with serving(backend,alias="inkling-2-mini",reasoning_transport="responses") as (state,http,server):
+            previous=None
+            for _ in range(3):
+                payload={"model":"inkling-2-mini","input":[{"role":"user","content":"Continue the synthetic task."}]}
+                if previous:payload["previous_response_id"]=previous
+                async with http.post(server.make_url('/v1/responses'),json=payload) as response:
+                    body=await response.json();self.assertEqual(response.status,200,body)
+                previous=body['id']
+            self.assertEqual(len(requests),3)
+            for index,request in enumerate(requests):
+                prior=[item for item in request['input'] if item.get('type')=='reasoning']
+                self.assertEqual(len(prior),index)
+                for item in prior:
+                    self.assertNotIn('encrypted_content',item)
+                    self.assertEqual(item['content'],reasoning['content'])
