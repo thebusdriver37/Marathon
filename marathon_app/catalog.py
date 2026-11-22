@@ -90,6 +90,9 @@ class Backend:
     pool_min_free_vram_mib: int = 0
     # llama.cpp adapter id served by this backend for fast mode (effort "none").
     fast_mode_lora_id: int | None = None
+    # Different model pools can share physical cards and the original lock inode.
+    pool_lease_backend: str = ""
+    pool_lease_models: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -671,7 +674,21 @@ def backends(catalog: dict[str, Any] | None = None) -> dict[str, Backend]:
                              if raw.get("identity_config") else None),
             pool_min_free_vram_mib=max(0, int(raw.get("pool_min_free_vram_mib", 0))),
             fast_mode_lora_id=_fast_mode_lora_id(raw),
+            pool_lease_backend=str(raw.get("pool_lease_backend", "")).strip(),
+            pool_lease_models=tuple(
+                (str(key), str(value))
+                for key, value in raw.get("pool_lease_models", {}).items()
+            ),
         )
+    for backend in result.values():
+        if backend.pool_lease_backend or backend.pool_lease_models:
+            owner = result.get(backend.pool_lease_backend)
+            aliases = dict(backend.pool_lease_models)
+            if (owner is None or owner.kind != "llama_swap_pool"
+                    or backend.kind != "llama_swap_pool"
+                    or set(aliases) != set(backend.pool_models)
+                    or not set(aliases.values()) <= set(owner.pool_models)):
+                raise ValueError(f"backend '{backend.id}' has an invalid shared pool lease mapping")
     return result
 
 
@@ -683,7 +700,7 @@ def families(catalog: dict[str, Any] | None = None) -> tuple[Family, ...]:
             f"family {raw['id']}",
         )
         reasoning_transport = raw.get("reasoning_transport", "chat_template")
-        if reasoning_transport not in ("chat_template", "chat_template_effort"):
+        if reasoning_transport not in ("chat_template", "chat_template_effort", "responses"):
             raise ValueError(f"family {raw['id']} has invalid reasoning_transport")
         profiles = tuple(
             Profile(

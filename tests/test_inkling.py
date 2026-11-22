@@ -27,9 +27,9 @@ class InklingTests(unittest.TestCase):
         self.assertEqual(family.id, 'inkling-2-mini')
         renamed = catalog._family_for(Path('/models/model.gguf'), catalog.families(raw), metadata_name='Inkling 2 Mini')
         self.assertEqual(renamed.id, family.id)
-        self.assertEqual(family.reasoning_transport, 'chat_template_effort')
-        self.assertEqual(family.default_profile, 'inkling-32k')
-        self.assertEqual([(p.context, p.ubatch) for p in family.profiles], [(32768, 64), (262144, 64)])
+        self.assertEqual(family.reasoning_transport, 'responses')
+        self.assertEqual(family.default_profile, 'maya-262k')
+        self.assertEqual([(p.context, p.ubatch) for p in family.profiles], [(262144, 2048), (344064, 512)])
         self.assertTrue(all(p.tool_thinking_budget is None for p in family.profiles))
         self.assertTrue(catalog._model_sidecar(Path('dspark-Inkling-2-Mini-Q8_0.gguf')))
 
@@ -54,7 +54,7 @@ class InklingTests(unittest.TestCase):
         configured = catalog.external_models({'external_models':[raw]})
         with mock.patch.object(router, 'external_models', return_value=configured):
             self.assertEqual(router._external_model_profiles()['inkling'].reasoning_transport, 'chat_template_effort')
-        for transport in ('typo', 'responses'):
+        for transport in ('typo',):
             family = {'id':'bad','reasoning_transport':transport}
             with self.assertRaisesRegex(ValueError, 'reasoning_transport'):
                 catalog.families({'families':[family]})

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .catalog import Backend
+from .lease_handoff import serve_lease
 import yaml
 
 
@@ -122,15 +123,16 @@ def release_pool_worker(handle: TextIO) -> None:
 def acquire_pool_worker(
     backend: Backend, runtime_dir: Path, instance: str | None
 ) -> tuple[TextIO, str]:
-    pool_dir = runtime_dir / "backend-pools" / backend.id
+    pool_dir = runtime_dir / "backend-pools" / (backend.pool_lease_backend or backend.id)
     pool_dir.mkdir(parents=True, exist_ok=True)
     worker_processes: dict = {}
     blocked = _worker_gpu_blockers(backend, worker_processes=worker_processes)
     for model_id in backend.pool_models:
         if model_id in blocked:
             continue
-        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", model_id).strip("-")
-        suffix = hashlib.sha256(model_id.encode("utf-8")).hexdigest()[:12]
+        lease_model = dict(backend.pool_lease_models).get(model_id, model_id)
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", lease_model).strip("-")
+        suffix = hashlib.sha256(lease_model.encode("utf-8")).hexdigest()[:12]
         handle = (pool_dir / f"{safe_name or 'worker'}-{suffix}.lock").open("a+")
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -140,7 +142,9 @@ def acquire_pool_worker(
         try:
             handle.seek(0)
             handle.truncate()
+            handoff = serve_lease(handle, runtime_dir, model_id) if backend.pool_lease_backend else None
             json.dump({"pid": os.getpid(), "instance": instance, "model": model_id,
+                       **({"handoff_socket": handoff} if handoff else {}),
                        "started_at": int(time.time()),
                        "worker_processes": worker_processes.get(model_id, [])}, handle)
             handle.flush()

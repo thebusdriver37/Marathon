@@ -2667,6 +2667,14 @@ class RouterState:
         if pool_id and (self.pool_backend is None or self.pool_backend.kind != "llama_swap_pool"):
             raise ValueError(f"invalid lazy pool backend: {pool_id}")
         self.pool_slug = os.getenv("MARATHON_MODEL_SLUG", "") if self.pool_backend else ""
+        namespace = (self.pool_backend.pool_lease_backend or self.pool_backend.id) if self.pool_backend else None
+        self.pool_backends = {
+            key: value for key, value in backends().items()
+            if namespace is not None and value.kind == "llama_swap_pool"
+            and (value.pool_lease_backend or value.id) == namespace
+        }
+        self.pool_primary_slugs = {pool_id: self.pool_slug} if pool_id else {}
+        self.pool_profile_backends: dict[str, Any] = {}
         self.pool_handle = None
         self.pool_model = None
         self.retained_slot_hint: dict[str, Any] | None = None
@@ -2941,6 +2949,22 @@ class RouterState:
     def _refresh_profiles(self) -> dict[str, ModelProfile]:
         profiles = _available_profiles()
         if profiles:
+            self.pool_profile_backends = {}
+            for backend in getattr(self, "pool_backends", {}).values():
+                primary = self.pool_primary_slugs.get(backend.id)
+                members = {
+                    slug for slug, profile in profiles.items()
+                    if slug == primary or (
+                        profile.alias == backend.model_alias
+                        and profile.target.rstrip("/") == backend.proxy.rstrip("/")
+                    )
+                }
+                if members and primary not in members:
+                    self.pool_primary_slugs[backend.id] = (
+                        backend.model_alias if backend.model_alias in members else sorted(members)[0]
+                    )
+                for slug in members:
+                    self.pool_profile_backends[slug] = backend
             if getattr(self, "pool_backend", None):
                 self.pool_slugs = {
                     slug for slug, profile in profiles.items()
@@ -3167,6 +3191,15 @@ class RouterState:
         if self.web_fetch is not None:
             await self.web_fetch.close()
             self.web_fetch = None
+        if self.pool_handle is not None and self.pool_backend.pool_lease_backend:
+            # Maya holds a duplicate of our lease through cold load and shutdown.
+            # End that worker before normal client exit so the next client can
+            # take the card immediately. A crashed client remains protected by
+            # the worker's descriptor until the broker idle TTL expires.
+            try:
+                await self._unload_pool_worker(self.pool_model)
+            except Exception as exc:
+                self.telemetry.emit("router.pool.unload_failed", {"error": str(exc)}, level="error")
         self._release_pool_worker()
         if self.http_client is not None:
             await self.http_client.close()
@@ -3256,7 +3289,12 @@ class RouterState:
                 profile = replace(profile, display_name=identity[0], description=identity[1])
             # Keep aliases routable for old conversations, but do not present
             # the same worker pool as two different models in the picker.
-            duplicate = profile.slug in pool_slugs and primary in self.available_profiles and profile.slug != primary
+            profile_pool = getattr(self, "pool_profile_backends", {}).get(profile.slug)
+            profile_primary = getattr(self, "pool_primary_slugs", {}).get(profile_pool.id) if profile_pool else primary
+            duplicate = (
+                (profile_pool is not None or profile.slug in pool_slugs)
+                and profile_primary in self.available_profiles and profile.slug != profile_primary
+            )
             models.append(
                 {
                     "slug": profile.slug,
@@ -3460,6 +3498,27 @@ class RouterState:
             return
         async with self.pool_request_lock:
             profile = self.resolve_model(requested_model)
+            desired = getattr(self, "pool_profile_backends", {}).get(profile.slug)
+            if desired is not None and desired.id != self.pool_backend.id:
+                # A model switch must end ownership of the old physical card
+                # before taking the new pool's alias of that same lease.
+                await self._cancel_pool_release()
+                tasks = list(self.starter_prewarm_tasks.values())
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                if self.pool_handle is not None:
+                    await self.flush_conversation_checkpoints()
+                    async with self.backend_lock:
+                        await self._unload_pool_worker(self.pool_model)
+                        for slug in self.pool_slugs:
+                            self._clear_live_slot(slug)
+                        self._release_pool_worker()
+                self.pool_backend = desired
+                self.pool_slug = self.pool_primary_slugs[desired.id]
+                self.retained_slot_hint = None
+                self._refresh_profiles()
             if profile.slug in self.pool_slugs:
                 await self._cancel_pool_release()
                 if self.pool_handle is None:

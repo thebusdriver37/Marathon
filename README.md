@@ -66,7 +66,8 @@ With `identity_config`, slot snapshots also follow the broker YAML: Marathon rea
 the folder each worker mounts for `--slot-save-path` (so no `slot_save_root` is
 needed) and retires old snapshots whenever a worker's launch command changes.
 
-Experimental Inkling 2 Mini profiles are documented in [Inkling setup](docs/INKLING.md).
+Inkling 2 Mini is available through a shared on-demand Maya pool on configured machines.
+See [Inkling setup, limitations and rollback](docs/INKLING.md).
 
 ## Local by default
 

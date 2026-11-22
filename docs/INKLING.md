@@ -1,86 +1,90 @@
-# Inkling 2 Mini (experimental)
+# Inkling 2 Mini with Maya
 
-This branch adds an Inkling model family to Marathon's GGUF discovery and model picker.
-Place target weights under the configured model root and choose Inkling in setup.
-The DSpark drafter remains a helper and is excluded from the picker.
+On AiGuy, Inkling is a selectable model in Marathon's `/model` picker and Majesty's
+Marathon model list. Qwen remains the remembered default. Choose `Inkling 2 Mini`
+(262144 context) or `Inkling 2 Mini 344K` (344064 context). A one-off terminal launch
+can use `marathon codex -m inkling-2-mini`.
 
-Fast agentic evaluation uses Maya's full Python server through an external model
-entry, with `model = "inkling-2-mini"`, `reasoning_transport = "responses"`, and
-the backend slot API disabled. Its streaming Responses API works with the
-ordinary Marathon frontend and router; Maya handles prefix reuse internally.
-The standalone `runtime/maya-adapter.py` benchmark service only implements
-nonstreaming chat and is a different interface. The unapplied external entry is
-`integration/rollout/marathon-maya-entry.draft.toml` in the evaluation folder.
-The fast engine/weights/configuration and DSpark correctness limits are recorded
-in `integration/FAST-PROTOCOL.md` and `integration/REPORT.md` there. Keep its
-physical GPU's existing Marathon pool lease through server cleanup.
-The team's DSpark audit found changed complete greedy streams. Agentic results
-with that drafter describe the selected deployment, not plain-Maya equivalence.
-Enable Maya's `fit_max_tokens` so the output allowance fits the remaining
-window without truncating the prompt. Put sampling defaults in its `sampling`
-block or `.shared-settings.json`; a top-level `seed` is ignored. Verify `/props`
-and native request headers. Maya's API `top_k=0` selects its widest 64-token
-candidate shortlist, so matching API settings does not make its sampler
-identical to Qwen's.
+The deployment uses Maya c520fd14de plus attention-split.patch, attention split 80,
+UD-Q4_K_XL target weights, FP8 KV, fixed width-4 DSpark and a 16384-token draft
+context. Prefill chunks are 2048 for 262K and 512 for 344K. DSpark changed some
+complete greedy outputs in the audit; the owner approved this configuration based
+on measured agent quality. These results do not claim lossless equivalence.
 
-The installed frontend also has a 1,048,576-character limit on turn input.
-A 302,858-token repository snapshot exceeded that character limit before model
-inference, despite fitting the native Maya window. Context-token capacity alone
-does not guarantee that an arbitrary full snapshot can enter the frontend.
-Large text snapshot ingestion and cross-process snapshot/resume need separate
-qualification before production use.
+The pinned runtime lives in gpu-control's `runtime/inkling-maya-c520fd14-attn80/`.
+It packages the binary, CUDA libraries, tokenizer and full Python serving stack;
+weights stay under `~/AI/models`. No experiment or NInfer directory is a runtime
+dependency. Its README records image and file hashes, launch settings and rollback.
+The native guard refuses CPU expert fallback before the API becomes ready.
 
-The local llama.cpp profiles below remain integration references; the fast
-evaluation uses the external Maya server above. The `inkling2` backend expects
-a native llama.cpp build at
-`~/AI/backends/llama.cpp-inkling-29b52d39/build/bin/llama-server`.
-This revision recognizes Inkling's Jinja template and native PEG tool/reasoning parser.
-An older Qwen runtime cannot substitute for this build. Building or installing that
-backend and obtaining the weights remain separate operator steps.
-Use ggml-org IQ4_NL weights with that stock revision. Unsloth Mainline_Support
-weights need the loop-pass expert-scale fix in
-[llama.cpp #32704](https://github.com/ggml-org/llama.cpp/pull/32704), or the
-qualified Unsloth build recorded in the evaluation. Do not mix those pairs.
+Two machine-local `llama_swap_pool` backends, `inkling-maya` and
+`inkling-maya-large`, map each worker to its card's original Qwen lock using
+`pool_lease_backend` and `pool_lease_models`. Every worker remains loopback-only.
+Marathon checks GPU occupancy before leasing; the launcher checks again before
+loading. A worker receives a duplicate of the same flock descriptor through an
+owner-only Unix socket, keeping its card reserved if its client dies during cold
+load. Switching model pools unloads the old worker before releasing its lease.
+Normal Inkling router exit unloads its worker; an abandoned broker worker expires
+at the same 900-second idle TTL as Qwen. No card is dedicated to Inkling.
 
-The default `inkling-32k` profile uses 32768 context tokens, Q8 KV, one slot,
-1024/64 batch/microbatch, and natural reasoning. `inkling-262k` uses 262144
-context tokens and Q4 KV on a 24 GB card. Both are experimental; the 1M model
-claim is not an advertised Marathon context setting. Use explicit device placement
-and the normal pool lease before a manual backend launch.
+The portable catalog only declares backend placeholders. Configure both pools in
+`~/.config/marathon/catalog.toml` before selecting its GGUF in setup; it has no slow
+llama.cpp fallback. External model entries expose `inkling-2-mini` and
+`inkling-2-mini-344k` through the same shared pools in the Codex model picker.
+The Qwen worker IDs, launch flags, pinned image, caches and default are unchanged.
 
-The ordinary Codex frontend, structured patch tools, and base coding prompt are
-unchanged. Marathon forwards Responses requests to llama.cpp. With `--jinja`,
-llama.cpp parses `<|content_thinking|>` and `<|content_invoke_tool_json|>` into
-structured reasoning and tool output. It also parses JSON-string tool arguments
-into objects before rendering tool history. Do not hand-render Inkling tool markup
-or replace the native template with a Qwen template.
-Direct optional/required tool calls and a multi-turn replay of JSON-string API
-arguments passed on both evaluated builds. General structured output is a
-separate gate: use `response_format` with `json_schema`, since raw `grammar`
-also constrains Inkling's message header
-([#32745](https://github.com/ggml-org/llama.cpp/issues/32745)).
+## Protocol and limits
 
-`reasoning_transport = "chat_template_effort"` forwards every advertised effort
-through `chat_template_kwargs.reasoning_effort`. It preserves `none`: Inkling maps
-that to 0, while omission defaults to 0.9. The template ignores `enable_thinking`. The router also removes the conflicting
-OpenAI effort field: llama.cpp otherwise translates `none` into a boolean and
-erases the template value, or overrides recovery with the original effort.
-Lowest effort can still emit reasoning. Other template levels are minimal=.1,
-low=.2, medium=.7, high=.9, and xhigh=.99. Recovery requests the lowest effort
-using the same transport. There is no post-tool reasoning cutoff for these profiles.
-The explicit template transport avoids
-[llama.cpp #32753](https://github.com/ggml-org/llama.cpp/issues/32753);
-rendered-prefix probes verified effort 0 for none and 0.7 for medium.
-Changing effort changes the early system prefix and can require full prompt
-prefill again. Keep effort stable during long conversations where possible;
-lowest-effort stalled recovery may incur that cost.
+Use Maya's full streaming Responses server, with `reasoning_transport = "responses"`
+and slot APIs disabled. The smaller benchmark `maya-adapter.py` is not the deployed
+interface. The full server canonicalizes OpenAI JSON-string tool arguments into
+objects before rendering Inkling's template. Multi-turn tool histories work.
+Maya maps the requested effort into the template. Switching effort changes an early
+prompt prefix and can require a full prefill; keep effort stable for large contexts.
 
-For an existing external server, a machine-local `external_models` entry can use
-the same `reasoning_transport`, explicit reasoning levels/default, and actual
-server context size. Local family settings reach the router through
-`MARATHON_MODEL_REASONING_TRANSPORT`. Image support needs a compatible projector
-and separate validation; these text agent trials do not certify vision.
+The router also supports `chat_template_effort` for separately configured llama.cpp
+servers: it puts `none` through `xhigh` in `chat_template_kwargs.reasoning_effort`,
+removing conflicting OpenAI effort/enable_thinking fields. This avoids llama.cpp
+#32753, which otherwise turns `none` into the template's high-effort default.
+That compatibility path is tested but is not used by the deployed Maya runtime.
 
-No production pool entry, default model, installed frontend, or broker is changed.
-The isolated evaluation and un-applied rollout draft are under
-`~/AI/experiments/inkling2-mini-20261121/integration/` on AiGuy.
+Inkling currently lacks Qwen's slot-file cache and cross-process snapshot resume,
+fast-mode LoRA, and GPU vision. Its model entries accept text only. Maya can reuse a
+live prefix internally; that is not a durable slot snapshot. Normal conversation
+resume reconstructs the prompt. The frontend's 1,048,576-character turn-input limit
+still applies even when the model's token window has room. Maya's sampler considers
+at most 64 candidates, so equal API settings do not imply identical Qwen sampling.
+
+`fit_max_tokens` reduces the output allowance to the remaining window without
+truncating the prompt. Sampling defaults are in the config's `sampling` object,
+not a top-level seed (which Maya ignores). The deployed defaults are temperature
+1.0, top-p .95, top-k 64, min-p 0, repetition penalty 1.0.
+
+## Choosing the default later
+
+Use `marathon setup` to remember Inkling, or replace the selection document
+`~/.config/marathon/selection.json` with this single line when the owner chooses it:
+
+```json
+{"schema":1,"model":"inkling-2-mini-ud-q4-k-xl","profile":"maya-262k","frontend":"codex","profile_policy":"explicit"}
+```
+
+This rollout does not make that change. Existing Majesty conversations keep their
+selected model. Its model list refreshes when Majesty starts, using Marathon's
+`model/list`; use Majesty's supported idle restart if new entries are missing.
+
+## Evidence and rollback
+
+The public synthetic evaluation is in
+`~/AI/experiments/inkling2-mini-20261121/integration/REPORT.md` on AiGuy, with deployment
+checks in `go-live/`. Two 150K+ tasks passed for Inkling, one for Qwen. A dense
+309628-token Inkling input also passed; the same material exceeded Qwen's window.
+The matched short cohort scored 8/10 versus 9/10, with median time ratio 0.68 across
+joint successes. These are small synthetic cohorts, not proof of superiority on
+arbitrary projects.
+
+To roll back, wait until all affected workers and leases are idle, then restore
+`go-live/config.before.yaml` to the watched broker YAML and
+`go-live/catalog.before.toml` to the machine catalog. Qwen stays selected throughout.
+Do not restart an active broker worker or delete shared lease files. The packaged
+runtime README records code rollback separately; preserve unrelated local edits.
