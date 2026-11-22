@@ -3771,6 +3771,8 @@ class RouterState:
                         if protocol_error:
                             raise ToolProtocolError(protocol_error)
                         raise RuntimeError(f"backend {method} {path} failed: {response.status} {text}")
+                    if method == "POST" and path.startswith("/api/models/unload/") and text.strip() == "OK":
+                        return {}  # llama-swap acknowledges successful unload as plain text.
                     try:
                         return json.loads(text) if text else {}
                     except json.JSONDecodeError as exc:

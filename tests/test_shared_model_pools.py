@@ -118,3 +118,16 @@ class SharedPoolReasoningReplayTests(unittest.IsolatedAsyncioTestCase):
                 for item in prior:
                     self.assertNotIn('encrypted_content',item)
                     self.assertEqual(item['content'],reasoning['content'])
+
+class PoolUnloadAcknowledgementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unload_accepts_broker_ok_but_other_json_endpoints_stay_strict(self):
+        from aiohttp import web, ClientSession
+        from aiohttp.test_utils import TestServer
+        async def ok(request):return web.Response(text="OK")
+        app=web.Application();app.router.add_post('/api/models/unload/worker',ok);app.router.add_post('/v1/responses',ok)
+        async with TestServer(app) as server, ClientSession() as client:
+            state=object.__new__(router_module.RouterState);state.http_client=client
+            profile=replace(fixture_profile(),target=str(server.make_url('')))
+            self.assertEqual(await state._request_json(profile,'POST','/api/models/unload/worker'),{})
+            with self.assertRaisesRegex(RuntimeError,'returned invalid JSON'):
+                await state._request_json(profile,'POST','/v1/responses')
