@@ -110,6 +110,21 @@ def router_env(a, out):
         XDG_STATE_HOME=str(out / 'xdg-state'), PYTHONPATH=str(a.router_root))
     if a.engine == 'maya':
         env['MARATHON_MODEL_CACHE_BACKEND'] = 'maya'
+    if a.catalog_external:
+        # Production shape: the model comes from a user-catalog [[external_models]]
+        # entry (cache_backend there, not in the environment).
+        for key in ('MARATHON_MODEL_PATH', 'MARATHON_MODEL_SLUG', 'MARATHON_MODEL_EXTERNAL',
+                    'MARATHON_MODEL_TARGET', 'MARATHON_MODEL_CONTEXT', 'MARATHON_MODEL_REASONING_TRANSPORT',
+                    'MARATHON_BACKEND_SLOT_API', 'MARATHON_MODEL_CACHE_BACKEND'):
+            env.pop(key, None)
+        lines = ['[[external_models]]', f'id = "{a.model}"', f'model = "{a.upstream_model}"',
+                 f'base_url = "{a.upstream}/v1"', f'context = {a.context}',
+                 f'reasoning_transport = "{a.transport}"']
+        if a.engine == 'maya':
+            lines.append('cache_backend = "maya"')
+        user_catalog = out / 'user-catalog.toml'
+        user_catalog.write_text('\n'.join(lines) + '\n')
+        env['MARATHON_USER_CATALOG'] = str(user_catalog)
     for item in a.env:
         key, _, value = item.partition('=')
         env[key] = value
@@ -285,6 +300,10 @@ def main():
     p.add_argument('--tag', default='a')
     p.add_argument('--skip-cold', action='store_true')
     p.add_argument('--env', action='append', default=[], help='extra router KEY=VALUE (production parity)')
+    p.add_argument('--catalog-external', action='store_true',
+                   help='serve --model from a user-catalog [[external_models]] entry (cache_backend = "maya" '
+                        'only for --engine maya) instead of the environment custom model')
+    p.add_argument('--upstream-model', default='inkling-2-mini', help='upstream model name for --catalog-external')
     asyncio.run(run(p.parse_args()))
 
 
