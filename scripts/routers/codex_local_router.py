@@ -60,6 +60,9 @@ from marathon_app.checkpoints import conversation_key_hash
 from marathon_app.telemetry import EventWriter
 from marathon_app.router_security import is_loopback, router_security_middleware
 from marathon_response_accounting import ResponseAccounting
+from marathon_cache_backends import (
+    CACHE_BACKENDS, CacheAdapter, CacheCapabilities, adapter_for, capabilities_for,
+)
 
 from marathon_web_search import WebFetchExecutor
 from marathon_web_search import WebFetchSettings
@@ -345,6 +348,13 @@ class ModelProfile:
     # llama.cpp adapter id that implements fast mode: applied only at
     # reasoning effort "none", explicitly disabled for every other effort.
     fast_lora_id: int | None = None
+    # Conversation cache adapter when the llama.cpp slot API is absent:
+    # "engine" (its own prefix cache only) or "maya" (Inkling's durable cache).
+    cache_backend: str = "engine"
+
+    @property
+    def cache(self) -> CacheCapabilities:
+        return capabilities_for(self.cache_backend, self.supports_slots)
 
     def resolved_model_path(self) -> str | None:
         for candidate in self.model_paths:
@@ -646,6 +656,65 @@ def _starter_context_chat_body(
     if not initial:
         return _starter_scaffold_chat_body(request, user_content)
     return _conversation_checkpoint_chat_body({**request, "input": initial}, user_content)
+
+
+def _leading_context_items(request: dict[str, Any]) -> list[dict[str, Any]]:
+    """The request's leading Marathon context envelopes (see _starter_context_chat_body)."""
+    initial = []
+    for item in request.get("input") or []:
+        if not isinstance(item, dict) or item.get("role") != "user":
+            break
+        content = item.get("content")
+        if (not isinstance(content, list) or len(content) != 1
+                or not isinstance(content[0], dict)
+                or content[0].get("type") != "input_text"):
+            break
+        text = content[0].get("text")
+        if (not isinstance(text, str) or not text.endswith("\n</marathon_context>")
+                or not text.startswith(('<marathon_context role="developer">\n',
+                                        '<marathon_context role="system">\n'))):
+            break
+        initial.append(item)
+    return initial
+
+
+def _starter_responses_bodies(request: dict[str, Any]) -> list[dict[str, Any]]:
+    """Two Responses bodies that differ only after the starter prefix.
+
+    Engines that render Responses themselves (Maya) take the exact forwarded
+    request with its input cut to the leading context, plus a sentinel user
+    message. The engine renders both, prefills their common token prefix, and
+    its exact-prefix check decides reuse, so a template difference can only
+    cost a miss, never wrong state.
+    """
+    base = {
+        key: copy.deepcopy(value) for key, value in request.items()
+        if key not in {"input", "stream", "previous_response_id", "background", "store"}
+    }
+    initial = copy.deepcopy(_leading_context_items(request))
+    return [
+        {**base, "input": initial + [{
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": sentinel}],
+        }]}
+        for sentinel in (STARTER_CACHE_SENTINEL, STARTER_CACHE_ALTERNATE_SENTINEL)
+    ]
+
+
+_FIRST_TURN_ROLES = {"user", "developer", "system"}
+
+
+def _is_first_turn_input(items: Any) -> bool:
+    """True when a request carries no model output yet: a new conversation."""
+    if not isinstance(items, list) or not items:
+        return False
+    for item in items:
+        if not isinstance(item, dict):
+            return False
+        kind = item.get("type", "message")
+        if kind != "message" or item.get("role") not in _FIRST_TURN_ROLES:
+            return False
+    return True
 
 
 def _conversation_checkpoint_chat_body(
@@ -1551,7 +1620,15 @@ def _custom_model_profile(root: Path) -> ModelProfile | None:
         api_key_env=api_key_env.strip() if api_key_env else None,
         api_key_file=api_key_file.strip() if api_key_file else None,
         fast_lora_id=fast_lora_id,
+        cache_backend=_cache_backend_from_env(),
     )
+
+
+def _cache_backend_from_env() -> str:
+    value = (os.getenv("MARATHON_MODEL_CACHE_BACKEND") or "engine").strip()
+    if value not in CACHE_BACKENDS:
+        raise ValueError("MARATHON_MODEL_CACHE_BACKEND is invalid")
+    return value
 
 
 def _external_target(base_url: str) -> str:
@@ -1593,6 +1670,7 @@ def _external_model_profiles() -> dict[str, ModelProfile]:
             instructions_file=configured.instructions_file,
             api_key_env=configured.api_key_env,
             api_key_file=configured.api_key_file,
+            cache_backend=configured.cache_backend,
         )
     return profiles
 
@@ -4407,6 +4485,63 @@ class RouterState:
             "kept_bytes": kept_bytes,
         }
 
+    def _cache_adapter(self, profile: ModelProfile) -> CacheAdapter:
+        return adapter_for(profile.cache)
+
+    def _cache_target_ready(self, profile: ModelProfile) -> bool:
+        """Cache control reaches one worker; a pooled model only while one is held."""
+        pooled = (profile.slug in getattr(self, "pool_profile_backends", {})
+                  or profile.slug in getattr(self, "pool_slugs", ()))
+        if not pooled:
+            return True
+        return (profile.slug in getattr(self, "pool_slugs", ())
+                and getattr(self, "pool_model", None) is not None)
+
+    async def prepare_engine_starter(
+        self,
+        profile: ModelProfile,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Starter prefix for engines that render, prefill and persist it themselves.
+
+        Same policy as llama.cpp's prepare_starter_cache (one shared tools and
+        initial-instructions prefix per fingerprint, built once, reused by every
+        new session on any worker); the adapter does the mechanics.
+        """
+        capabilities = profile.cache
+        if (not self.starter_cache_enabled or capabilities.slot_files
+                or not capabilities.starter_prefill):
+            return {"mode": "starter-cache-disabled", "status": "skipped"}
+        if not self._cache_target_ready(profile):
+            return {"mode": "starter-cache-unavailable", "status": "skipped",
+                    "reason": "no worker reserved"}
+        bodies = _starter_responses_bodies(request)
+        fingerprint = _starter_cache_fingerprint(
+            profile, self.backend_cache_id, bodies[0],
+        )
+        started = time.perf_counter()
+        try:
+            result = await self._cache_adapter(profile).prefill(self, profile, bodies, save=True)
+        except Exception as exc:
+            return {"mode": "starter-cache-fallback", "status": "error",
+                    "fingerprint": fingerprint, "error": str(exc)}
+        tokens = int(result.get("n_tokens") or 0)
+        cached = int(result.get("n_cached") or 0)
+        save = result.get("save") if isinstance(result.get("save"), dict) else {}
+        restored = tokens > 0 and cached >= tokens
+        return {
+            "mode": "restore-starter-cache" if restored else "build-starter-cache",
+            "status": "restored" if restored else "built",
+            "fingerprint": fingerprint,
+            "cache_backend": profile.cache.name,
+            "starter_tokens": tokens,
+            "cached_tokens": cached,
+            "save_status": save.get("status"),
+            "saved_bytes": save.get("saved_bytes") if save.get("status") == "saved" else 0,
+            "prefill_ms": result.get("prompt_ms"),
+            "duration_ms": (time.perf_counter() - started) * 1000.0,
+        }
+
     async def prepare_starter_cache(
         self,
         profile: ModelProfile,
@@ -4622,6 +4757,8 @@ class RouterState:
         if getattr(self, "pool_backend", None) and self.pool_handle is None:
             return {"status": "skipped", "reason": "no local worker reserved for optional warmup"}
 
+        if not profile.supports_slots and profile.cache.starter_prefill:
+            return self._schedule_engine_starter_prewarm(profile, request)
         if (
             getattr(self, "_closing", False)
             or not getattr(self, "starter_cache_enabled", False)
@@ -4644,6 +4781,67 @@ class RouterState:
         )
         self.starter_prewarm_tasks[profile.slug] = task
         return {"status": "scheduled"}
+
+    def _schedule_engine_starter_prewarm(
+        self, profile: ModelProfile, request: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (getattr(self, "_closing", False)
+                or not getattr(self, "starter_cache_enabled", False)):
+            return {"status": "skipped"}
+        previous = self.starter_prewarm_tasks.get(profile.slug)
+        if previous is not None and not previous.done():
+            return {"status": "already-scheduled"}
+        task = asyncio.create_task(
+            self._prewarm_engine_starter(profile, copy.deepcopy(request)),
+            name=f"marathon-starter-prewarm-{profile.slug}",
+        )
+        self.starter_prewarm_tasks[profile.slug] = task
+        return {"status": "scheduled"}
+
+    async def _prewarm_engine_starter(
+        self, profile: ModelProfile, request: dict[str, Any],
+    ) -> None:
+        current_task = asyncio.current_task()
+        started = time.perf_counter()
+        try:
+            await self.ensure_model_async(profile.slug)
+            async with self.backend_lock:
+                if getattr(self, "_closing", False) or not self._cache_target_ready(profile):
+                    return
+                # Never evict an unsaved hot conversation just to warm a
+                # starter: the engine reports whether its hot state is stored.
+                probe = await self._cache_adapter(profile).probe(self, profile)
+                if probe.get("dirty") or probe.get("busy"):
+                    result = {"status": "skipped", "mode": "engine-conversation-hot"}
+                else:
+                    result = await self.prepare_engine_starter(profile, request)
+            error = result.get("error")
+            self.telemetry.emit(
+                "router.starter_cache.prewarm_completed",
+                {
+                    "profile_slug": profile.slug,
+                    "kind": "starter",
+                    "cache_backend": profile.cache.name,
+                    "status": result.get("status"),
+                    "mode": result.get("mode"),
+                    "starter_tokens": result.get("starter_tokens"),
+                    "saved_bytes": result.get("saved_bytes"),
+                    "error": error,
+                    "duration_ms": (time.perf_counter() - started) * 1000.0,
+                },
+                level="warning" if error else "info",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.telemetry.emit(
+                "router.starter_cache.prewarm_failed",
+                {"profile_slug": profile.slug, "error": str(exc)},
+                level="warning",
+            )
+        finally:
+            if self.starter_prewarm_tasks.get(profile.slug) is current_task:
+                self.starter_prewarm_tasks.pop(profile.slug, None)
 
     async def _prewarm_starter_cache(
         self,
@@ -4905,13 +5103,13 @@ class RouterState:
         backend_response: dict[str, Any],
         conversation_input: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        if not self.slot_snapshots_enabled or not profile.supports_slots:
+        if not self.slot_snapshots_enabled or not profile.cache.explicit_save:
             return {
                 "status": "skipped",
                 "reason": (
                     "rolling checkpoints disabled"
-                    if profile.supports_slots
-                    else "backend has no llama.cpp slot API"
+                    if profile.cache.explicit_save
+                    else "backend has no cache save API"
                 ),
             }
         if getattr(self, "_closing", False):
@@ -5182,6 +5380,9 @@ class RouterState:
         force: bool,
     ) -> dict[str, Any]:
         profile = self.available_profiles.get(candidate.profile_slug)
+        if profile is not None and not profile.cache.slot_files and profile.cache.explicit_save:
+            async with self.backend_lock:
+                return await self._save_engine_checkpoint_locked(profile, candidate)
         if profile is None or not profile.supports_slots:
             return {"status": "skipped", "reason": "model no longer supports slots"}
 
@@ -5190,6 +5391,34 @@ class RouterState:
                 candidate,
                 force=force,
             )
+
+    async def _save_engine_checkpoint_locked(
+        self,
+        profile: ModelProfile,
+        candidate: ConversationCheckpointCandidate,
+    ) -> dict[str, Any]:
+        """Idle/unload checkpoint for engines that own their snapshot store.
+
+        Marathon decides when (idle, before unload); the engine persists its hot
+        prompt boundary and reports "clean" without writing when that exact
+        state is already stored, so repeated checkpoints cost nothing.
+        """
+        self._defer_idle_checkpoint()
+        if self.last_response_by_model.get(profile.slug) != candidate.response_id:
+            return {"status": "skipped",
+                    "reason": "engine conversation has advanced beyond this checkpoint"}
+        if not self._cache_target_ready(profile):
+            return {"status": "skipped", "reason": "no worker reserved"}
+        result = await self._cache_adapter(profile).save(self, profile)
+        status = result.get("status")
+        return {
+            "status": "saved" if status in ("saved", "queued") else "skipped",
+            "reason": f"engine checkpoint {status}",
+            "cache_backend": profile.cache.name,
+            "size_bytes": result.get("size_bytes"),
+            "context_tokens": result.get("context_tokens") or candidate.context_tokens,
+            "duration_ms": result.get("duration_ms"),
+        }
 
     async def _save_conversation_checkpoint_locked(
         self,
@@ -6904,6 +7133,20 @@ class RouterState:
                     "reason": "backend replays full lineage and manages its own prefix cache",
                 }
                 self._clear_live_slot(profile.slug)
+                if (
+                    starter_root
+                    and profile.cache.starter_prefill
+                    and _codex_request_kind(forward_request) != "compaction"
+                    and _is_first_turn_input(forward_request.get("input"))
+                ):
+                    # A new conversation starts from the shared starter prefix.
+                    # The engine restores a stored conversation by itself, so
+                    # resumed conversations need no router action here.
+                    starter_cache_result = await self.prepare_engine_starter(
+                        profile, forward_request,
+                    )
+                    if starter_cache_result.get("status") in {"built", "restored"}:
+                        slot_prepare_mode = str(starter_cache_result["mode"])
             elif (
                 compaction_source is not None
                 and self.live_slot_by_model.get(profile.slug) == compaction_source.response_id

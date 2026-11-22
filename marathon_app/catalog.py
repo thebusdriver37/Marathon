@@ -191,6 +191,9 @@ class ExternalModel:
     disabled_tools: tuple[str, ...] = ()
     # Replaces the upstream Codex prompt in this model's base instructions.
     instructions_file: str | None = None
+    # Conversation cache adapter: "engine" (the server's own prefix cache) or
+    # "maya" (Inkling's durable cache with Marathon's /slots and /cache API).
+    cache_backend: str = "engine"
 
 
 def _reasoning_configuration(
@@ -412,6 +415,11 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
         reasoning_transport = raw.get("reasoning_transport", "chat_template")
         if reasoning_transport not in ("chat_template", "chat_template_effort", "responses"):
             raise ValueError(f"external model {model_id} has invalid reasoning_transport")
+        cache_backend = raw.get("cache_backend", "engine")
+        if cache_backend not in ("engine", "maya"):
+            raise ValueError(
+                f"external model {model_id} cache_backend must be \"engine\" or \"maya\""
+            )
         native_instruction_roles = raw.get("native_instruction_roles", False)
         if not isinstance(native_instruction_roles, bool):
             raise ValueError(
@@ -485,6 +493,7 @@ def external_models(catalog: dict[str, Any] | None = None) -> tuple[ExternalMode
                 max_output_tokens=max_output_raw,
                 disabled_tools=tuple(item.strip() for item in disabled_tools_raw),
                 instructions_file=instructions_file,
+                cache_backend=cache_backend,
             )
         )
     return tuple(result)
