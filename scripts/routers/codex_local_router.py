@@ -4522,9 +4522,16 @@ class RouterState:
         fingerprint = _starter_cache_fingerprint(
             profile, self.backend_cache_id, bodies[0],
         )
+        # A starter this router already stored is not written again: when a shorter hot prefix
+        # (a Codex warmup carries less leading context than the first real turn) shadows it, the
+        # engine extends the hot prefix and a save would rewrite the same snapshot every new chat.
+        stored = getattr(self, "engine_starters_stored", None)
+        if stored is None:
+            stored = self.engine_starters_stored = set()
+        save_now = fingerprint not in stored
         started = time.perf_counter()
         try:
-            result = await self._cache_adapter(profile).prefill(self, profile, bodies, save=True)
+            result = await self._cache_adapter(profile).prefill(self, profile, bodies, save=save_now)
         except Exception as exc:
             return {"mode": "starter-cache-fallback", "status": "error",
                     "fingerprint": fingerprint, "error": str(exc)}
@@ -4532,6 +4539,8 @@ class RouterState:
         cached = int(result.get("n_cached") or 0)
         save = result.get("save") if isinstance(result.get("save"), dict) else {}
         restored = tokens > 0 and cached >= tokens
+        if restored or save.get("status") in ("saved", "clean"):
+            stored.add(fingerprint)
         return {
             "mode": "restore-starter-cache" if restored else "build-starter-cache",
             "status": "restored" if restored else "built",

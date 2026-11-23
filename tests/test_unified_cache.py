@@ -147,6 +147,18 @@ class MayaAdapterTests(unittest.TestCase):
         restored = asyncio.run(state.prepare_engine_starter(profile(), request()))
         self.assertEqual((restored["status"], restored["saved_bytes"]), ("restored", 0))
 
+    def test_a_stored_starter_is_not_saved_again(self):
+        replies = {"/cache/prefill": lambda payload: {
+            "n_tokens": 14522, "n_cached": 0, "prompt_ms": 5601.8,
+            "save": {"status": "saved", "saved_bytes": 360072968} if payload["save"] else {}}}
+        state = maya_state(replies)
+        asyncio.run(state.prepare_engine_starter(profile(), request()))
+        # A shorter hot prefix (a warmup's starter) shadows the stored one: extended, not rewritten.
+        replies["/cache/prefill"] = {"n_tokens": 14522, "n_cached": 12563, "prompt_ms": 1296.8}
+        again = asyncio.run(state.prepare_engine_starter(profile(), request()))
+        self.assertEqual([call[2]["save"] for call in state._request_json.calls], [True, False])
+        self.assertEqual((again["status"], again["saved_bytes"]), ("built", 0))
+
     def test_starter_needs_a_reserved_pool_worker_and_never_raises(self):
         state = maya_state({}, pool_slugs={"inkling"}, pool_model=None)
         self.assertEqual(asyncio.run(state.prepare_engine_starter(profile(), request()))["status"], "skipped")
