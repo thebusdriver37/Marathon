@@ -4500,10 +4500,75 @@ class RouterState:
         return (profile.slug in getattr(self, "pool_slugs", ())
                 and getattr(self, "pool_model", None) is not None)
 
+    ENGINE_STARTER_CONTEXTS_FILE = "engine-starter-contexts.json"
+    ENGINE_STARTER_CONTEXTS_MAX = 16
+
+    def _engine_starter_contexts(self) -> dict[str, list[dict[str, Any]]]:
+        contexts = getattr(self, "engine_starter_contexts", None)
+        if contexts is None:
+            contexts = {}
+            state_dir = getattr(self, "state_dir", None)
+            try:
+                if state_dir is not None:
+                    loaded = json.loads((Path(state_dir) / self.ENGINE_STARTER_CONTEXTS_FILE).read_text())
+                    if isinstance(loaded, dict):
+                        contexts = {k: v for k, v in loaded.items() if isinstance(v, list)}
+            except (OSError, ValueError):
+                pass
+            self.engine_starter_contexts = contexts
+        return contexts
+
+    def _engine_starter_context(
+        self, profile: ModelProfile, request: dict[str, Any], *, warmup: bool,
+    ) -> dict[str, Any]:
+        """Give a warmup the leading context the first real turn will carry.
+
+        A Codex warmup sends only the developer context; the first real turn adds the
+        user-instructions and environment envelopes. Their starters would differ (12.6K vs
+        14.5K tokens for Codex), so the stored full starter would be shadowed by the
+        warmup's shorter one. Remember the real turn's leading context per scaffold
+        (state dir, so new routers benefit) and let a warmup with the same scaffold and the
+        same leading items use it. A stale memory can only cost a cache miss.
+        """
+        leading = _leading_context_items(request)
+        if not leading:
+            return request
+        key = _sha256_text(_stable_json({
+            "model": profile.slug,
+            "instructions": request.get("instructions"),
+            "tools": request.get("tools"),
+            "first": leading[0],
+        }))
+        contexts = self._engine_starter_contexts()
+        if warmup:
+            remembered = contexts.get(key)
+            if (isinstance(remembered, list) and len(remembered) > len(leading)
+                    and remembered[:len(leading)] == leading):
+                return {**request, "input": copy.deepcopy(remembered)}
+            return request
+        if contexts.get(key) != leading:
+            contexts.pop(key, None)
+            contexts[key] = copy.deepcopy(leading)
+            while len(contexts) > self.ENGINE_STARTER_CONTEXTS_MAX:
+                contexts.pop(next(iter(contexts)))
+            state_dir = getattr(self, "state_dir", None)
+            if state_dir is not None:
+                path = Path(state_dir) / self.ENGINE_STARTER_CONTEXTS_FILE
+                try:
+                    temporary = path.with_suffix(".tmp")
+                    temporary.write_text(json.dumps(contexts))
+                    temporary.chmod(0o600)
+                    temporary.replace(path)
+                except OSError:
+                    pass
+        return request
+
     async def prepare_engine_starter(
         self,
         profile: ModelProfile,
         request: dict[str, Any],
+        *,
+        warmup: bool = False,
     ) -> dict[str, Any]:
         """Starter prefix for engines that render, prefill and persist it themselves.
 
@@ -4518,6 +4583,7 @@ class RouterState:
         if not self._cache_target_ready(profile):
             return {"mode": "starter-cache-unavailable", "status": "skipped",
                     "reason": "no worker reserved"}
+        request = self._engine_starter_context(profile, request, warmup=warmup)
         bodies = _starter_responses_bodies(request)
         fingerprint = _starter_cache_fingerprint(
             profile, self.backend_cache_id, bodies[0],
@@ -4829,7 +4895,7 @@ class RouterState:
                 if probe.get("dirty") or probe.get("busy"):
                     result = {"status": "skipped", "mode": "engine-conversation-hot"}
                 else:
-                    result = await self.prepare_engine_starter(profile, request)
+                    result = await self.prepare_engine_starter(profile, request, warmup=True)
             error = result.get("error")
             self.telemetry.emit(
                 "router.starter_cache.prewarm_completed",

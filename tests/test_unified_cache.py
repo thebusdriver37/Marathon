@@ -253,3 +253,40 @@ class WarmupTests(unittest.TestCase):
             self.assertEqual(self.run_warmup(state, prof), {"status": "scheduled", "kind": "model-load"})
             state._schedule_engine_starter_prewarm.assert_not_called()
             state.ensure_model_async.assert_awaited_once_with(prof.slug)
+
+
+class WarmupStarterContextTests(unittest.TestCase):
+    """A warmup builds the same starter the first real turn will use."""
+
+    ENV = {"type": "message", "role": "user", "content": [{
+        "type": "input_text",
+        "text": '<marathon_context role="developer">\nsynthetic environment\n</marathon_context>'}]}
+
+    def prefill_inputs(self, state):
+        return [call[2]["requests"][0]["input"] for call in state._request_json.calls]
+
+    def reply(self):
+        return {"/cache/prefill": lambda payload: {"n_tokens": 100, "n_cached": 0, "prompt_ms": 1.0,
+                                                   "save": {"status": "saved", "saved_bytes": 1}}}
+
+    def test_warmup_uses_the_remembered_first_turn_context_across_routers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            real = request(input=[CONTEXT, self.ENV, request()["input"][1]])
+            warm = request(input=[CONTEXT], generate=False)
+            first = maya_state(self.reply(), state_dir=Path(folder))
+            asyncio.run(first.prepare_engine_starter(profile(), real))
+            later = maya_state(self.reply(), state_dir=Path(folder))
+            asyncio.run(later.prepare_engine_starter(profile(), warm, warmup=True))
+            self.assertEqual(self.prefill_inputs(later)[0][:2], [CONTEXT, self.ENV])
+            self.assertEqual(self.prefill_inputs(first)[0][:2], self.prefill_inputs(later)[0][:2])
+
+    def test_unrelated_or_unknown_scaffold_keeps_the_warmup_context(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = maya_state(self.reply(), state_dir=Path(folder))
+            asyncio.run(state.prepare_engine_starter(profile(), request(input=[CONTEXT], generate=False), warmup=True))
+            asyncio.run(state.prepare_engine_starter(profile(), request(input=[CONTEXT, self.ENV, request()["input"][1]])))
+            asyncio.run(state.prepare_engine_starter(
+                profile(), request(input=[CONTEXT], instructions="other policy", generate=False), warmup=True))
+            inputs = self.prefill_inputs(state)
+            self.assertEqual(len(inputs[0]), 2)       # warmup alone: its own context + sentinel
+            self.assertEqual(len(inputs[2]), 2)       # different scaffold: not substituted
