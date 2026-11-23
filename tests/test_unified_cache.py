@@ -114,6 +114,12 @@ class StarterBodyTests(unittest.TestCase):
                          {k: v for k, v in second.items() if k != "input"})
         self.assertNotIn("first synthetic question", str(first))
 
+    def test_a_warmup_request_still_gives_prefillable_bodies(self):
+        # Codex warmups carry generate: false; Maya's /cache/prefill rejects that parameter.
+        for body in router._starter_responses_bodies(request(generate=False, store=False)):
+            self.assertNotIn("generate", body)
+            self.assertNotIn("store", body)
+
     def test_first_turn_detection(self):
         self.assertTrue(router._is_first_turn_input(request()["input"]))
         self.assertFalse(router._is_first_turn_input([]))

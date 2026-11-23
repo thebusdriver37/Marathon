@@ -689,7 +689,7 @@ def _starter_responses_bodies(request: dict[str, Any]) -> list[dict[str, Any]]:
     """
     base = {
         key: copy.deepcopy(value) for key, value in request.items()
-        if key not in {"input", "stream", "previous_response_id", "background", "store"}
+        if key not in {"input", "stream", "previous_response_id", "background", "store", "generate"}
     }
     initial = copy.deepcopy(_leading_context_items(request))
     return [
