@@ -1862,6 +1862,31 @@ context = 32768
         self.assertIn(profile.slug, state.prewarmed_starter_slot_models)
         self.assertNotIn(profile.slug, state.starter_prewarm_tasks)
 
+    def test_warmup_without_slots_still_loads_the_model(self) -> None:
+        profile = replace(fixture_profile(), supports_slots=False)
+        state = object.__new__(router_module.RouterState)
+        state._closing = False
+        state.starter_cache_enabled = True
+        state.live_slot_by_model = {}
+        state.starter_prewarm_tasks = {}
+        state.ensure_model_async = mock.AsyncMock(return_value=profile)
+        state.prepare_starter_cache = mock.AsyncMock()
+        state.telemetry = mock.Mock()
+
+        async def run_prewarm() -> tuple[dict[str, object], dict[str, object]]:
+            first = state.schedule_starter_cache_prewarm(profile, {"input": []}, "warm-response", "session-a")
+            again = state.schedule_starter_cache_prewarm(profile, {"input": []}, "warm-response-2", "session-a")
+            await state.starter_prewarm_tasks[profile.slug]
+            return first, again
+
+        first, again = asyncio.run(run_prewarm())
+
+        self.assertEqual(first, {"status": "scheduled", "kind": "model-load"})
+        self.assertEqual(again["status"], "already-scheduled")
+        state.ensure_model_async.assert_awaited_once_with(profile.slug)
+        state.prepare_starter_cache.assert_not_awaited()
+        self.assertNotIn(profile.slug, state.starter_prewarm_tasks)
+
     def test_background_prewarm_prefers_a_conversation_checkpoint(self) -> None:
         profile = fixture_profile()
         state = object.__new__(router_module.RouterState)
