@@ -4757,14 +4757,17 @@ class RouterState:
         if getattr(self, "pool_backend", None) and self.pool_handle is None:
             return {"status": "skipped", "reason": "no local worker reserved for optional warmup"}
 
-        if not profile.supports_slots and profile.cache.starter_prefill:
-            return self._schedule_engine_starter_prewarm(profile, request)
-        if (
-            getattr(self, "_closing", False)
-            or not getattr(self, "starter_cache_enabled", False)
-            or not profile.supports_slots
-            or profile.slug in self.live_slot_by_model
-        ):
+        if getattr(self, "_closing", False) or profile.slug in self.live_slot_by_model:
+            return {"status": "skipped"}
+        if not profile.supports_slots:
+            if profile.cache.starter_prefill and getattr(self, "starter_cache_enabled", False):
+                # Engine-stored starter (Inkling with cache_backend = "maya"): load the worker, then
+                # prefill and save the starter while the owner types.
+                return self._schedule_engine_starter_prewarm(profile, request)
+            # No slot to restore, but a warmup still says this model is about to be used (Majesty sends one
+            # while the owner types): load its worker now, so the first request does not wait for the load.
+            return self._schedule_model_load(profile)
+        if not getattr(self, "starter_cache_enabled", False):
             return {"status": "skipped"}
 
         previous = self.starter_prewarm_tasks.get(profile.slug)
@@ -4842,6 +4845,38 @@ class RouterState:
         finally:
             if self.starter_prewarm_tasks.get(profile.slug) is current_task:
                 self.starter_prewarm_tasks.pop(profile.slug, None)
+
+    def _schedule_model_load(self, profile: ModelProfile) -> dict[str, Any]:
+        """Load a model with no slot cache in the background; a model switch cancels it like any starter prewarm."""
+
+        previous = self.starter_prewarm_tasks.get(profile.slug)
+        if previous is not None and not previous.done():
+            return {"status": "already-scheduled", "kind": "model-load"}
+
+        async def load() -> None:
+            current_task = asyncio.current_task()
+            started = time.perf_counter()
+            try:
+                await self.ensure_model_async(profile.slug)
+                self.telemetry.emit(
+                    "router.warmup.model_loaded",
+                    {"profile_slug": profile.slug, "ms": (time.perf_counter() - started) * 1000.0},
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.telemetry.emit(
+                    "router.warmup.model_load_failed",
+                    {"profile_slug": profile.slug, "error": str(error)[:300]},
+                )
+            finally:
+                if self.starter_prewarm_tasks.get(profile.slug) is current_task:
+                    self.starter_prewarm_tasks.pop(profile.slug, None)
+
+        self.starter_prewarm_tasks[profile.slug] = asyncio.create_task(
+            load(), name=f"marathon-model-load-{profile.slug}"
+        )
+        return {"status": "scheduled", "kind": "model-load"}
 
     async def _prewarm_starter_cache(
         self,

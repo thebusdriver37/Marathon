@@ -197,3 +197,40 @@ class MayaAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WarmupTests(unittest.TestCase):
+    """A warmup loads the worker for every model without slots; maya also warms its starter."""
+
+    def state(self, starter_enabled=True):
+        state = object.__new__(router.RouterState)
+        state._closing = False
+        state.starter_cache_enabled = starter_enabled
+        state.live_slot_by_model = {}
+        state.starter_prewarm_tasks = {}
+        state.ensure_model_async = mock.AsyncMock()
+        state._schedule_engine_starter_prewarm = mock.Mock(return_value={"status": "scheduled"})
+        state.telemetry = mock.Mock()
+        return state
+
+    def run_warmup(self, state, prof):
+        async def go():
+            result = state.schedule_starter_cache_prewarm(prof, request(), "warm", "conversation-a")
+            task = state.starter_prewarm_tasks.get(prof.slug)
+            if task is not None:
+                await task
+            return result
+        return asyncio.run(go())
+
+    def test_maya_warmup_schedules_the_engine_starter(self):
+        state = self.state()
+        self.assertEqual(self.run_warmup(state, profile()), {"status": "scheduled"})
+        state._schedule_engine_starter_prewarm.assert_called_once()
+        state.ensure_model_async.assert_not_awaited()
+
+    def test_without_starter_or_cache_backend_the_warmup_still_loads_the_worker(self):
+        for prof, enabled in ((profile(cache_backend="engine"), True), (profile(), False)):
+            state = self.state(enabled)
+            self.assertEqual(self.run_warmup(state, prof), {"status": "scheduled", "kind": "model-load"})
+            state._schedule_engine_starter_prewarm.assert_not_called()
+            state.ensure_model_async.assert_awaited_once_with(prof.slug)
