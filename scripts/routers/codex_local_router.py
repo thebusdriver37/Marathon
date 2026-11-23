@@ -690,6 +690,9 @@ def _starter_responses_bodies(request: dict[str, Any]) -> list[dict[str, Any]]:
     base = {
         key: copy.deepcopy(value) for key, value in request.items()
         if key not in {"input", "stream", "previous_response_id", "background", "store", "generate"}
+        # Router-internal annotations (_marathon_*) are popped before a real forward; a warmup
+        # can still carry them, and the engine's Responses validation rejects unknown keys.
+        and not key.startswith("_")
     }
     initial = copy.deepcopy(_leading_context_items(request))
     return [

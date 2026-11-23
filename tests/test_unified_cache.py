@@ -116,9 +116,10 @@ class StarterBodyTests(unittest.TestCase):
 
     def test_a_warmup_request_still_gives_prefillable_bodies(self):
         # Codex warmups carry generate: false; Maya's /cache/prefill rejects that parameter.
-        for body in router._starter_responses_bodies(request(generate=False, store=False)):
+        for body in router._starter_responses_bodies(request(generate=False, store=False, _marathon_web_search_enabled=False)):
             self.assertNotIn("generate", body)
             self.assertNotIn("store", body)
+            self.assertFalse([key for key in body if key.startswith("_")])
 
     def test_first_turn_detection(self):
         self.assertTrue(router._is_first_turn_input(request()["input"]))
