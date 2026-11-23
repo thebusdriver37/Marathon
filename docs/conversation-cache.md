@@ -30,9 +30,17 @@ For `maya-prefix` the router:
 
 Enable for Inkling in the user catalog, on each Inkling `[[external_models]]`
 entry: `cache_backend = "maya"`, with workers running a runtime image that has
-`slot_api.py` (gpu-control `inkling/slot-api`). Without that image the adapter's
+`slot_api.py` (gpu-control image d2e2cece and later; live since 2026-11-22). Without that image the adapter's
 calls fail softly (starter `status = "error"`, checkpoint logged as failed) and
 the native lazy cache keeps working as before.
+
+Warmups: a warmup for a model without slots loads its worker; with an engine
+starter it then prefills the starter while the owner types. A Codex warmup carries
+only the developer context, while the first real turn adds the user-instructions
+and environment envelopes. The router remembers the first turn's leading context
+per scaffold (`engine-starter-contexts.json` in the instance state dir), so later
+warmups build the exact starter the first turn uses (prepare 41 ms, 0 B), and it
+does not rewrite a starter it already stored.
 
 Probe: `scripts/evals/unified_cache_probe.py` runs one yardstick (new session,
 turns, switch, idle checkpoint, resume after restart, cold control) through an
